@@ -1,7 +1,7 @@
 # Adlaire DB 仕様書（プロトタイプ版）
 
-**バージョン：** 1.3  
-**ステータス：** 確定  
+**バージョン：** 2.0  
+**ステータス：** 設計レビュー中  
 **最終更新：** 2026-09-09  
 
 ---
@@ -21,16 +21,53 @@ Rust で実装される統合DBエンジン。データ整合性・保全・可�
 - **外部検証可能性** ：専用クライアント不要でファイルから直接ハッシュチェーンを検証できる
 - **デプロイ簡易性** ：シングルバイナリ起動を第一級市民とする（Docker は選択肢の一つ）
 
-### 1.3 プロトタイプ スコープ
-- **ネットワークサーバーモード のみ** ：TCP（ポート 9876）+ REST API（ポート 8080）
-- **ファイルベース設計** ：複数ファイルで構成（単一ファイルではない）
-- **シングルバイナリ起動** ：`./adlaire-db --data ./mydb --port 9876` で即起動
-- JSONデータソース対応
-- CRUD（作成・読取・更新・削除）全て対応（ただし Delete は論理削除のみ → 3.1.3 参照）
-- JOIN 機能サポート
-- ACID トランザクション機構
-- SQLite データ移行ツール（JSON 経由インポート）
-- **将来の分散対応を視野に入れた設計**（初期はシングルマシン実装）
+### 1.3 Phase 1 スコープ（含める）
+
+**プラットフォーム：**
+- Rust / Linux / シングルバイナリ起動（`./adlaire-db --data ./mydb --port 9876`）
+- シングルノード・単一 Writer（同時書き込みプロセスは 1 つ、ファイルロックで強制）
+
+**プロトコル：TCP のみ（ポート 9876）**  
+REST と独自 TCP の同時提供は後回し。Phase 1 では TCP カスタムプロトコル 1 本に絞る。
+
+**ストレージ：**
+- 順序付き KV（キーは辞書順ソートを保持）
+- append-only WAL（書き込みの唯一の正本。現在状態・インデックスは WAL から再構築できる派生物）
+- クラッシュリカバリ（再起動時に WAL から現在状態とインデックスを再構築）
+- スナップショット（WAL 肥大化を防ぐための定期圧縮スナップショット）
+
+**データ操作：**
+- CRUD（作成・読取・更新・論理削除）
+- 複数キー ACID トランザクション
+- イベント履歴（すべての変更がハッシュチェーンとして永続化）
+- 論理削除のみ（物理削除 API は提供しない → 3.1.3 参照）
+
+**整合性・保全：**
+- レコード単位チェックサム（ペイロードを含めたハッシュ → 1.5 参照）
+- 署名済み外部チェックポイント（第三者が WAL なしで一時点の整合性を検証できる）
+- 保全異常時の全体ロック（チェックサム不一致・チェーン断絶を検知したら自動上書きせず DB をロック）
+- バックアップと復元検証（バックアップからの復元後にハッシュチェーン整合性を検証）
+
+**移行：**
+- SQLite 移行のための型付きエクスポート／インポート（型情報・制約・検証込み）
+
+### 1.3.1 後回し（Phase 1 スコープ外）
+
+以下は Phase 1 には含めない。仕様書内の対応セクションには「後回し」の明示がある。
+
+| 項目 | 理由 |
+|------|------|
+| JOIN | 複数キー結合はアプリ層で代替可能。コア実装を複雑にしない |
+| 複数シャード | シングルノードで十分な規模を対象とする |
+| レプリケーション | WAL の正本設計確立が先決 |
+| 分散トランザクション | レプリケーション完成後 |
+| 永続 B+Tree の独自実装 | Phase 1 は再構築可能インデックスで対応 |
+| REST と独自 TCP の同時提供 | プロトコルは 1 本に絞る |
+| 保存時暗号化 | TLS でのトランスポート暗号化を優先 |
+| JWT | Phase 1 は API キー認証 |
+| Prometheus / Grafana 統合 | 構造化ログで代替。メトリクス収集は後回し |
+| 自動フェイルオーバー | シングルノードなので不要 |
+| SQL Layer | KV + イベント API で十分 |
 
 ### 1.4 競合との差別化
 
@@ -44,33 +81,65 @@ Rust で実装される統合DBエンジン。データ整合性・保全・可�
 | 分散対応 | あり | ネイティブ | 将来 Phase 2–4 |
 | 対象規模 | 中〜大 | 大 | **小〜中（スケールアップ可能）** |
 
+### 1.5 設計不変条件（Design Invariants）
+
+実装のあらゆる判断はこの不変条件を破らないことを最優先とする。これらは後から変更できない根本的な約束事であり、機能追加より常に優先される。
+
+**I-1：WAL は書き込みの唯一の正本**  
+現在状態ファイルとインデックスは WAL から再構築できる派生物。WAL への書き込みが完了していないデータは存在しないものとみなす。WAL への `fsync` が完了するまでクライアントへの成功応答を返さない。
+
+**I-2：ハッシュ対象にはペイロードを含める**  
+各 WAL エントリのハッシュは `hash = SHA-256(prev_hash || tx_id || timestamp || event_type || key || payload)` とする。ペイロードを除外したハッシュは改ざん検知として機能しない。
+
+**I-3：保全異常時は自動上書きせず全体をロック**  
+起動時・トランザクション完了時にチェックサム検証・ハッシュチェーン検証を実施する。不一致を検出した場合、DB 全体を read-only ロックし、管理者の明示的な承認なしに自動修復・上書きを行わない。
+
+**I-4：論理削除のみ提供**  
+物理削除 API は提供しない。Delete 操作は「削除済み」状態への遷移と Deleted イベントの WAL 記録のみ行う。
+
+**I-5：単一 Writer の強制**  
+`.lock` ファイルによるプロセスレベルの排他制御を起動時に確立する。ロック取得失敗は起動エラーとして扱う（サイレントに複数プロセスが共存しない）。
+
+**I-6：スナップショット・インデックスの検証可能性**  
+スナップショットとインデックスが WAL から正しく再構築されることを定期的に検証する手段を提供する（`--verify-snapshot` フラグ）。
+
+**I-7：外部チェックポイントの不変性**  
+署名済み外部チェックポイントは一度発行したら変更不可。チェックポイントは WAL の任意の地点での状態の「第三者検証可能な証明」として機能する。
+
+**I-8：クラッシュ後の状態遷移を明示**  
+クラッシュ後の再起動では WAL の末尾を検査し、「コミット済み」「未コミット（ロールバック対象）」「部分書き込み（破損候補）」の 3 状態を判定する手順を実装する。
+
 ---
 
 ## 2. アーキテクチャ
 
 ### 2.1 全体構成
 
+WAL（Write-Ahead Log）を書き込みの唯一の正本とする。現在状態・インデックス・チェックポイントはすべて WAL から派生する。
+
 ```
-┌─────────────────────────────────────┐
-│     Query Interface Layer           │
-│  ├─ KV Store API                    │
-│  │  (Get, Set, Delete, Scan)        │
-│  └─ Event Query API                 │
-│     (GetHistory, FollowChain)       │
-├─────────────────────────────────────┤
-│     JOIN Engine Layer               │
-│  (複数キーの結合ロジック)            │
-├─────────────────────────────────────┤
-│     Transaction / ACID Layer        │
-│  (ロック、ロールバック、一貫性)      │
-├─────────────────────────────────────┤
-│     Core Storage Engine             │
-│  (KV ストア + イベント型)            │
-├─────────────────────────────────────┤
-│     Persistence Layer               │
-│  (ファイルI/O、ストレージ形式)       │
-└─────────────────────────────────────┘
+クライアント（TCP）
+        │
+        ▼
+┌───────────────────┐
+│  トランザクション管理  │  複数キー ACID、単一 Writer、ファイルロック
+└────────┬──────────┘
+         │ WAL エントリ（fsync 完了で成功応答）
+         ▼
+┌───────────────────┐
+│  WAL・イベント正本  │  append-only、ハッシュチェーン
+│  （wal.bin）      │  ← 書き込みの唯一の正本
+└──┬────────┬───────┘
+   │        │        │
+   ▼        ▼        ▼
+現在状態   順序付き   署名済み
+スナップ   KVインデックス  外部チェック
+ショット   （再構築可能）  ポイント
+（再構築                 （外部検証用）
+ 可能）
 ```
+
+**不変条件：** スナップショットとインデックスが破損しても WAL から完全に再構築できる。WAL を失った場合はデータ損失。
 
 ### 2.2 データモデル
 
@@ -108,377 +177,145 @@ enum EventType {
 }
 ```
 
-### 2.2 ファイルベース構成（ネットワークサーバーモード）
+### 2.2 ストレージ構成（Phase 1：シングルノード）
 
-#### 2.2.1 ストレージ構成（Phase 1：シングルマシン）
-
-Adlaire DB サーバーは、**最小3ファイル構成** でデータを管理。これにより、データ整合性を保ちながら、シンプルで拡張性のある設計を実現。
+#### 2.2.1 ディレクトリ構成
 
 ```
-adlaire_db/（ディレクトリ）
-├── .lock                # ファイルロック（排他制御用）
-├── shard_0/
-│   ├── metadata.dat     # メタデータ（Version、チェックサム、バージョン情報、クラスタ情報）
-│   ├── data.kv          # KV Store + イベントログ（複合）
-│   └── txlog.dat        # トランザクションログ + ジャーナルログ（WAL）
-├── shard_1/
-│   ├── metadata.dat
-│   ├── data.kv
-│   └── txlog.dat
-├── shard_2/
-│   ├── metadata.dat
-│   ├── data.kv
-│   └── txlog.dat
-├── shard_3/
-│   ├── metadata.dat
-│   ├── data.kv
-│   └── txlog.dat
-└── ...（複数シャード）
-
-【ロールバック用バージョン保持】
-
-shard_0_v1/              # 1世代前のバージョン
-├── metadata.dat
-├── data.kv
-└── txlog.dat
-
-shard_0_v2/              # 2世代前のバージョン
-├── metadata.dat
-├── data.kv
-└── txlog.dat
+adlaire_db/（データディレクトリ）
+├── .lock                  # プロセスレベル排他ロック（起動時に取得、終了時に解放）
+├── wal.bin                # append-only WAL（書き込みの唯一の正本）
+├── snapshot.bin           # 現在状態スナップショット（WAL から再構築可能な派生物）
+├── index.bin              # 順序付き KV インデックス（WAL から再構築可能な派生物）
+├── metadata.json          # DB メタデータ（WAL シーケンス番号、スナップショット基点など）
+└── checkpoints/
+    ├── cp-00001.json      # 署名済み外部チェックポイント（不変）
+    ├── cp-00001.sig       # チェックポイントの署名
+    └── ...
 ```
 
-#### 2.2.2 整合性向上施策
+**設計原則：**
+- `wal.bin` が失われたらデータ損失。`snapshot.bin` と `index.bin` が失われても WAL から再構築できる
+- 複数シャード・shard_map.json は後回し（→ 1.3.1 参照）
 
-##### 2.2.2.1 チェックサム/ハッシュ値による改ざん検知
+#### 2.2.2 WAL バイナリ形式
 
-**実装方法：**
+各 WAL エントリは固定ヘッダ + 可変長ペイロードで構成する。
+
 ```
-各ファイルごとに SHA256 ハッシュ値を計算・保存
+WAL エントリ構造:
 
-metadata.json.sha256:
-  # メタデータのハッシュ値
-  sha256=a3c4f2e8d9b1c6a7e2f8...
+[Magic: 4B]["ADLW"]
+[Entry Length: 4B]          # ヘッダ含む全体長
+[Sequence Number: 8B]       # 単調増加 (u64)
+[TX ID: 8B]                 # トランザクション ID
+[Timestamp: 8B]             # Unix ナノ秒 (i64)
+[Entry Type: 1B]            # → 下表
+[Key Length: 2B]
+[Key: N bytes]
+[Payload Length: 4B]        # 0 の場合あり（Commit / Abort レコード）
+[Payload: M bytes]          # JSON バイト列
+[Hash: 32B]                 # SHA-256(prev_hash || seq || tx_id || ts || type || key || payload)
+                            # ← ペイロードを含めること（I-2 参照）
+[CRC32: 4B]                 # エントリ全体の破損検知用 CRC
 
-data.kv.sha256:
-  # KV Store のハッシュ値
-  sha256=b4d5e3f9a2c7d8b6e3f9...
-
-events.log.sha256:
-  # イベントログのハッシュ値
-  sha256=c5e6f4a0b3d8e9c7f4a0...
+Entry Type:
+  0x01 = BEGIN        # トランザクション開始
+  0x02 = WRITE        # キー書き込み（Set / LogicalDelete）
+  0x03 = COMMIT       # コミット完了マーカー
+  0x04 = ABORT        # アボートマーカー
+  0x05 = CHECKPOINT   # スナップショット基点マーカー
 ```
 
-**チェック処理：**
+**fsync 境界：** COMMIT エントリの書き込み完了後に `fsync()` を呼び出し、その完了をもってクライアントへ成功応答を返す。
+
+#### 2.2.3 クラッシュリカバリの状態判定
+
+再起動時に WAL 末尾を検査し、3 状態を判定する（I-8 参照）：
+
+```
+COMMITTED:   BEGIN → WRITE(s) → COMMIT が揃っている
+             → スナップショット・インデックスに適用して完了
+
+PENDING:     BEGIN → WRITE(s) まであるが COMMIT がない
+             → ロールバック対象（イベントログに Aborted イベントを記録）
+
+PARTIAL:     CRC32 エラー、または Magic 境界が壊れている末尾エントリ
+             → 部分書き込みと判定。スキップしてロールバック扱い
+             → 保全異常ログを出力し、管理者に通知（自動修復しない）
+```
+
 ```rust
-fn verify_file_integrity(file_path: &str, expected_hash: &str) -> bool {
-    let file_content = read_file(file_path);
-    let computed_hash = sha256(&file_content);
-    computed_hash == expected_hash
-}
-```
+fn recover_on_startup(wal: &mut WalReader) -> Result<RecoverySummary> {
+    let mut pending: HashMap<TxId, Vec<WalEntry>> = HashMap::new();
+    let mut committed = 0u64;
+    let mut rolled_back = 0u64;
 
-**整合性チェック：サーバー起動時、トランザクション完了時**
-
-##### 2.2.2.2 メタデータの冗長化
-
-**実装方法：**
-```json
-// metadata.json（プライマリ）
-{
-  "version": "1.0",
-  "shard_count": 4,
-  "created_at": "2026-09-09T12:00:00Z",
-  "cluster_nodes": [],
-  "last_checkpoint": {
-    "timestamp": "2026-09-09T12:30:00Z",
-    "hash": "a3c4f2e8d9b1c6a7e2f8..."
-  }
-}
-
-// metadata.json.bak（バックアップ）
-// 定期的に metadata.json をコピー
-// 片方が破損時、もう片方から復旧
-```
-
-**冗長化戦略：**
-- メタデータ更新時：プライマリ → バックアップ → チェックサム の順序で書き込み
-- 片方が破損時：他方から復旧
-- ハッシュ検証で健全性確認
-
-##### 2.2.2.3 トランザクション日誌の強化
-
-**txlog.dat フォーマット：**
-```
-[TX ID: 8B][TX Type: 1B][Timestamp: 8B][Status: 1B][Data Length: 4B][Data][Checksum: 32B]
-     ↓            ↓            ↓           ↓           ↓        ↓        ↓
-  一意識別子   操作種別     タイムスタンプ  実行状態  ペイロード長  内容   SHA256
-```
-
-**トランザクション状態：**
-```
-0x00 = PENDING    # トランザクション開始（未コミット）
-0x01 = COMMITTED  # コミット完了
-0x02 = ABORTED    # ロールバック
-0x03 = FAILED     # エラーで失敗
-```
-
-**リカバリプロセス：**
-```rust
-fn recover_from_txlog() {
-    let log_entries = read_txlog("shard_0/txlog.dat");
-    
-    for entry in log_entries {
-        match entry.status {
-            PENDING => {
-                // 未完了トランザクション → ロールバック
-                rollback_transaction(entry.tx_id);
-            }
-            COMMITTED => {
-                // コミット済み → 何もしない
-            }
-            ABORTED | FAILED => {
-                // 既にロールバック済み
+    for entry in wal.scan_from_last_checkpoint()? {
+        match entry {
+            Ok(e) => match e.entry_type {
+                EntryType::Begin   => { pending.insert(e.tx_id, vec![e]); }
+                EntryType::Write   => { pending.entry(e.tx_id).or_default().push(e); }
+                EntryType::Commit  => { apply_tx(pending.remove(&e.tx_id)); committed += 1; }
+                EntryType::Abort   => { pending.remove(&e.tx_id); rolled_back += 1; }
+                EntryType::Checkpoint => { /* スナップショット基点: skip */ }
+            },
+            Err(WalError::Crc32Mismatch | WalError::Truncated) => {
+                // PARTIAL: ロールバック扱い + 保全異常ログ
+                log_integrity_anomaly(IntegrityAnomaly::PartialWrite);
+                break; // 末尾の部分書き込みはここで打ち切る
             }
         }
     }
+    // 残った pending はすべて PENDING 状態 → ロールバック
+    for (tx_id, _) in pending { record_abort_event(tx_id); rolled_back += 1; }
+
+    Ok(RecoverySummary { committed, rolled_back })
 }
 ```
 
-##### 2.2.2.4 ファイルロック機構
+#### 2.2.4 保全異常時の全体ロック（I-3 参照）
 
-**実装方法（.lock ファイル）：**
-```
-.lock ファイルに以下の情報を記録：
+WAL 整合性チェック（起動時・コミット完了後）で以下のいずれかを検知した場合：
+- CRC32 エラー（ディスクビット腐敗）
+- ハッシュチェーン断絶（`hash` が前エントリの値と連鎖しない）
+- スナップショットと WAL の乖離（`--verify-snapshot` 検証失敗）
 
-{
-  "lock_holder": "server_instance_1",
-  "pid": 12345,
-  "timestamp": "2026-09-09T12:00:00Z",
-  "expires_at": "2026-09-09T12:05:00Z"
-}
-```
+DB を **read-only ロック**（新規書き込みを拒否）し、エラーログと終了コード `2` で終了する。自動修復・上書きは行わない。
 
-**ロック取得：**
 ```rust
-fn acquire_lock(lock_path: &str, timeout: Duration) -> Result<LockGuard> {
-    let deadline = Instant::now() + timeout;
-    
-    loop {
-        if try_create_lock_file(lock_path) {
-            return Ok(LockGuard::new(lock_path));
-        }
-        
-        // ロック持有者が死亡（タイムアウト）したかチェック
-        if is_lock_expired(lock_path) {
-            remove_stale_lock(lock_path);
-            continue;
-        }
-        
-        if Instant::now() > deadline {
-            return Err(LockTimeout);
-        }
-        
-        sleep(Duration::from_millis(100));
-    }
+fn lock_db_on_integrity_failure(reason: IntegrityAnomaly) -> ! {
+    error!("INTEGRITY FAILURE: {:?} — DB locked. Manual recovery required.", reason);
+    write_lock_file(LockReason::IntegrityFailure(reason));
+    std::process::exit(2);
 }
 ```
 
-**複数プロセスからのアクセス制御：**
-- プロセス1：.lock 取得 → ファイル操作 → .lock 解放
-- プロセス2：.lock 待機 → タイムアウト時は古いロックを削除
-- デッドロック検知：タイムスタンプが古いロックは強制削除
+#### 2.2.5 署名済み外部チェックポイント
 
-##### 2.2.2.5 ジャーナルログ（Write-Ahead Logging, WAL）
+WAL の任意の地点での状態を第三者が検証できる証明を発行する。
 
-**WAL の動作：**
-```
-Client が更新リクエスト
-  ↓
-1. journal.log にトランザクション記録（書き込み待機）
-  ↓
-2. メモリに操作内容をバッファリング
-  ↓
-3. journal.log にコミットマーク追加
-  ↓
-4. 実際のファイルを更新（data.kv、events.log等）
-  ↓
-5. チェックサムを計算・保存
-  ↓
-6. Client にレスポンス
-```
-
-**障害時のリカバリ：**
-```rust
-fn recover_from_wal(journal_path: &str) {
-    let entries = read_journal(journal_path);
-    
-    for entry in entries {
-        match entry.state {
-            NOT_COMMITTED => {
-                // 障害発生前に未コミット → スキップ（ロールバック）
-            }
-            COMMITTED => {
-                // コミット済み → ファイル更新を再実行
-                apply_changes(entry);
-            }
-            APPLIED => {
-                // 既に適用済み → スキップ
-            }
-        }
-    }
-    
-    // journal.log をクリア
-    truncate_journal(journal_path);
-}
-```
-
-**journal.log フォーマット：**
-```
-[TX ID: 8B][State: 1B][Timestamp: 8B][Data Length: 4B][Data][Checksum: 32B]
-
-State:
-  0x00 = NOT_COMMITTED  # 未コミット
-  0x01 = COMMITTED      # コミット（この後ファイル更新）
-  0x02 = APPLIED        # ファイル更新完了
-```
-
-##### 2.2.2.6 バージョニングとロールバック
-
-**ファイル構成（バージョン管理）：**
-```
-shard_0/data.kv                    # 現在のバージョン
-shard_0_v1/data.kv                 # 1世代前
-shard_0_v2/data.kv                 # 2世代前
-shard_0_v3/data.kv                 # 3世代前
-
-メタデータに世代情報を記録：
-
-{
-  "shard_0": {
-    "current_version": 4,
-    "versions": [
-      {"version": 4, "timestamp": "2026-09-09T12:30:00Z", "hash": "abc..."},
-      {"version": 3, "timestamp": "2026-09-09T12:25:00Z", "hash": "def..."},
-      {"version": 2, "timestamp": "2026-09-09T12:20:00Z", "hash": "ghi..."}
-    ],
-    "retention_policy": "keep_last_3_versions"
-  }
-}
-```
-
-**ロールバック手順：**
-```rust
-fn rollback_to_version(shard_id: u32, version: u32) -> Result<()> {
-    // 1. トランザクションロック取得
-    let _lock = acquire_lock(&format!("shard_{}.lock", shard_id))?;
-    
-    // 2. ロールバック対象バージョンのハッシュ検証
-    let target = get_version_metadata(shard_id, version)?;
-    verify_file_integrity(&format!("shard_{}_v{}", shard_id, version), &target.hash)?;
-    
-    // 3. journal.log に ROLLBACK 記録
-    log_rollback_intent(shard_id, version)?;
-    
-    // 4. ファイル復元
-    copy_file(&format!("shard_{}_v{}/data.kv", shard_id, version),
-              &format!("shard_{}/data.kv", shard_id))?;
-    
-    // 5. チェックサム再計算
-    recalculate_checksums(shard_id)?;
-    
-    // 6. メタデータ更新
-    update_current_version(shard_id, version)?;
-    
-    // 7. journal.log に ROLLBACK 完了記録
-    log_rollback_complete(shard_id, version)?;
-    
-    Ok(())
-}
-```
-
-**バージョン保持ポリシー：**
 ```json
+// checkpoints/cp-00001.json
 {
-  "retention_policy": {
-    "keep_versions": 3,
-    "keep_duration_hours": 24,
-    "compression": "gzip_old_versions"
-  }
+  "checkpoint_seq": 1,
+  "wal_sequence_at": 100042,
+  "issued_at": "2026-09-09T12:00:00Z",
+  "key_count": 9823,
+  "root_hash": "SHA-256 of ordered (key, hash) pairs at this WAL sequence",
+  "issuer": "adlaire-db-v2.0",
+  "signature_algorithm": "Ed25519"
 }
+// checkpoints/cp-00001.sig  ← Ed25519 署名バイト（hex）
 ```
 
-#### 2.2.3 整合性チェックの実行タイミング
+**検証手順（専用クライアント不要）：**
+1. `cp-NNNNN.json` と `cp-NNNNN.sig` を取得
+2. 公開鍵で `sig` を検証
+3. WAL（または `event_log.jsonl` エクスポート）を順に読み、`root_hash` を自分で計算
+4. 計算値と `root_hash` が一致すればチェックポイント時点の整合性が証明される
 
-**metadata.json**
-```json
-{
-  "version": "1.0",
-  "shard_count": 4,
-  "created_at": "2026-09-09T12:00:00Z",
-  "cluster_nodes": []
-}
-```
-
-**shard_map.json**
-```json
-{
-  "shards": [
-    {"id": 0, "key_range": ["0000", "3fff"], "node": "localhost:9876"},
-    {"id": 1, "key_range": ["4000", "7fff"], "node": "localhost:9876"},
-    {"id": 2, "key_range": ["8000", "bfff"], "node": "localhost:9876"},
-    {"id": 3, "key_range": ["c000", "ffff"], "node": "localhost:9876"}
-  ]
-}
-```
-
-**data.kv（バイナリ形式）**
-```
-[Key Length: 4B][Key][Value Length: 4B][Value][Key Length: 4B][Key]...
-```
-
-**events.log（アペンド・オンリー）**
-```
-[Timestamp: 8B][Event Type: 1B][Data Length: 4B][Event Data]...
-```
-
-**txlog.dat（トランザクションログ）**
-```
-[TX ID: 8B][TX Type: 1B][Timestamp: 8B][Status: 1B][Data Length: 4B][Data]...
-```
-
-#### 2.2.3 将来の分散対応設計
-
-ファイル構成を分散対応として設計し、将来以下を実装可能：
-
-**Phase 2：レプリケーション（Master-Replica）**
-```
-Master Node: shard_0, shard_1, shard_2, shard_3
-  ↓ (複製)
-Replica Node A: shard_0, shard_1, shard_2, shard_3
-  ↓ (複製)
-Replica Node B: shard_0, shard_1, shard_2, shard_3
-
-metadata.json で "cluster_nodes" に Replica を追加
-```
-
-**Phase 3：シャーディング（複数ノード分散）**
-```
-Node A: Shard 0, 1
-Node B: Shard 2, 3
-Node C: Shard 4, 5
-
-shard_map.json でシャード配置を管理
-各クライアント要求に対し、Coordinator が適切なノードにルーティング
-```
-
-**Phase 4：分散トランザクション（2-Phase Commit）**
-```
-Client が複数シャードにまたがるトランザクション実行
-→ Coordinator が 2-Phase Commit で調整
-→ すべてのシャードで ACID を保証
-→ 一部失敗時は全ノードロールバック
-```
+**発行タイミング：** `adlaire-db checkpoint --sign <keyfile>` コマンドで手動発行（Phase 1）。
 
 ---
 
@@ -597,72 +434,105 @@ pub fn get_events_since(&self, timestamp: i64) -> Result<Vec<Event>>
 
 ### 4.3 外部検証（External Verification）
 
-**設計思想：** 専用クライアントを必要とせず、`data.kv` と `event_log.jsonl` を受け取った第三者が独自にハッシュチェーンを検証できる。これは immudb との重要な差異であり、Adlaire DB の外部検証可能性の核心。
+**設計思想：** 専用クライアントを必要とせず、`wal.bin` の JSONL エクスポートと署名済みチェックポイントを受け取った第三者が独自にハッシュチェーンを検証できる。これは immudb との重要な差異であり、Adlaire DB の外部検証可能性の核心。
 
 #### 4.3.1 検証ファイル仕様
 
-サーバーが以下のファイルを監査者に提供するだけで検証が完結する：
+CLI コマンド一本で監査用アーカイブを生成する（Phase 1 は TCP 経由ではなくローカル CLI のみ）：
 
-```
-adlaire_db/
-├── shard_0/
-│   ├── event_log.jsonl      # イベントログ（JSONL形式、人間可読）
-│   └── metadata.dat         # チェーン先頭ハッシュ含む
-└── verification_manifest.json  # 各ファイルの SHA256 + 検証手順書
+```bash
+adlaire-db export-audit --data ./mydb --out ./audit-2026-09-09.tar.gz
 ```
 
-#### 4.3.2 検証アルゴリズム（疑似コード）
+アーカイブ内容：
+
+```
+audit-2026-09-09/
+├── wal-export.jsonl        # WAL エントリをすべて JSONL 形式で出力（人間可読）
+├── checkpoints/
+│   ├── cp-00001.json       # 署名済みチェックポイント（不変）
+│   └── cp-00001.sig        # Ed25519 署名
+└── VERIFY.md               # 検証手順書（ハッシュ計算式を人間語で説明）
+```
+
+#### 4.3.2 WAL エクスポート JSONL 形式
+
+各行が WAL の 1 エントリに対応する：
+
+```json
+{"seq":1,"tx_id":1,"ts":1757500000000000000,"type":"BEGIN","key":"","payload":"{}","prev_hash":"0000...0000","hash":"aaa..."}
+{"seq":2,"tx_id":1,"ts":1757500000001000000,"type":"WRITE","key":"user:1","payload":"{\"name\":\"Alice\"}","prev_hash":"aaa...","hash":"bbb..."}
+{"seq":3,"tx_id":1,"ts":1757500000002000000,"type":"COMMIT","key":"","payload":"{}","prev_hash":"bbb...","hash":"ccc..."}
+```
+
+#### 4.3.3 検証アルゴリズム（疑似コード）
+
+ハッシュ計算は I-2 の定義と完全一致する。任意の言語で実装可能。
 
 ```python
-# 任意のプログラミング言語で実装可能（専用クライアント不要）
-def verify_chain(event_log_path):
-    events = load_jsonl(event_log_path)
-    prev_hash = "0" * 64  # genesis hash
+import hashlib, json
 
-    for event in events:
-        # イベント内容 + prev_hash から SHA256 を再計算
-        computed = sha256(event["id"] + event["event_type"] +
-                          event["key"] + str(event["timestamp"]) +
-                          str(event["transaction_id"]) + prev_hash)
-        
-        if computed != event["hash"]:
-            return False, f"改ざん検出: event_id={event['id']}"
-        
-        prev_hash = event["hash"]
-    
+def verify_chain(wal_jsonl_path):
+    prev_hash = bytes(32)  # genesis: 32 zero bytes
+
+    with open(wal_jsonl_path) as f:
+        for line in f:
+            e = json.loads(line)
+
+            # I-2: SHA-256(prev_hash || seq || tx_id || ts || type || key || payload)
+            data = (
+                prev_hash
+                + e["seq"].to_bytes(8, "big")
+                + e["tx_id"].to_bytes(8, "big")
+                + e["ts"].to_bytes(8, "big", signed=True)
+                + e["type"].encode()
+                + e["key"].encode()
+                + e["payload"].encode()
+            )
+            computed = hashlib.sha256(data).hexdigest()
+
+            if computed != e["hash"]:
+                return False, f"改ざん検出: seq={e['seq']}"
+
+            prev_hash = bytes.fromhex(e["hash"])
+
     return True, "チェーン検証成功"
 ```
 
-#### 4.3.3 検証 API エンドポイント
+#### 4.3.4 署名済みチェックポイントによる時点検証
+
+チェックポイントは WAL シーケンス時点のルートハッシュを Ed25519 で署名したもの（I-7：一度発行したら不変）。第三者は WAL なしでも一時点の整合性を検証できる。
 
 ```bash
-# 監査用エクスポート（REST API）
-GET /api/v1/audit/export?from=2026-09-01&to=2026-09-09
-
-# レスポンス：event_log.jsonl + verification_manifest.json を tar.gz で返す
-# 監査者はこのファイルを受け取り、上記アルゴリズムで独自検証する
+# 署名検証（標準ツールで実行可能）
+openssl dgst -verify pubkey.pem -signature cp-00001.sig cp-00001.json
 ```
 
-#### 4.3.4 削除の証明
+#### 4.3.5 削除の証明
+
+論理削除（I-4）は WRITE エントリとして WAL に記録される。ペイロードが削除事実を表し、ハッシュチェーンに永続記録される（I-2 によりペイロードはハッシュに含まれる）。
 
 ```json
-// 「user:1 が 2026-09-09 12:30 に削除された」という事実を第三者が検証できる
 {
-  "id": "evt-42",
-  "event_type": "Deleted",
+  "seq": 42,
+  "tx_id": 1001,
+  "ts": 1757503800000000000,
+  "type": "WRITE",
   "key": "user:1",
-  "payload": null,
-  "timestamp": 1757503800000,
-  "transaction_id": 1001,
+  "payload": "{\"__state\":\"deleted\",\"deleted_at\":1757503800000000000}",
   "prev_hash": "abc123...",
   "hash": "def456..."
 }
-// このエントリはハッシュチェーンに永続記録され、削除も改ざんも不可能
 ```
+
+このエントリはハッシュチェーンに永続記録され、事後的な改ざんはチェーン断絶として即座に検出される。
 
 ---
 
 ## 5. JOIN 仕様
+
+> **後回し（Phase 1 スコープ外）**  
+> JOIN はアプリケーション層で複数の Get を組み合わせることで代替できる。コアのストレージ不変条件が確立されるまで実装しない。本セクションは将来の参考仕様として保持する。
 
 ### 5.1 JOIN の概念
 
@@ -799,64 +669,41 @@ struct LockInfo {
 
 ## 7. ストレージ形式
 
-### 7.1 ファイル構成
+ファイル構成の詳細は Section 2.2 に一元化した。以下はファイル種別ごとの補足仕様。
 
-```
-database/
-├── kv_store.bin          // KV データ本体
-├── event_log.jsonl       // イベントログ（JSONL形式）
-└── metadata.json         // メタデータ
-```
+### 7.1 ファイル種別と役割
 
-### 7.2 KV Store ファイル形式
+| ファイル | 種別 | 役割 |
+|----------|------|------|
+| `wal.bin` | **唯一の正本** | append-only WAL。すべての変更はここに先行記録 |
+| `snapshot.bin` | 派生物（再構築可能） | 最新コミット状態の KV スナップショット |
+| `index.bin` | 派生物（再構築可能） | 順序付き KV インデックス（辞書順 Scan 用） |
+| `metadata.json` | 管理データ | WAL シーケンス番号、スナップショット基点、統計 |
+| `checkpoints/*.json+sig` | 不変の証明 | 署名済み外部チェックポイント（発行後変更不可） |
 
-```
-バイナリフォーマット（カスタム）：
+### 7.2 外部エクスポート形式（外部検証・監査用）
 
-[Header]
-  magic: "KVDB" (4 bytes)
-  version: 1 (1 byte)
-  reserved: (3 bytes)
+WAL の内容を人間が読める形式でエクスポートする API を提供する（→ Section 4.3 参照）。
 
-[Records]
-  record_count: u32
-  
-  [Record 1]
-    key_len: u16
-    key: String
-    value_len: u32
-    value: JSON (バイナリ化)
-    version: u64
-    hash: String
-  
-  [Record 2]
-  ...
+```jsonl
+{"seq":1,"tx_id":1001,"ts":"2026-09-09T12:00:00Z","type":"Created","key":"user:1","payload":{"name":"Alice"},"hash":"a3c4...","prev_hash":"0000..."}
+{"seq":2,"tx_id":1001,"ts":"2026-09-09T12:00:00Z","type":"Commit","key":null,"payload":null,"hash":"b4d5...","prev_hash":"a3c4..."}
+{"seq":3,"tx_id":1002,"ts":"2026-09-09T12:01:00Z","type":"Updated","key":"user:1","payload":{"name":"Bob"},"hash":"c5e6...","prev_hash":"b4d5..."}
 ```
 
-### 7.3 イベントログ形式（JSONL）
+このファイルと署名済みチェックポイントがあれば、専用クライアントなしで外部からハッシュチェーンを検証できる。
 
-```
-{"id":"evt-1", "event_type":"Created", "key":"user:1", ...}
-{"id":"evt-2", "event_type":"Updated", "key":"user:1", ...}
-{"id":"evt-3", "event_type":"Deleted", "key":"user:1", ...}
-```
-
-**利点** ：
-- テキストベースで人間が読みやすい
-- ストリーム処理容易
-- JSONデータソースとの相互変換が簡単
-
-### 7.4 メタデータ（metadata.json）
+### 7.3 メタデータ（metadata.json）
 
 ```json
 {
+    "db_version": "2.0",
     "created_at": 1694250000000,
-    "last_updated": 1694250010000,
-    "kv_record_count": 150,
-    "event_log_count": 500,
-    "total_size_bytes": 125000,
-    "chain_valid": true,
-    "last_event_hash": "ABC123..."
+    "wal_sequence": 100042,
+    "snapshot_at_wal_seq": 99500,
+    "last_checkpoint_seq": 1,
+    "last_event_hash": "c5e6f4a0b3d8e9c7f4a0...",
+    "key_count": 9823
 }
 ```
 
@@ -1045,168 +892,184 @@ fn test_recovery_from_event_log() {
 
 ## 11. 実装フェーズ・スケジュール
 
-### 11.1 Phase 1：基本実装（3-4週）
+> **注：** Phase 1 スコープは §1.3 に確定。JOIN・レプリケーション・分散 TX などは後回し（§1.3.1）。分散実装の詳細は §20 を参照。
 
-**目標** ：KV + イベント型（シングルマシン版）の動作
+### 11.1 Phase 1：シングルノード完全実装（6-8週）
 
-| 項目 | 期間 | 内容 |
-|------|------|------|
-| **Week 1-2** | 2週 | KV Store実装、Get/Set/Delete（論理削除）、メモリ管理 |
-| **Week 2-3** | 1.5週 | イベントログ実装、ハッシュチェーン検証、外部検証エクスポート API |
-| **Week 3-4** | 1.5週 | ファイル永続化、ロード機能、イベントログ圧縮ポリシー実装 |
-| **Week 4** | 0.5週 | SQLite 移行ツール（`sqlite-to-adlaire` コマンド、JSON 経由インポート） |
+**目標** ：§1.3 の含める項目をすべて動かす。WAL が唯一の正本として確立した状態でリリースできること。
 
-**成果物** ：
-- KV Store の基本操作が動く（Delete は論理削除のみ）
-- イベント記録・検証が動く
-- ファイルの save/load が動く
-- 外部検証エクスポート（`/api/v1/audit/export`）が動く
-- イベントログ圧縮が動く（手動トリガー）
-- SQLite → Adlaire DB 移行ツールが動く
+| ステップ | 期間 | 内容 |
+|----------|------|------|
+| **Step 1** | Week 1-2 | プロジェクト骨格・WAL 書き込みエンジン<br>・`wal.bin` append-only 書き込み（Magic, CRC32, Entry 構造）<br>・fsync 境界の実装（COMMIT 後に fsync → クライアント応答）<br>・`.lock` によるシングル Writer 強制 |
+| **Step 2** | Week 2-3 | クラッシュリカバリ・スナップショット<br>・起動時 WAL スキャン（COMMITTED / PENDING / PARTIAL 判定）<br>・スナップショット生成・ロード<br>・`--verify-snapshot` フラグ（§I-6） |
+| **Step 3** | Week 3-4 | ACID トランザクション・KV API<br>・Begin / Write / Commit / Abort WAL エントリ<br>・順序付き KV インデックス（再構築可能）<br>・複数キー ACID TX<br>・論理削除（§I-4）|
+| **Step 4** | Week 4-5 | ハッシュチェーン・整合性チェック<br>・レコード単位 SHA-256（I-2 の計算式）<br>・CRC32 不一致・チェーン断絶 → グローバルロック・exit 2（I-3）<br>・`adlaire-db verify` CLI コマンド |
+| **Step 5** | Week 5-6 | 署名済み外部チェックポイント<br>・Ed25519 署名生成・検証<br>・`cp-XXXXX.json` / `.sig` 書き出し（I-7：不変）<br>・外部検証 CLI（§4.3） |
+| **Step 6** | Week 6-7 | TCP プロトコル・バックアップ<br>・TCP カスタムプロトコル実装（§18.1）<br>・バックアップ取得・復元後ハッシュチェーン検証 |
+| **Step 7** | Week 7-8 | SQLite 移行・統合テスト<br>・`adlaire-db migrate-sqlite` コマンド（§12）<br>・型付きエクスポート・インポート・検証<br>・DST（`turmoil`、1000 seeds）・統合テスト一式 |
 
-**テスト** ：ユニットテスト + 基本的な統合テスト
-
----
-
-### 11.2 Phase 2：JOIN 実装（3-4週）
-
-**目標** ：JOIN 機能の実装・テスト
-
-| 項目 | 期間 | 内容 |
-|------|------|------|
-| **Week 1-2** | 2週 | Hash Join実装、スカラー JOIN |
-| **Week 2-3** | 1週 | エラーハンドリング、エッジケース対応 |
-| **Week 3-4** | 1週 | JOIN パフォーマンステスト、最適化 |
-
-**成果物** ：
-- Hash Join が動く
-- 複数キーの結合取得が可能
-- JOIN テストが全てパス
+**Phase 1 完了の定義：**
+- §1.5 の設計不変条件（I-1〜I-8）がすべてテストで証明できる
+- 1000 シード DST が全通過
+- `adlaire-db --verify-snapshot` が正常・改ざんケースで正確に判定する
+- SQLite DB を型情報付きで Adlaire DB に移行できる
+- バックアップ → 復元 → チェーン検証の一連フローが完結する
 
 ---
 
-### 11.3 Phase 3：トランザクション・ACID（2-3週）
+### 11.2 Phase 2：レプリケーション（後回し）
 
-**目標** ：ACID 機構の完全実装
-
-| 項目 | 期間 | 内容 |
-|------|------|------|
-| **Week 1-2** | 1.5週 | ロック機構、トランザクションマネージャー実装 |
-| **Week 2-3** | 1.5週 | MVCC、ロールバック、コンフリクト検出 |
-
-**成果物** ：
-- Begin/Commit/Rollback が動く
-- ロック・デッドロック対策が動く
-- トランザクションテストが全てパス
+> **後回し（§1.3.1・§20 参照）**  
+> WAL 正本設計が Phase 1 で確立した後に着手する。詳細設計は §20.5。
 
 ---
 
-### 11.4 Phase 4：テスト・最適化（1-2週）
+### 11.3 Phase 3：シャーディング（後回し）
 
-**目標** ：全機能テスト + パフォーマンス最適化
+> **後回し（§1.3.1・§20 参照）**  
+> 詳細設計は §20.6。
 
-| 項目 | 期間 | 内容 |
-|------|------|------|
-| **Week 1** | 1週 | CRUD統合テスト、ストレス テスト |
-| **Week 2** | 1週 | パフォーマンス測定、ボトルネック最適化 |
+---
 
-**成果物** ：
-- 全テストケース実装・パス
-- ベンチマーク報告書
-- ドキュメント完成
+### 11.4 Phase 4：分散トランザクション（後回し）
+
+> **後回し（§1.3.1・§20 参照）**  
+> 詳細設計は §20.7。OCC ベース（2PC は使わない）。
 
 ---
 
 ### 11.5 全体スケジュール
 
 ```
-Phase 1 (KV + イベント型)：Weeks 1-4
-  ├─ Week 1-2：KV Store 実装
-  ├─ Week 2-3：イベント実装
-  └─ Week 3-4：永続化実装
+Phase 1 (シングルノード完全実装)：Week 1-8
+  ├─ Step 1：WAL 書き込みエンジン（W1-2）
+  ├─ Step 2：クラッシュリカバリ・スナップショット（W2-3）
+  ├─ Step 3：ACID TX・KV API（W3-4）
+  ├─ Step 4：ハッシュチェーン・整合性チェック（W4-5）
+  ├─ Step 5：署名済み外部チェックポイント（W5-6）
+  ├─ Step 6：TCP プロトコル・バックアップ（W6-7）
+  └─ Step 7：SQLite 移行・統合テスト（W7-8）
 
-Phase 2 (JOIN)：Weeks 5-8
-  ├─ Week 5-6：Hash Join 実装
-  ├─ Week 6-7：エラー処理
-  └─ Week 7-8：最適化
-
-Phase 3 (ACID)：Weeks 9-11
-  ├─ Week 9-10：ロック・トランザクション
-  └─ Week 10-11：MVCC・ロールバック
-
-Phase 4 (テスト・最適化)：Weeks 12-13
-  ├─ Week 12：統合テスト
-  └─ Week 13：最適化
-
-総計：約13週（約3ヶ月）
+Phase 2 (レプリケーション)：後回し
+Phase 3 (シャーディング)：後回し
+Phase 4 (分散 TX)：後回し
 ```
 
 ---
 
-## 12. JSONデータソース対応
+## 12. SQLite 移行・データインポート仕様
 
-### 12.1 JSON入力フォーマット
+Phase 1 の必須機能。`adlaire-db migrate-sqlite` コマンドで SQLite DB を型情報・制約・検証込みで Adlaire DB に移行できる。
 
-```json
-{
-  "operations": [
-    {
-      "op": "create",
-      "key": "user:1",
-      "value": {
-        "name": "John",
-        "email": "john@example.com",
-        "dept_id": "D1"
-      }
-    },
-    {
-      "op": "update",
-      "key": "user:1",
-      "value": {
-        "name": "John",
-        "email": "john.new@example.com",
-        "dept_id": "D1"
-      }
-    },
-    {
-      "op": "delete",
-      "key": "user:1"
-    }
-  ]
-}
+---
+
+### 12.1 移行コマンド仕様
+
+```bash
+# 基本移行（SQLite → Adlaire DB）
+adlaire-db migrate-sqlite \
+  --src ./legacy.db \
+  --data ./mydb \
+  --key-column id \
+  --table-prefix users: \
+  --dry-run         # 実際には書き込まず検証のみ
+
+# エクスポートのみ（Adlaire DB から型付き JSONL を生成）
+adlaire-db export \
+  --data ./mydb \
+  --format jsonl \
+  --out ./export.jsonl
+
+# インポート（型付き JSONL から Adlaire DB へ）
+adlaire-db import \
+  --data ./mydb \
+  --in ./export.jsonl \
+  --verify           # インポート後にハッシュチェーン検証を実施
 ```
 
-### 12.2 JSON出力フォーマット
+### 12.2 型付き JSONL フォーマット（エクスポート・インポート共通）
 
-#### 12.2.1 イベントログ出力
+各行が 1 レコード。型情報・制約・ハッシュを含む。
+
 ```json
-{
-  "events": [
-    {
-      "id": "evt-1",
-      "event_type": "Created",
-      "key": "user:1",
-      "payload": {...},
-      "timestamp": 1694250000000,
-      "hash": "ABC123..."
-    }
-  ]
-}
+{"key":"users:1","schema":{"name":"TEXT NOT NULL","email":"TEXT UNIQUE","age":"INTEGER CHECK(age>=0)","created_at":"DATETIME"},"value":{"name":"Alice","email":"alice@example.com","age":30,"created_at":"2026-01-15T10:00:00Z"},"source_table":"users","source_rowid":1}
+{"key":"users:2","schema":{"name":"TEXT NOT NULL","email":"TEXT UNIQUE","age":"INTEGER CHECK(age>=0)","created_at":"DATETIME"},"value":{"name":"Bob","email":"bob@example.com","age":25,"created_at":"2026-02-01T09:30:00Z"},"source_table":"users","source_rowid":2}
 ```
 
-#### 12.2.2 JOIN 結果出力
-```json
-{
-  "user": {
-    "name": "John",
-    "email": "john@example.com",
-    "dept_id": "D1"
-  },
-  "dept": {
-    "name": "Engineering"
-  }
-}
+フィールド定義：
+
+| フィールド | 型 | 説明 |
+|-----------|-----|------|
+| `key` | string | Adlaire DB のキー（`<prefix>:<rowid>` 形式） |
+| `schema` | object | SQLite の列名 → 型定義（`NOT NULL`, `UNIQUE`, `CHECK` 含む） |
+| `value` | object | レコードの実データ |
+| `source_table` | string | 元 SQLite テーブル名 |
+| `source_rowid` | integer | 元 SQLite rowid（検証用） |
+
+### 12.3 型マッピング（SQLite → Adlaire DB）
+
+| SQLite 型 | JSON 型 | 検証ルール |
+|-----------|---------|-----------|
+| `INTEGER` | number (integer) | 整数値であること |
+| `REAL` | number (float) | 浮動小数点値であること |
+| `TEXT` | string | UTF-8 文字列であること |
+| `BLOB` | string (base64) | base64 エンコード |
+| `DATETIME` | string (ISO8601) | `YYYY-MM-DDTHH:MM:SSZ` 形式 |
+| `BOOLEAN` | boolean | `0`/`1` → `false`/`true` 変換 |
+| `NULL` | null | `NOT NULL` 制約違反は移行エラー |
+
+### 12.4 移行処理フロー
+
 ```
+SQLite DB
+  │
+  ├─ 1. スキーマ読み取り（CREATE TABLE 定義）
+  │       └─ 列名・型・制約（NOT NULL, UNIQUE, CHECK）を抽出
+  │
+  ├─ 2. レコード全件スキャン（SELECT * FROM <table>）
+  │       ├─ 型変換（§12.3 のマッピングに従う）
+  │       ├─ 制約検証（NOT NULL, CHECK 違反 → エラー停止）
+  │       └─ JSONL 行を生成（§12.2 フォーマット）
+  │
+  ├─ 3. Adlaire DB への書き込み（--dry-run 時はスキップ）
+  │       ├─ ACID トランザクション（テーブル単位でまとめて TX）
+  │       ├─ 論理削除なし（移行は新規 WRITE のみ）
+  │       └─ WAL にすべてのレコードを記録
+  │
+  └─ 4. 検証（--verify 時）
+          ├─ ハッシュチェーン整合性チェック（全 WAL スキャン）
+          ├─ レコード件数の一致確認
+          └─ サマリーレポート出力
+```
+
+### 12.5 移行サマリーレポート
+
+```
+=== Adlaire DB Migration Report ===
+Source:  ./legacy.db
+Target:  ./mydb
+Tables:  users (1000 rows), products (450 rows), orders (3200 rows)
+
+Migrated: 4650 records
+Errors:   0
+Warnings: 2 (NULL values coerced in products.description)
+
+Hash chain: VALID (seq 1..4650)
+Duration:   3.2s
+
+Status: SUCCESS
+```
+
+### 12.6 エラーケースと挙動
+
+| エラー | 挙動 |
+|--------|------|
+| `NOT NULL` 制約違反 | 移行を即時停止。レコード番号とカラム名を報告 |
+| `CHECK` 制約違反 | 移行を即時停止。違反値を報告 |
+| `UNIQUE` 制約違反（テーブル内） | 移行を即時停止（同一テーブル内重複） |
+| 型変換不能値 | 移行を即時停止。値と期待型を報告 |
+| WAL 書き込み失敗 | ロールバック（ACID TX） |
+| `--dry-run` 時の検証エラー | 書き込みなし、エラーレポートのみ出力 |
 
 ---
 
@@ -1934,7 +1797,9 @@ scrape_configs:
 
 ## 18. ネットワークインターフェース
 
-Adlaire DB は以下の 2 つのプロトコルをサポートします：
+**Phase 1 では TCP カスタムプロトコル 1 本のみ。** REST と独自 TCP の同時提供は後回し（→ 1.3.1 参照）。将来的に HTTP REST を追加する場合は別フェーズで検討する。
+
+Adlaire DB は以下のプロトコルをサポートします：
 
 ### 18.1 TCP（ポート 9876）：カスタムバイナリプロトコル
 
@@ -2670,6 +2535,9 @@ Coordinator が複数ノードのインデックス集約
 ---
 
 ## 20. 分散実装の詳細仕様（Phase 2-4）
+
+> **後回し（Phase 1 完了後に着手）**  
+> Phase 1 のシングルノード実装、WAL 不変条件の確立、クラッシュリカバリの検証が完了した後に設計を確定する。以下は研究知見に基づく将来設計草案であり、現時点では確定仕様ではない。
 
 FoundationDB の「アンバンドル・アーキテクチャ」と OCC+MVCC トランザクションモデルを参考に設計する。FDB の既知の制約（トランザクション 5 秒ハード制限、ACL なし）を Adlaire-DB では改善する。
 
@@ -3773,6 +3641,9 @@ ReadWritePaths=/var/lib/adlaire-db
 ---
 
 ## 25. データ保存時暗号化（Phase 1.5）
+
+> **後回し（Phase 1 スコープ外）**  
+> TLS によるトランスポート暗号化を Phase 1 で提供する。保存時暗号化（at-rest encryption）はその後の検討課題。
 
 ### 25.1 暗号化方式
 
