@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書（プロトタイプ版）
 
-**バージョン：** 1.1  
+**バージョン：** 1.2  
 **ステータス：** 確定  
 **最終更新：** 2026-09-09  
 
@@ -2752,86 +2752,338 @@ Coordinator が複数ノードのインデックス集約
 
 ## 20. 分散実装の詳細仕様（Phase 2-4）
 
-### 20.1 Phase 2：レプリケーション（Master-Replica）
+FoundationDB の「アンバンドル・アーキテクチャ」と OCC+MVCC トランザクションモデルを参考に設計する。FDB の既知の制約（トランザクション 5 秒ハード制限、ACL なし）を Adlaire-DB では改善する。
+
+### 20.1 アンバンドル・アーキテクチャ（Unbundled Architecture）
+
+FDB はすべてのコンポーネントを独立したロールに分離し、各ロールが単一責務を持つ。Adlaire-DB の分散フェーズもこの原則を採用する。
+
+**ロールマップ：**
+```
+┌─────────────────────────────────────────────────────────┐
+│                       クライアント                       │
+└────────────────────────┬────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────┐
+│                  Coordinator 層                          │
+│  ├─ Cluster Controller（クラスタ状態管理・世代管理）      │
+│  ├─ Coordinators（クォーラム選挙・設定保存）              │
+│  └─ Master / Sequencer（バージョン払い出し）             │
+└───────┬────────────────────────────────────────┬────────┘
+        │                                        │
+┌───────▼──────────┐                  ┌──────────▼───────┐
+│   プロキシ層      │                  │   ストレージ層    │
+│  ├─ GRV Proxy   │                  │  ├─ TLog         │
+│  │  (ReadVer.)  │                  │  │  (WAL-first)  │
+│  └─ Commit Proxy│                  │  ├─ StorageServer│
+│     (コミット)   │                  │  │  (KV + Event) │
+└───────┬──────────┘                  │  └─ Data         │
+        │                             │     Distributor  │
+┌───────▼──────────┐                  └──────────────────┘
+│   競合検出層      │
+│  └─ Resolver    │
+│     (OCC 検証)  │
+└──────────────────┘
+```
+
+**各ロールの責務：**
+
+| ロール | 責務 | Adlaire-DB 実装方針 |
+|--------|------|---------------------|
+| Cluster Controller | クラスタ全体の状態監視・世代管理 | Phase 2 から導入 |
+| Coordinators | クォーラム（奇数台）による設定保存 | Phase 2: 3 台、Phase 3: 5 台 |
+| Master/Sequencer | 単調増加バージョン番号（ReadVersion）払い出し | Phase 3 から独立プロセス |
+| GRV Proxy | クライアントからの GetReadVersion 集約 | Phase 3 |
+| Commit Proxy | コミット要求受付・TLog への書き込み指示 | Phase 3 |
+| Resolver | OCC 競合検出（最近コミットされた書き込み履歴保持） | Phase 4 |
+| TLog（Transaction Log） | WAL-first 永続化（ストレージへの非同期適用） | Phase 2 から |
+| Storage Server | KV データ + イベントログ保持・読み取り提供 | Phase 2 から |
+| Data Distributor | シャード再配置・レプリカ均衡化 | Phase 3 |
+| Ratekeeper | バックプレッシャー制御 | Phase 3 |
+
+### 20.2 OCC + MVCC トランザクションモデル
+
+FDB の OCC（楽観的並行制御）+ MVCC（多版並行制御）を Adlaire-DB の分散フェーズに採用する。
+
+**設計原則：**
+- **読み取り時にロックを取得しない**（OCC）。読み取りはすべてスナップショットバージョンで行う（MVCC）
+- **書き込みはクライアントバッファに蓄積**し、コミット時のみサーバーへ送信
+- **競合検出はコミット時**に Resolver が実施。競合があれば即座に ABORT（再試行はクライアント責務）
+
+**トランザクションライフサイクル：**
+```
+1. BEGIN
+   - GRV Proxy から ReadVersion（RV）を取得
+   - クライアントは「RV 時点のスナップショット」で読み取り
+
+2. 読み取り（MVCC）
+   - Storage Server に RV を指定してリクエスト
+   - RV より新しい書き込みは見えない
+   - 読んだキーのセット（read_set）をローカル追跡
+
+3. 書き込み
+   - 変更をすべてクライアントのローカルバッファに蓄積
+   - サーバーへの反映はコミット時まで保留
+
+4. COMMIT
+   a. Commit Proxy へ {read_set, write_set, payload} 送信
+   b. Proxy が CommitVersion（CV）を割り当て
+   c. Resolver で競合チェック
+      - read_set のキーが RV ～ CV 間に書き込まれていないか確認
+      - 書き込み履歴保持期間：設定可能（→ 20.8 参照）
+   d. 競合なし → TLog に WAL 書き込み（永続化）
+      競合あり → ABORT（クライアントに通知、再試行）
+   e. TLog 永続化後にクライアントへ成功応答
+   f. Storage Server へ非同期適用
+
+5. ABORT / RETRY
+   - 競合 ABORT を受けたクライアントは RV を再取得して最初からやり直し
+```
+
+**Adlaire-DB 独自の改善点（FDB との差分）：**
+- FDB はトランザクション制限が**ハードコード**（5 秒、10MB、10KB key、100KB value）
+- Adlaire-DB は**設定ファイルで調整可能**（→ 20.8 参照）
+- FDB は ACL/認証なし → Adlaire-DB は Phase 2 から認証を組み込む（→ 20.9 参照）
+
+### 20.3 WAL-first 耐久性設計
+
+**原則：** ストレージへの反映よりも Transaction Log への WAL 書き込みを優先する。
+
+```
+クライアント → Commit Proxy
+                    ↓
+              CommitVersion 割り当て
+                    ↓
+           ┌─── TLog A（WAL 書き込み）───┐
+           ├─── TLog B（WAL 書き込み）───┤  ← 3 台中 2 台以上成功で COMMIT
+           └─── TLog C（WAL 書き込み）───┘
+                    ↓（非同期）
+              Storage Server A
+              Storage Server B
+              Storage Server C
+```
+
+**耐久性保証：**
+- TLog への書き込みが完了した時点でトランザクション永続化済みとみなす
+- Storage Server は TLog から非同期でデータを取り込む
+- Storage Server クラッシュ時は TLog から再適用してリカバリ
+
+### 20.4 Generation-based リカバリ
+
+FDB の Generation-based Recovery を採用。システム障害時の回復を高速化する。
+
+**Generation の定義：**
+- すべてのコミットには **CommitVersion（CV）** と **世代番号（Generation ID）** が付与される
+- `(Generation ID, CommitVersion)` の組みが書き込みの一意識別子となる
+
+**リカバリフロー：**
+```
+障害発生（Master クラッシュ、ネットワーク分断など）
+
+1. Cluster Controller が障害を検知
+2. 新しい Generation ID を発行
+3. 旧 Generation の Commit Proxy / Resolver が無効化
+   - 旧世代のコミット試行は即座に ABORT（クライアント再試行）
+4. 新 Master が TLog の最新状態から前 Generation の未完了 TX を復元
+5. Storage Server が新 Generation の TLog からデータ同期
+6. 新 Commit Proxy / Resolver 起動 → サービス再開
+```
+
+**ステートレス設計：**
+- Commit Proxy / Resolver / GRV Proxy はステートレス
+- クラッシュ後に即座に再起動可能（状態復元不要）
+- 状態は TLog と Storage Server が保持
+
+### 20.5 Phase 2：レプリケーション（WAL-first 非同期レプリケーション）
 
 **アーキテクチャ：**
 ```
-Master Node (Write)
-  ↓ WAL ストリーム送信
-Replica Node A (Read-only)
-Replica Node B (Read-only)
-
-metadata.dat で replica_nodes リスト管理
-チェックサムで整合性監視
+Primary Node
+  │  Transaction Log（WAL）
+  │  ├─ 書き込み完了 → クライアントへ成功応答
+  │  └─ 非同期配信
+  ├─→ Replica Node A（Storage Server）
+  └─→ Replica Node B（Storage Server）
 ```
 
 **レプリケーション戦略：**
-- **同期方式** ：非同期レプリケーション（RPO: 数秒）
-- **検出方式** ：WAL ストリーム監視
-- **フェイルオーバー** ：Replica → Master への昇格手動
+- **方式**：WAL ストリーム非同期レプリケーション（RPO: < 1 秒）
+- **レプリカ数**：デフォルト 2（設定可能）
+- **読み取り**：Replica からも提供（Stale Read 許容 or 最新保証は接続オプションで選択）
+- **フェイルオーバー**：Cluster Controller による自動昇格（手動オーバーライド可）
 
-### 20.2 Phase 3：シャーディング（複数ノード分散）
+**イベントログ・ハッシュチェーン検証（Adlaire-DB 独自）：**
+- Replica は WAL 適用後にイベントログのハッシュチェーンを独立検証する
+- Primary との `event_log_root_hash` を定期比較（デフォルト: 60 秒ごと）
+- 不一致を検出した場合は Cluster Controller に通知し、Replica を隔離
+
+```rust
+// Replica のハッシュチェーン検証フロー（擬似コード）
+async fn verify_replica_hash_chain(
+    replica: &ReplicaNode,
+    primary_root: &Hash,
+) -> VerifyResult {
+    let replica_root = replica.compute_event_log_root_hash().await?;
+    if replica_root != *primary_root {
+        alert_cluster_controller(VerifyAlert::HashChainMismatch {
+            replica_id: replica.id,
+            expected: primary_root.clone(),
+            actual: replica_root,
+        });
+        return Err(VerifyError::ChainMismatch);
+    }
+    Ok(VerifyResult::Ok)
+}
+```
+
+### 20.6 Phase 3：シャーディング（Range-based Sharding）
+
+FDB の Range-based Sharding（Ordered Key-Value）を採用。Hash-based よりも範囲スキャンに有利。
 
 **シャード配置：**
 ```
-shard_map.json の key_range に基づき分散
+key_range に基づくレンジ分割：
 
-例）Hash-based Sharding:
-  Node A: hash(key) % 3 == 0 → Shard 0, 3, 6...
-  Node B: hash(key) % 3 == 1 → Shard 1, 4, 7...
-  Node C: hash(key) % 3 == 2 → Shard 2, 5, 8...
+  Shard 0 (Node A): key < "m"
+  Shard 1 (Node B): "m" <= key < "t"
+  Shard 2 (Node C): key >= "t"
+
+shard_map.json:
+  {
+    "shards": [
+      {"id": 0, "range": ["", "m"],    "primary": "node-a", "replicas": ["node-b"]},
+      {"id": 1, "range": ["m", "t"],   "primary": "node-b", "replicas": ["node-c"]},
+      {"id": 2, "range": ["t", null],  "primary": "node-c", "replicas": ["node-a"]}
+    ]
+  }
 ```
 
 **ルーティング：**
 ```
-Client のリクエスト
-  ↓
-Coordinator がキーをハッシュ化
-  ↓
-shard_map.json で適切なノード決定
-  ↓
-該当ノードにリクエスト転送
-  ↓
-Client にレスポンス
+クライアント → GRV Proxy（ReadVersion 取得）
+                    ↓
+              Commit Proxy（shard_map から対象シャード解決）
+                    ↓
+              該当 Storage Server へリクエスト
 ```
 
-### 20.3 Phase 4：分散トランザクション（2-Phase Commit）
+**シャード再配置（Data Distributor）：**
+- 負荷均衡（各シャードのサイズ・アクセス頻度をモニタリング）
+- 閾値（デフォルト: シャードサイズ > 500MB）を超えたら分割
+- Data Distributor が自動的に新シャードへキーを移動
 
-**2-Phase Commit 流れ：**
+### 20.7 Phase 4：分散トランザクション（OCC ベース）
+
+**OCC による分散トランザクション（FDB 相当）：**
+
+2PC（Two-Phase Commit）は「ロック保持中の参加者クラッシュ」で停止するリスクがある。OCC は読み取り時にロックを取らないため、2PC のブロッキング問題を回避できる。
+
 ```
-【Phase 1：Prepare】
-1. Coordinator が全シャードに PREPARE リクエスト送信
-2. 各シャードが操作をロック・バッファリング
-3. 全シャードから OK または ABORT 返答
-4. Coordinator が結果判定
+分散 OCC フロー：
 
-【Phase 2：Commit/Abort】
-1. 全シャード OK → COMMIT リクエスト送信
-   一部 ABORT → ABORT リクエスト送信
-2. 各シャードが確認応答
-3. ロック解放
-```
-
-**タイムアウト・リカバリ：**
-```
-Prepare タイムアウト：30秒
-  → 該当シャードを ABORT
-  → 全体トランザクション ROLLBACK
-
-Commit 途中での故障：
-  → txlog.dat の APPLIED ステータスで復旧判定
-  → 未完了なら Retry 可能
+1. クライアントが ReadVersion 取得（GRV Proxy）
+2. 複数シャードにまたがる読み取り（ロックなし、MVCC スナップショット）
+3. 書き込みをすべてローカルバッファに蓄積
+4. COMMIT リクエスト → Commit Proxy
+5. Resolver が全シャードの read_set に対して競合チェック
+   - Resolver は最近コミットされた書き込み履歴を保持（設定可能期間）
+   - 競合なし → 全シャードの TLog に一括 WAL 書き込み
+   - 競合あり → ABORT（クライアント再試行）
+6. TLog 永続化完了 → クライアントへ成功応答
+7. Storage Server 群へ非同期適用
 ```
 
 **ネットワーク分断時の動作：**
 ```
-分散ノード A ↔️ 分断 ↔️ ノード B
+分断検知：
+  - Cluster Controller が Coordinator クォーラムで分断を判定
+  - クォーラム外のパーティションはリクエストを受け付けない（CAP の C 優先）
 
-- ノード A は操作ロック（ブロッキング）
-- Coordinator タイムアウト→ ABORT
-- 分断復旧後、ロール バック実行
-- メタデータで分断検知・通知
+分断回復後：
+  - 新 Generation でリカバリ（20.4 参照）
+  - 隔離されたノードは TLog から最新状態に同期後に復帰
 ```
+
+### 20.8 設定可能なトランザクション制約
+
+FDB ではトランザクション制限がハードコードされている（5 秒、10MB）。Adlaire-DB では設定ファイルで調整可能とする。
+
+**設定項目（`adlaire-db.toml` 内 `[distributed]` セクション）：**
+```toml
+[distributed.transaction]
+timeout_seconds = 10          # FDB は 5 秒ハード制限（Adlaire-DB は設定可能）
+max_payload_bytes = 20971520  # デフォルト 20MB（FDB は 10MB）
+max_key_bytes = 10240         # デフォルト 10KB（FDB 同等）
+max_value_bytes = 204800      # デフォルト 200KB（FDB は 100KB）
+max_read_keys = 100000        # 1 TX あたりの最大 read キー数
+
+[distributed.resolver]
+conflict_window_seconds = 30  # Resolver が保持する書き込み履歴（FDB は 5 秒ハード）
+
+[distributed.replication]
+replica_count = 2             # デフォルトレプリカ数
+hash_check_interval_seconds = 60  # イベントログ・ハッシュ検証間隔
+```
+
+**制約超過時の動作：**
+- `timeout_seconds` 超過 → トランザクション ABORT（クライアントにタイムアウトエラー）
+- `max_payload_bytes` 超過 → コミット前にクライアントエラー
+- `max_read_keys` 超過 → 警告ログ + メトリクス記録（デフォルトは拒否しない；設定で拒否に変更可）
+
+### 20.9 認証・アクセス制御（分散フェーズ）
+
+**FDB の既知の弱点：ゼロ ACL。**  
+FDB ネットワークに到達できたクライアントはすべての操作を行える。  
+Adlaire-DB は Phase 2 から認証を組み込む。
+
+**Phase 2 〜 4 の認証方式：**
+```
+Phase 2（レプリケーション）:
+  - API キー認証（Phase 1 の延長）
+  - TLS 必須（ノード間通信を含む）
+
+Phase 3（シャーディング）:
+  - JWT ベース認証
+  - ロールベースアクセス制御（RBAC）
+  - ロール: admin / writer / reader / auditor
+
+Phase 4（完全分散）:
+  - mTLS（相互 TLS）でノード間通信を認証
+  - RBAC に加えてキー名前空間ベースのアクセス制御
+  - 監査ログに操作元ユーザー/サービスを記録
+```
+
+**ノード間認証（Phase 3+）：**
+```toml
+[distributed.security]
+mtls_enabled = true
+ca_cert_path = "/etc/adlaire-db/ca.crt"
+node_cert_path = "/etc/adlaire-db/node.crt"
+node_key_path = "/etc/adlaire-db/node.key"
+```
+
+### 20.10 Layers：データモデルの抽象化
+
+FDB の「Layers」概念：生の KV の上に高レベルデータモデルを独立レイヤーとして実装する。
+
+Adlaire-DB では Phase 1 の KV + Event Log を基盤レイヤーとし、将来の拡張をレイヤーとして追加できる設計を明示する：
+
+```
+┌─────────────────────────────────────┐
+│  将来のレイヤー（Phase 3+）          │
+│  ├─ SQL Layer（SELECT/JOIN の解析）  │
+│  ├─ Document Layer（JSON クエリ）    │
+│  └─ Record Layer（スキーマ定義）     │
+├─────────────────────────────────────┤
+│  Adlaire-DB 基盤（Phase 1）          │
+│  ├─ KV Store API                    │
+│  └─ Event Log API（ハッシュチェーン）│
+├─────────────────────────────────────┤
+│  Storage（TLog + Storage Server）   │
+└─────────────────────────────────────┘
+```
+
+各レイヤーは基盤の KV + Event Log API だけを使い、ストレージ実装を知らない。これにより分散フェーズへの移行が上位レイヤーに影響を与えない。
 
 ---
 
@@ -3035,6 +3287,100 @@ FATAL   : サービス停止（起動失敗、致命的障害）
 3. データ不整合検知
    - チェックサムエラー検出
    - 自動修復/手動介入フロー
+```
+
+### 22.6 決定論的シミュレーションテスト（DST）
+
+FoundationDB は Flow 言語と決定論的シミュレーターにより約 1 兆 CPU 時間分のテストを実施し、Jepsen が「既知の全障害パターンに耐性がある」と評価した。Adlaire-DB の分散フェーズ（Phase 2+）では Rust の `turmoil` クレートを使用して同等のテスト戦略を実装する。
+
+**基本原則：**
+- すべての非決定論的要素（ネットワーク、ディスク I/O、時刻、乱数）をシミュレータが制御する
+- シード値を固定すると同じ実行シーケンスが再現される（バグの再現が容易）
+- シード値を変えると異なる障害シナリオを網羅できる
+
+**Rust 実装方針（`turmoil` クレート）：**
+```rust
+// turmoil を使った DST の例（擬似コード）
+#[tokio::test]
+async fn test_distributed_commit_with_network_fault() {
+    let mut sim = turmoil::Builder::new()
+        .simulation_duration(Duration::from_secs(60))
+        .build();
+
+    sim.host("primary", || async {
+        AdlaireNode::new_primary().await.run().await
+    });
+
+    sim.host("replica-a", || async {
+        AdlaireNode::new_replica("primary").await.run().await
+    });
+
+    sim.client("client", async {
+        // ネットワーク分断を注入
+        turmoil::partition("primary", "replica-a");
+
+        // この状態でのコミット動作を検証
+        let result = client.set("key", "value").await;
+        assert!(result.is_ok()); // Primary への書き込みは成功
+
+        // 分断解消
+        turmoil::repair("primary", "replica-a");
+
+        // Replica が追いついたことを確認
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let replica_val = replica_client.get("key").await;
+        assert_eq!(replica_val, Some("value"));
+    });
+
+    sim.run().unwrap();
+}
+```
+
+**テストシナリオ網羅（シード値で制御）：**
+```
+ネットワーク層:
+  - パケットロス（0〜100%）
+  - 遅延（0ms〜10 秒）
+  - ネットワーク分断（部分・完全）
+  - パーティション分割（少数派 vs 多数派）
+
+ノード層:
+  - クラッシュ・再起動（任意のタイミング）
+  - ディスク書き込み失敗
+  - ディスク読み取り遅延
+  - OOM（メモリ不足）シミュレーション
+
+時刻:
+  - クロックスキュー（ノード間で最大 ±5 秒）
+  - 時刻の急激な前後移動
+```
+
+**正当性プロパティ（検証すべき不変条件）：**
+```
+1. Linearizability（線形一貫性）
+   - コミット成功したすべての書き込みは以降の読み取りで見える
+
+2. ハッシュチェーン整合性
+   - 任意のノードの event_log 先頭ハッシュが一致する
+   - 削除済みキーの Deleted イベントが必ず存在する
+
+3. ACID トランザクション
+   - コミット成功後にクラッシュしても再起動後にデータが存在する
+   - ABORT されたトランザクションの影響がゼロ
+
+4. フェイルオーバー
+   - Primary クラッシュ後 30 秒以内に Replica が昇格する
+   - 昇格後の Replica にコミット済みデータが全て存在する
+```
+
+**CI 統合：**
+```yaml
+# .github/workflows/dst.yml
+- name: DST（決定論的シミュレーション）
+  run: cargo test --test dst -- --test-threads=8
+  env:
+    ADLAIRE_DST_SEEDS: "0,1,2,...,999"   # 1000 シード並列実行
+    ADLAIRE_DST_DURATION: "30s"          # シードあたりの実行時間
 ```
 
 ---
