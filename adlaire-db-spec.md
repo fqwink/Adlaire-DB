@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書（プロトタイプ版）
 
-**バージョン：** 1.2  
+**バージョン：** 1.3  
 **ステータス：** 確定  
 **最終更新：** 2026-09-09  
 
@@ -1258,9 +1258,9 @@ pub struct Database {
 
 ---
 
-## 17. 開発環境（Docker ベース）
+## 15. 開発環境（Docker ベース）
 
-### 17.1 開発環境構成
+### 15.1 開発環境構成
 
 **Docker ベースの開発環境** により、Windows/macOS/Linux 問わず統一された環境で開発可能。
 
@@ -1274,7 +1274,7 @@ Rust開発コンテナ（Ubuntu 24.04 LTS + Rust 1.70+）
 cargo build/test/cross-compile
 ```
 
-### 17.2 プロジェクト構成
+### 15.2 プロジェクト構成
 
 ```
 adlaire-db/
@@ -1304,7 +1304,7 @@ adlaire-db/
 └── README.md
 ```
 
-### 17.3 Dockerfile
+### 15.3 Dockerfile
 
 ```dockerfile
 # Dockerfile
@@ -1332,7 +1332,7 @@ ENV CARGO_HOME=/workspace/.cargo
 ENTRYPOINT ["/bin/bash"]
 ```
 
-### 17.4 docker-compose.yml
+### 15.4 docker-compose.yml
 
 ```yaml
 # docker-compose.yml
@@ -1363,7 +1363,7 @@ volumes:
     driver: local
 ```
 
-### 17.5 .dockerignore
+### 15.5 .dockerignore
 
 ```
 .git
@@ -1381,9 +1381,9 @@ target/
 .env.local
 ```
 
-### 17.6 開発ワークフロー
+### 15.6 開発ワークフロー
 
-#### 17.6.1 初期セットアップ
+#### 15.6.1 初期セットアップ
 
 ```bash
 # 1. リポジトリクローン
@@ -1397,7 +1397,7 @@ docker-compose build
 docker-compose run --rm dev
 ```
 
-#### 17.6.2 ビルド
+#### 15.6.2 ビルド
 
 ```bash
 # コンテナ内で実行
@@ -1407,7 +1407,7 @@ cargo build --release
 ls -la target/release/adlaire-db
 ```
 
-#### 17.6.3 ユニットテスト
+#### 15.6.3 ユニットテスト
 
 ```bash
 # コンテナ内で実行
@@ -1417,14 +1417,14 @@ cargo test
 cargo test test_kv_set_get
 ```
 
-#### 17.6.4 統合テスト
+#### 15.6.4 統合テスト
 
 ```bash
 # コンテナ内で実行
 cargo test --test '*'
 ```
 
-#### 17.6.5 x86_64 Linux 用クロスコンパイル
+#### 15.6.5 x86_64 Linux 用クロスコンパイル
 
 ```bash
 # コンテナ内で実行
@@ -1434,7 +1434,7 @@ cargo build --release --target x86_64-unknown-linux-gnu
 file target/x86_64-unknown-linux-gnu/release/adlaire-db
 ```
 
-#### 17.6.6 ARM64 Linux 用クロスコンパイル
+#### 15.6.6 ARM64 Linux 用クロスコンパイル
 
 ```bash
 # コンテナ内で実行
@@ -1444,7 +1444,7 @@ cargo build --release --target aarch64-unknown-linux-gnu
 file target/aarch64-unknown-linux-gnu/release/adlaire-db
 ```
 
-#### 17.6.7 全プラットフォーム用ビルド
+#### 15.6.7 全プラットフォーム用ビルド
 
 ```bash
 # scripts/cross-compile.sh
@@ -1467,9 +1467,9 @@ ls -la target/aarch64-unknown-linux-gnu/release/adlaire-db
 docker-compose run --rm dev bash scripts/cross-compile.sh
 ```
 
-### 17.7 デバッグ
+### 15.7 デバッグ
 
-#### 17.7.1 コンテナ内で RUST_LOG 設定
+#### 15.7.1 コンテナ内で RUST_LOG 設定
 
 ```bash
 export RUST_LOG=debug
@@ -1479,7 +1479,7 @@ cargo run --release
 RUST_LOG=debug cargo run --release
 ```
 
-#### 17.7.2 lldb（デバッガ）を使用
+#### 15.7.2 lldb（デバッガ）を使用
 
 ```bash
 # Dockerfile に lldb をインストール
@@ -1489,7 +1489,7 @@ RUN apt-get install -y lldb
 lldb ./target/release/adlaire-db
 ```
 
-### 17.8 CI/CD 統合（GitHub Actions 例）
+### 15.8 CI/CD 統合（GitHub Actions 例）
 
 `.github/workflows/build.yml`
 ```yaml
@@ -1523,7 +1523,7 @@ jobs:
           path: target/*/release/adlaire-db
 ```
 
-### 17.9 トラブルシューティング
+### 15.9 トラブルシューティング
 
 #### Docker イメージビルド失敗
 ```bash
@@ -1547,75 +1547,6 @@ registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"
 
 ---
 
-## 18. 開発フロー（Docker ベース）
-
-```
-【開発環境】：Docker コンテナ
-  ↓
-ローカル実装 + ユニットテスト（コンテナ内）
-  ↓
-統合テスト + ストレステスト（コンテナ内）
-  ↓
-クロスコンパイル（x86_64 / ARM64）
-  ↓
-バイナリ生成
-  ↓
-【テスト環境】
-  ↓
-生成されたバイナリでテスト実行
-  ↓
-【本番環境】
-  ↓
-確定バイナリをデプロイ
-```
-
----
-
-### 15.1 全体フロー
-
-```
-【開発環境】
-  ↓
-ローカル実装 + ユニットテスト
-  ↓
-【テスト環境】
-  ↓
-統合テスト + ストレステスト + JSONデータソース検証
-  ↓
-【本番環境】
-  ↓
-実運用テスト + パフォーマンス監視 + 24時間稼働確認
-  ↓
-【本番稼働】
-```
-
-### 15.2 各段階の詳細
-
-#### 15.2.1 開発環境
-- **場所** ：ローカルマシン（開発者PC）
-- **OS** ：Linux / macOS / Windows
-- **Rust** ：最新安定版（1.70+）
-- **テスト** ：cargo test で全ユニットテスト実行
-- **出力** ：バイナリ + ドキュメント
-
-#### 15.2.2 テスト環境
-- **場所** ：AWS EC2（別インスタンス）または Docker コンテナ
-- **OS** ：Linux（Ubuntu 24.04 LTS推奨）
-- **テスト内容** ：
-  - 統合テスト：全CRUD、JOIN、トランザクション
-  - ストレステスト：並行アクセス、大量データ処理
-  - JSONデータソース検証：実データでの動作確認
-- **期間** ：1-2週
-- **出力** ：テストレポート、パフォーマンス測定結果
-
-#### 15.2.3 本番環境
-- **場所** ：本番サーバ（Adlaire Group インフラ）
-- **初期段階** ：実運用テスト（読取のみ、段階的に書込導入）
-- **期間** ：2-4週の観察期間
-- **監視** ：24時間ログ監視、アラート設定
-- **出力** ：本番運用開始OK/調整必要の判定
-
----
 
 ## 16. 本番環境サーバ構成・デプロイ方法
 
@@ -1669,7 +1600,7 @@ registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"
 │   ├── 2026-09-09.tar.gz
 │   └── 2026-09-10.tar.gz
 └── config/
-    └── db.conf              # 設定ファイル
+    └── adlaire-db.toml      # 設定ファイル
 ```
 
 ---
@@ -1736,7 +1667,7 @@ echo "バイナリテスト合格 - v1.0.0"
 mkdir -p release-v1.0.0/bin
 cp target/release/adlaire-db release-v1.0.0/bin/
 cp docs/ release-v1.0.0/
-cp config/db.conf.example release-v1.0.0/config/
+cp config/adlaire-db.toml.example release-v1.0.0/config/
 
 # パッケージ作成（ソースコードは含めない）
 tar -czf adlaire-db-v1.0.0-x86_64-linux-TESTED.tar.gz \
@@ -1801,7 +1732,7 @@ Type=simple
 User=adlaire-db
 Group=adlaire-db
 WorkingDirectory=/var/lib/adlaire-db
-ExecStart=/var/lib/adlaire-db/bin/adlaire-db --config /var/lib/adlaire-db/config/db.conf
+ExecStart=/var/lib/adlaire-db/bin/adlaire-db --config /var/lib/adlaire-db/config/adlaire-db.toml
 ExecReload=/bin/kill -SIGHUP $MAINPID
 KillMode=process
 Restart=on-failure
@@ -1813,7 +1744,7 @@ StandardError=journal
 WantedBy=multi-user.target
 ```
 
-**Step 5：サービス開始**
+**Step 6：サービス開始**
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable adlaire-db
@@ -1836,47 +1767,35 @@ sudo systemctl start adlaire-db
 
 ### 16.3 本番環境の初期設定
 
-#### 16.3.1 設定ファイル（db.conf）
+#### 16.3.1 設定ファイル（adlaire-db.toml）
 
-```ini
+```toml
 [server]
-# ポート設定
 listen_port = 9876
-bind_address = 0.0.0.0
+bind_address = "0.0.0.0"
 
 [storage]
-# データディレクトリ
-data_dir = /var/lib/adlaire-db/data
-# バックアップディレクトリ
-backup_dir = /var/lib/adlaire-db/backup
+data_dir = "/var/lib/adlaire-db/data"
+backup_dir = "/var/lib/adlaire-db/backup"
 
 [logging]
-# ログレベル：DEBUG, INFO, WARN, ERROR
-log_level = INFO
-log_file = /var/lib/adlaire-db/logs/app.log
-audit_log = /var/lib/adlaire-db/logs/audit.log
-# ログローテーション（MB）
-max_log_size = 100
+log_level = "INFO"          # DEBUG / INFO / WARN / ERROR
+log_file = "/var/lib/adlaire-db/logs/app.log"
+audit_log = "/var/lib/adlaire-db/logs/audit.log"
+max_log_size_mb = 100
 max_log_files = 10
 
 [transaction]
-# トランザクションタイムアウト（秒）
-transaction_timeout = 300
-# ロックタイムアウト（秒）
-lock_timeout = 5
+timeout_seconds = 300
+lock_timeout_seconds = 5
 
 [performance]
-# メモリバッファサイズ（MB）
-buffer_size = 512
-# イベントログフラッシュ間隔（秒）
-flush_interval = 5
+buffer_size_mb = 512
+flush_interval_seconds = 5
 
 [backup]
-# 自動バックアップ有効化
 auto_backup_enabled = true
-# バックアップ間隔（時間）
-backup_interval = 24
-# 保持バックアップ数
+backup_interval_hours = 24
 retention_count = 7
 ```
 
