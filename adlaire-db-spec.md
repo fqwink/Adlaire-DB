@@ -434,68 +434,98 @@ pub fn get_events_since(&self, timestamp: i64) -> Result<Vec<Event>>
 
 ### 4.3 外部検証（External Verification）
 
-**設計思想：** 専用クライアントを必要とせず、`data.kv` と `event_log.jsonl` を受け取った第三者が独自にハッシュチェーンを検証できる。これは immudb との重要な差異であり、Adlaire DB の外部検証可能性の核心。
+**設計思想：** 専用クライアントを必要とせず、`wal.bin` の JSONL エクスポートと署名済みチェックポイントを受け取った第三者が独自にハッシュチェーンを検証できる。これは immudb との重要な差異であり、Adlaire DB の外部検証可能性の核心。
 
 #### 4.3.1 検証ファイル仕様
 
-サーバーが以下のファイルを監査者に提供するだけで検証が完結する：
+CLI コマンド一本で監査用アーカイブを生成する（Phase 1 は TCP 経由ではなくローカル CLI のみ）：
 
-```
-adlaire_db/
-├── shard_0/
-│   ├── event_log.jsonl      # イベントログ（JSONL形式、人間可読）
-│   └── metadata.dat         # チェーン先頭ハッシュ含む
-└── verification_manifest.json  # 各ファイルの SHA256 + 検証手順書
+```bash
+adlaire-db export-audit --data ./mydb --out ./audit-2026-09-09.tar.gz
 ```
 
-#### 4.3.2 検証アルゴリズム（疑似コード）
+アーカイブ内容：
+
+```
+audit-2026-09-09/
+├── wal-export.jsonl        # WAL エントリをすべて JSONL 形式で出力（人間可読）
+├── checkpoints/
+│   ├── cp-00001.json       # 署名済みチェックポイント（不変）
+│   └── cp-00001.sig        # Ed25519 署名
+└── VERIFY.md               # 検証手順書（ハッシュ計算式を人間語で説明）
+```
+
+#### 4.3.2 WAL エクスポート JSONL 形式
+
+各行が WAL の 1 エントリに対応する：
+
+```json
+{"seq":1,"tx_id":1,"ts":1757500000000000000,"type":"BEGIN","key":"","payload":"{}","prev_hash":"0000...0000","hash":"aaa..."}
+{"seq":2,"tx_id":1,"ts":1757500000001000000,"type":"WRITE","key":"user:1","payload":"{\"name\":\"Alice\"}","prev_hash":"aaa...","hash":"bbb..."}
+{"seq":3,"tx_id":1,"ts":1757500000002000000,"type":"COMMIT","key":"","payload":"{}","prev_hash":"bbb...","hash":"ccc..."}
+```
+
+#### 4.3.3 検証アルゴリズム（疑似コード）
+
+ハッシュ計算は I-2 の定義と完全一致する。任意の言語で実装可能。
 
 ```python
-# 任意のプログラミング言語で実装可能（専用クライアント不要）
-def verify_chain(event_log_path):
-    events = load_jsonl(event_log_path)
-    prev_hash = "0" * 64  # genesis hash
+import hashlib, json
 
-    for event in events:
-        # イベント内容 + prev_hash から SHA256 を再計算
-        computed = sha256(event["id"] + event["event_type"] +
-                          event["key"] + str(event["timestamp"]) +
-                          str(event["transaction_id"]) + prev_hash)
-        
-        if computed != event["hash"]:
-            return False, f"改ざん検出: event_id={event['id']}"
-        
-        prev_hash = event["hash"]
-    
+def verify_chain(wal_jsonl_path):
+    prev_hash = bytes(32)  # genesis: 32 zero bytes
+
+    with open(wal_jsonl_path) as f:
+        for line in f:
+            e = json.loads(line)
+
+            # I-2: SHA-256(prev_hash || seq || tx_id || ts || type || key || payload)
+            data = (
+                prev_hash
+                + e["seq"].to_bytes(8, "big")
+                + e["tx_id"].to_bytes(8, "big")
+                + e["ts"].to_bytes(8, "big", signed=True)
+                + e["type"].encode()
+                + e["key"].encode()
+                + e["payload"].encode()
+            )
+            computed = hashlib.sha256(data).hexdigest()
+
+            if computed != e["hash"]:
+                return False, f"改ざん検出: seq={e['seq']}"
+
+            prev_hash = bytes.fromhex(e["hash"])
+
     return True, "チェーン検証成功"
 ```
 
-#### 4.3.3 検証 API エンドポイント
+#### 4.3.4 署名済みチェックポイントによる時点検証
+
+チェックポイントは WAL シーケンス時点のルートハッシュを Ed25519 で署名したもの（I-7：一度発行したら不変）。第三者は WAL なしでも一時点の整合性を検証できる。
 
 ```bash
-# 監査用エクスポート（REST API）
-GET /api/v1/audit/export?from=2026-09-01&to=2026-09-09
-
-# レスポンス：event_log.jsonl + verification_manifest.json を tar.gz で返す
-# 監査者はこのファイルを受け取り、上記アルゴリズムで独自検証する
+# 署名検証（標準ツールで実行可能）
+openssl dgst -verify pubkey.pem -signature cp-00001.sig cp-00001.json
 ```
 
-#### 4.3.4 削除の証明
+#### 4.3.5 削除の証明
+
+論理削除（I-4）は WRITE エントリとして WAL に記録される。ペイロードが削除事実を表し、ハッシュチェーンに永続記録される（I-2 によりペイロードはハッシュに含まれる）。
 
 ```json
-// 「user:1 が 2026-09-09 12:30 に削除された」という事実を第三者が検証できる
 {
-  "id": "evt-42",
-  "event_type": "Deleted",
+  "seq": 42,
+  "tx_id": 1001,
+  "ts": 1757503800000000000,
+  "type": "WRITE",
   "key": "user:1",
-  "payload": null,
-  "timestamp": 1757503800000,
-  "transaction_id": 1001,
+  "payload": "{\"__state\":\"deleted\",\"deleted_at\":1757503800000000000}",
   "prev_hash": "abc123...",
   "hash": "def456..."
 }
-// このエントリはハッシュチェーンに永続記録され、削除も改ざんも不可能
 ```
+
+このエントリはハッシュチェーンに永続記録され、事後的な改ざんはチェーン断絶として即座に検出される。
 
 ---
 
@@ -862,168 +892,184 @@ fn test_recovery_from_event_log() {
 
 ## 11. 実装フェーズ・スケジュール
 
-### 11.1 Phase 1：基本実装（3-4週）
+> **注：** Phase 1 スコープは §1.3 に確定。JOIN・レプリケーション・分散 TX などは後回し（§1.3.1）。分散実装の詳細は §20 を参照。
 
-**目標** ：KV + イベント型（シングルマシン版）の動作
+### 11.1 Phase 1：シングルノード完全実装（6-8週）
 
-| 項目 | 期間 | 内容 |
-|------|------|------|
-| **Week 1-2** | 2週 | KV Store実装、Get/Set/Delete（論理削除）、メモリ管理 |
-| **Week 2-3** | 1.5週 | イベントログ実装、ハッシュチェーン検証、外部検証エクスポート API |
-| **Week 3-4** | 1.5週 | ファイル永続化、ロード機能、イベントログ圧縮ポリシー実装 |
-| **Week 4** | 0.5週 | SQLite 移行ツール（`sqlite-to-adlaire` コマンド、JSON 経由インポート） |
+**目標** ：§1.3 の含める項目をすべて動かす。WAL が唯一の正本として確立した状態でリリースできること。
 
-**成果物** ：
-- KV Store の基本操作が動く（Delete は論理削除のみ）
-- イベント記録・検証が動く
-- ファイルの save/load が動く
-- 外部検証エクスポート（`/api/v1/audit/export`）が動く
-- イベントログ圧縮が動く（手動トリガー）
-- SQLite → Adlaire DB 移行ツールが動く
+| ステップ | 期間 | 内容 |
+|----------|------|------|
+| **Step 1** | Week 1-2 | プロジェクト骨格・WAL 書き込みエンジン<br>・`wal.bin` append-only 書き込み（Magic, CRC32, Entry 構造）<br>・fsync 境界の実装（COMMIT 後に fsync → クライアント応答）<br>・`.lock` によるシングル Writer 強制 |
+| **Step 2** | Week 2-3 | クラッシュリカバリ・スナップショット<br>・起動時 WAL スキャン（COMMITTED / PENDING / PARTIAL 判定）<br>・スナップショット生成・ロード<br>・`--verify-snapshot` フラグ（§I-6） |
+| **Step 3** | Week 3-4 | ACID トランザクション・KV API<br>・Begin / Write / Commit / Abort WAL エントリ<br>・順序付き KV インデックス（再構築可能）<br>・複数キー ACID TX<br>・論理削除（§I-4）|
+| **Step 4** | Week 4-5 | ハッシュチェーン・整合性チェック<br>・レコード単位 SHA-256（I-2 の計算式）<br>・CRC32 不一致・チェーン断絶 → グローバルロック・exit 2（I-3）<br>・`adlaire-db verify` CLI コマンド |
+| **Step 5** | Week 5-6 | 署名済み外部チェックポイント<br>・Ed25519 署名生成・検証<br>・`cp-XXXXX.json` / `.sig` 書き出し（I-7：不変）<br>・外部検証 CLI（§4.3） |
+| **Step 6** | Week 6-7 | TCP プロトコル・バックアップ<br>・TCP カスタムプロトコル実装（§18.1）<br>・バックアップ取得・復元後ハッシュチェーン検証 |
+| **Step 7** | Week 7-8 | SQLite 移行・統合テスト<br>・`adlaire-db migrate-sqlite` コマンド（§12）<br>・型付きエクスポート・インポート・検証<br>・DST（`turmoil`、1000 seeds）・統合テスト一式 |
 
-**テスト** ：ユニットテスト + 基本的な統合テスト
-
----
-
-### 11.2 Phase 2：JOIN 実装（3-4週）
-
-**目標** ：JOIN 機能の実装・テスト
-
-| 項目 | 期間 | 内容 |
-|------|------|------|
-| **Week 1-2** | 2週 | Hash Join実装、スカラー JOIN |
-| **Week 2-3** | 1週 | エラーハンドリング、エッジケース対応 |
-| **Week 3-4** | 1週 | JOIN パフォーマンステスト、最適化 |
-
-**成果物** ：
-- Hash Join が動く
-- 複数キーの結合取得が可能
-- JOIN テストが全てパス
+**Phase 1 完了の定義：**
+- §1.5 の設計不変条件（I-1〜I-8）がすべてテストで証明できる
+- 1000 シード DST が全通過
+- `adlaire-db --verify-snapshot` が正常・改ざんケースで正確に判定する
+- SQLite DB を型情報付きで Adlaire DB に移行できる
+- バックアップ → 復元 → チェーン検証の一連フローが完結する
 
 ---
 
-### 11.3 Phase 3：トランザクション・ACID（2-3週）
+### 11.2 Phase 2：レプリケーション（後回し）
 
-**目標** ：ACID 機構の完全実装
-
-| 項目 | 期間 | 内容 |
-|------|------|------|
-| **Week 1-2** | 1.5週 | ロック機構、トランザクションマネージャー実装 |
-| **Week 2-3** | 1.5週 | MVCC、ロールバック、コンフリクト検出 |
-
-**成果物** ：
-- Begin/Commit/Rollback が動く
-- ロック・デッドロック対策が動く
-- トランザクションテストが全てパス
+> **後回し（§1.3.1・§20 参照）**  
+> WAL 正本設計が Phase 1 で確立した後に着手する。詳細設計は §20.5。
 
 ---
 
-### 11.4 Phase 4：テスト・最適化（1-2週）
+### 11.3 Phase 3：シャーディング（後回し）
 
-**目標** ：全機能テスト + パフォーマンス最適化
+> **後回し（§1.3.1・§20 参照）**  
+> 詳細設計は §20.6。
 
-| 項目 | 期間 | 内容 |
-|------|------|------|
-| **Week 1** | 1週 | CRUD統合テスト、ストレス テスト |
-| **Week 2** | 1週 | パフォーマンス測定、ボトルネック最適化 |
+---
 
-**成果物** ：
-- 全テストケース実装・パス
-- ベンチマーク報告書
-- ドキュメント完成
+### 11.4 Phase 4：分散トランザクション（後回し）
+
+> **後回し（§1.3.1・§20 参照）**  
+> 詳細設計は §20.7。OCC ベース（2PC は使わない）。
 
 ---
 
 ### 11.5 全体スケジュール
 
 ```
-Phase 1 (KV + イベント型)：Weeks 1-4
-  ├─ Week 1-2：KV Store 実装
-  ├─ Week 2-3：イベント実装
-  └─ Week 3-4：永続化実装
+Phase 1 (シングルノード完全実装)：Week 1-8
+  ├─ Step 1：WAL 書き込みエンジン（W1-2）
+  ├─ Step 2：クラッシュリカバリ・スナップショット（W2-3）
+  ├─ Step 3：ACID TX・KV API（W3-4）
+  ├─ Step 4：ハッシュチェーン・整合性チェック（W4-5）
+  ├─ Step 5：署名済み外部チェックポイント（W5-6）
+  ├─ Step 6：TCP プロトコル・バックアップ（W6-7）
+  └─ Step 7：SQLite 移行・統合テスト（W7-8）
 
-Phase 2 (JOIN)：Weeks 5-8
-  ├─ Week 5-6：Hash Join 実装
-  ├─ Week 6-7：エラー処理
-  └─ Week 7-8：最適化
-
-Phase 3 (ACID)：Weeks 9-11
-  ├─ Week 9-10：ロック・トランザクション
-  └─ Week 10-11：MVCC・ロールバック
-
-Phase 4 (テスト・最適化)：Weeks 12-13
-  ├─ Week 12：統合テスト
-  └─ Week 13：最適化
-
-総計：約13週（約3ヶ月）
+Phase 2 (レプリケーション)：後回し
+Phase 3 (シャーディング)：後回し
+Phase 4 (分散 TX)：後回し
 ```
 
 ---
 
-## 12. JSONデータソース対応
+## 12. SQLite 移行・データインポート仕様
 
-### 12.1 JSON入力フォーマット
+Phase 1 の必須機能。`adlaire-db migrate-sqlite` コマンドで SQLite DB を型情報・制約・検証込みで Adlaire DB に移行できる。
 
-```json
-{
-  "operations": [
-    {
-      "op": "create",
-      "key": "user:1",
-      "value": {
-        "name": "John",
-        "email": "john@example.com",
-        "dept_id": "D1"
-      }
-    },
-    {
-      "op": "update",
-      "key": "user:1",
-      "value": {
-        "name": "John",
-        "email": "john.new@example.com",
-        "dept_id": "D1"
-      }
-    },
-    {
-      "op": "delete",
-      "key": "user:1"
-    }
-  ]
-}
+---
+
+### 12.1 移行コマンド仕様
+
+```bash
+# 基本移行（SQLite → Adlaire DB）
+adlaire-db migrate-sqlite \
+  --src ./legacy.db \
+  --data ./mydb \
+  --key-column id \
+  --table-prefix users: \
+  --dry-run         # 実際には書き込まず検証のみ
+
+# エクスポートのみ（Adlaire DB から型付き JSONL を生成）
+adlaire-db export \
+  --data ./mydb \
+  --format jsonl \
+  --out ./export.jsonl
+
+# インポート（型付き JSONL から Adlaire DB へ）
+adlaire-db import \
+  --data ./mydb \
+  --in ./export.jsonl \
+  --verify           # インポート後にハッシュチェーン検証を実施
 ```
 
-### 12.2 JSON出力フォーマット
+### 12.2 型付き JSONL フォーマット（エクスポート・インポート共通）
 
-#### 12.2.1 イベントログ出力
+各行が 1 レコード。型情報・制約・ハッシュを含む。
+
 ```json
-{
-  "events": [
-    {
-      "id": "evt-1",
-      "event_type": "Created",
-      "key": "user:1",
-      "payload": {...},
-      "timestamp": 1694250000000,
-      "hash": "ABC123..."
-    }
-  ]
-}
+{"key":"users:1","schema":{"name":"TEXT NOT NULL","email":"TEXT UNIQUE","age":"INTEGER CHECK(age>=0)","created_at":"DATETIME"},"value":{"name":"Alice","email":"alice@example.com","age":30,"created_at":"2026-01-15T10:00:00Z"},"source_table":"users","source_rowid":1}
+{"key":"users:2","schema":{"name":"TEXT NOT NULL","email":"TEXT UNIQUE","age":"INTEGER CHECK(age>=0)","created_at":"DATETIME"},"value":{"name":"Bob","email":"bob@example.com","age":25,"created_at":"2026-02-01T09:30:00Z"},"source_table":"users","source_rowid":2}
 ```
 
-#### 12.2.2 JOIN 結果出力
-```json
-{
-  "user": {
-    "name": "John",
-    "email": "john@example.com",
-    "dept_id": "D1"
-  },
-  "dept": {
-    "name": "Engineering"
-  }
-}
+フィールド定義：
+
+| フィールド | 型 | 説明 |
+|-----------|-----|------|
+| `key` | string | Adlaire DB のキー（`<prefix>:<rowid>` 形式） |
+| `schema` | object | SQLite の列名 → 型定義（`NOT NULL`, `UNIQUE`, `CHECK` 含む） |
+| `value` | object | レコードの実データ |
+| `source_table` | string | 元 SQLite テーブル名 |
+| `source_rowid` | integer | 元 SQLite rowid（検証用） |
+
+### 12.3 型マッピング（SQLite → Adlaire DB）
+
+| SQLite 型 | JSON 型 | 検証ルール |
+|-----------|---------|-----------|
+| `INTEGER` | number (integer) | 整数値であること |
+| `REAL` | number (float) | 浮動小数点値であること |
+| `TEXT` | string | UTF-8 文字列であること |
+| `BLOB` | string (base64) | base64 エンコード |
+| `DATETIME` | string (ISO8601) | `YYYY-MM-DDTHH:MM:SSZ` 形式 |
+| `BOOLEAN` | boolean | `0`/`1` → `false`/`true` 変換 |
+| `NULL` | null | `NOT NULL` 制約違反は移行エラー |
+
+### 12.4 移行処理フロー
+
 ```
+SQLite DB
+  │
+  ├─ 1. スキーマ読み取り（CREATE TABLE 定義）
+  │       └─ 列名・型・制約（NOT NULL, UNIQUE, CHECK）を抽出
+  │
+  ├─ 2. レコード全件スキャン（SELECT * FROM <table>）
+  │       ├─ 型変換（§12.3 のマッピングに従う）
+  │       ├─ 制約検証（NOT NULL, CHECK 違反 → エラー停止）
+  │       └─ JSONL 行を生成（§12.2 フォーマット）
+  │
+  ├─ 3. Adlaire DB への書き込み（--dry-run 時はスキップ）
+  │       ├─ ACID トランザクション（テーブル単位でまとめて TX）
+  │       ├─ 論理削除なし（移行は新規 WRITE のみ）
+  │       └─ WAL にすべてのレコードを記録
+  │
+  └─ 4. 検証（--verify 時）
+          ├─ ハッシュチェーン整合性チェック（全 WAL スキャン）
+          ├─ レコード件数の一致確認
+          └─ サマリーレポート出力
+```
+
+### 12.5 移行サマリーレポート
+
+```
+=== Adlaire DB Migration Report ===
+Source:  ./legacy.db
+Target:  ./mydb
+Tables:  users (1000 rows), products (450 rows), orders (3200 rows)
+
+Migrated: 4650 records
+Errors:   0
+Warnings: 2 (NULL values coerced in products.description)
+
+Hash chain: VALID (seq 1..4650)
+Duration:   3.2s
+
+Status: SUCCESS
+```
+
+### 12.6 エラーケースと挙動
+
+| エラー | 挙動 |
+|--------|------|
+| `NOT NULL` 制約違反 | 移行を即時停止。レコード番号とカラム名を報告 |
+| `CHECK` 制約違反 | 移行を即時停止。違反値を報告 |
+| `UNIQUE` 制約違反（テーブル内） | 移行を即時停止（同一テーブル内重複） |
+| 型変換不能値 | 移行を即時停止。値と期待型を報告 |
+| WAL 書き込み失敗 | ロールバック（ACID TX） |
+| `--dry-run` 時の検証エラー | 書き込みなし、エラーレポートのみ出力 |
 
 ---
 
