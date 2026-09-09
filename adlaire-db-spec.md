@@ -168,40 +168,26 @@ WAL（Write-Ahead Log）を変更の唯一の監査記録とする。現在状�
 
 **不変条件：** `state.db` が破損しても WAL から完全に再構築できる（`--rebuild`）。WAL を失った場合はデータ損失（I-1）。
 
-### 2.2 データモデル
+### 2.3 データモデル
 
-#### 2.2.1 レコード構造
-```
-Record {
-    key: String,                    // 一意キー
-    value: JSON,                    // データ（JSON形式）
-    version: u64,                   // バージョンID
-    transaction_id: u64,            // トランザクションID
-    timestamp: i64,                 // タイムスタンプ
-    hash: String,                   // SHA-256ハッシュ
-    prev_hash: String,              // 前レコードのハッシュ
-}
-```
+#### 2.3.1 WAL エントリ（永続表現）
 
-#### 2.2.2 イベント構造
-```
-Event {
-    id: String,                     // イベントID（UUID）
-    event_type: EventType,          // イベント型
-    key: String,                    // 対象キー
-    payload: JSON,                  // ペイロード（新値）
-    timestamp: i64,                 // イベント発生時刻
-    transaction_id: u64,            // トランザクションID
-    prev_hash: String,              // チェーン検証用
-    hash: String,                   // このイベントのハッシュ
-}
+WAL エントリが変更の正本。§2.2.2 の WAL バイナリ形式を参照。
 
-enum EventType {
-    Created,                        // レコード作成
-    Updated,                        // レコード更新
-    Deleted,                        // レコード削除
-    Recovered,                      // ロールバック復旧
-}
+#### 2.3.2 レコード（state.db 上の表現）
+
+`state.db` のユーザーテーブルに永続化される現在状態。`__key`, `__state`, `__version`, `__tx_id`, `__ts` の内部列と、ユーザー定義列で構成される（§2.2.1 の内部スキーマ参照）。
+
+#### 2.3.3 イベント型
+
+WAL の Entry Type（§2.2.2）として記録される：
+
+```
+WRITE エントリのペイロード例（JSON）：
+  Created  → {"name": "Alice", ...}
+  Updated  → {"name": "Bob", ...}
+  Deleted  → {"__state": "deleted", "deleted_at": <ts>}
+  Rollback → WAL の ABORT エントリ（ペイロードなし）
 ```
 
 ### 2.2 ストレージ構成（Phase 1：シングルノード）
@@ -337,7 +323,7 @@ fn recover_on_startup(wal: &mut WalReader) -> Result<RecoverySummary> {
 WAL 整合性チェック（起動時・コミット完了後）で以下のいずれかを検知した場合：
 - CRC32 エラー（ディスクビット腐敗）
 - ハッシュチェーン断絶（`hash` が前エントリの値と連鎖しない）
-- スナップショットと WAL の乖離（`--verify-snapshot` 検証失敗）
+- `state.db` と WAL の乖離（`adlaire-db verify` による不一致検出）
 
 DB を **read-only ロック**（新規書き込みを拒否）し、エラーログと終了コード `2` で終了する。自動修復・上書きは行わない。
 
@@ -361,7 +347,7 @@ WAL の任意の地点での状態を第三者が検証できる証明を発行�
   "issued_at": "2026-09-09T12:00:00Z",
   "key_count": 9823,
   "root_hash": "SHA-256 of ordered (key, hash) pairs at this WAL sequence",
-  "issuer": "adlaire-db-v2.0",
+  "issuer": "adlaire-db-v2.1",
   "signature_algorithm": "Ed25519"
 }
 // checkpoints/cp-00001.sig  ← Ed25519 署名バイト（hex）
@@ -370,7 +356,7 @@ WAL の任意の地点での状態を第三者が検証できる証明を発行�
 **検証手順（専用クライアント不要）：**
 1. `cp-NNNNN.json` と `cp-NNNNN.sig` を取得
 2. 公開鍵で `sig` を検証
-3. WAL（または `event_log.jsonl` エクスポート）を順に読み、`root_hash` を自分で計算
+3. WAL エクスポート JSONL（`adlaire-db export-audit` 出力）を順に読み、`root_hash` を自分で計算
 4. 計算値と `root_hash` が一致すればチェックポイント時点の整合性が証明される
 
 **発行タイミング：** `adlaire-db checkpoint --sign <keyfile>` コマンドで手動発行（Phase 1）。
@@ -1665,9 +1651,11 @@ registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"
 ├── bin/
 │   └── adlaire-db          # バイナリ実行ファイル
 ├── data/
-│   ├── kv_store.bin         # KV データ
-│   ├── event_log.jsonl      # イベントログ
-│   └── metadata.json        # メタデータ
+│   ├── .lock                # プロセス排他ロック
+│   ├── wal.bin              # append-only 監査 WAL（唯一の正本）
+│   ├── state.db             # SQLite 現在状態（WAL から再構築可能）
+│   ├── metadata.json        # メタデータ
+│   └── checkpoints/         # 署名済み外部チェックポイント
 ├── logs/
 │   ├── access.log           # アクセスログ
 │   ├── error.log            # エラーログ
@@ -1912,9 +1900,12 @@ df -h /var/lib/adlaire-db/ | tail -1 | awk '{
 }'
 
 # イベントログファイルチェック
-if [ ! -f /var/lib/adlaire-db/data/event_log.jsonl ]; then
-  echo "CRITICAL: event_log.jsonl が見つかりません"
+if [ ! -f /var/lib/adlaire-db/data/wal.bin ]; then
+  echo "CRITICAL: wal.bin が見つかりません（データ損失の可能性）"
   exit 2
+fi
+if [ ! -f /var/lib/adlaire-db/data/state.db ]; then
+  echo "WARNING: state.db が見つかりません（adlaire-db rebuild で再構築可能）"
 fi
 
 echo "OK: adlaire-db ヘルスチェック合格"
@@ -2160,6 +2151,9 @@ client.close()
 ---
 
 ### 18.2 REST API（ポート 8080）
+
+> **後回し（Phase 1 スコープ外）**  
+> Phase 1 はカスタム TCP プロトコル（§18.1）のみ。REST と TCP の同時提供は後回し（§1.3.1 参照）。本セクションは将来の参考仕様として保持する。
 
 **用途** ：標準インターフェース、ウェブアプリケーション、ロードバランサー対応
 
@@ -2460,19 +2454,13 @@ async fn main() {
         handle_tcp_connections(tcp_listener).await;
     });
     
-    // REST API サーバ（ポート 8080）
-    let app = Router::new()
-        .route("/api/v1/kv/:key", axum::routing::get(get_kv)
-            .put(set_kv)
-            .delete(delete_kv))
-        .route("/api/v1/events/:key", axum::routing::post(append_event)
-            .get(get_history))
-        .route("/api/v1/join/:left_key/:right_table", axum::routing::get(join));
-    
-    axum::Server::bind(&"127.0.0.1:8080".parse().unwrap())
-        .serve(app.into_make_service())
-        .await
-        .unwrap();
+    // REST API サーバ（ポート 8080）← 後回し（Phase 1 スコープ外・§18.2 参照）
+    // Phase 1 は TCP のみ。以下は将来 Phase 2+ で実装予定のスタブ。
+    // let app = Router::new()
+    //     .route("/api/v1/kv/:key", axum::routing::get(get_kv).put(set_kv).delete(delete_kv))
+    //     .route("/api/v1/events/:key", axum::routing::post(append_event).get(get_history));
+    // axum::Server::bind(&"127.0.0.1:8080".parse().unwrap())
+    //     .serve(app.into_make_service()).await.unwrap();
 }
 ```
 
@@ -2480,207 +2468,27 @@ async fn main() {
 
 ```
 1. サーバー起動時
-   ├─ metadata.json, shard_map.json のハッシュ検証
-   ├─ 全シャードの data.kv チェックサム検証
-   ├─ journal.log の未コミットトランザクションリカバリ
-   └─ ロック残骸クリア
+   ├─ .lock ファイル取得（I-5）
+   ├─ wal.bin の末尾スキャン（COMMITTED / PENDING / PARTIAL 判定・I-8）
+   ├─ state.db の存在確認（なければ --rebuild で WAL から再構築）
+   └─ ハッシュチェーン検証（CRC32 / チェーン断絶 → exit 2・I-3）
 
 2. トランザクション実行前
-   ├─ ファイルロック取得
-   └─ ロック持有者の生存確認
+   ├─ スキーマ制約検証（型・NOT NULL・UNIQUE・CHECK）
+   └─ WAL BEGIN エントリ書き込み
 
 3. トランザクション完了後（コミット時）
-   ├─ journal.log に COMMITTED 記録
-   ├─ data.kv 更新
-   ├─ チェックサム再計算
-   ├─ メタデータ更新（新バージョン情報）
-   └─ ロック解放
+   ├─ WAL COMMIT エントリ書き込み + fsync（I-1）
+   ├─ state.db へ反映（SQLite COMMIT）
+   └─ クライアントへ成功応答
 
-4. 定期チェック（例：1時間ごと）
-   ├─ 全ファイルのハッシュ検証
-   ├─ デッドロック検知・解放
-   └─ 古いバージョンの圧縮・削除
-
-5. エラー発生時
-   ├─ journal.log から状態確認
-   ├─ 必要に応じてロールバック実行
-   └─ 監査ログに記録
+4. 定期チェックポイント
+   ├─ WAL CHECKPOINT エントリ書き込み
+   ├─ state.db のインテグリティ確認（adlaire-db verify）
+   └─ 古い WAL エントリの圧縮（state.db が最新なら安全）
 ```
 
-#### 2.2.4 ファイル仕様詳細
-
-**【ファイル1】metadata.dat（バイナリ形式、約1-10KB）**
-
-メタデータ、チェックサム、バージョン情報、クラスタ情報を統合管理。
-
-```
-【ヘッダ部（固定）】
-[Magic: 4B]             # "AADB" (0x41414442)
-[Version: 2B]           # フォーマットバージョン
-[Header Size: 2B]       # ヘッダサイズ
-
-【メタデータセクション】
-[Shard ID: 4B]
-[Shard Version: 4B]
-[Timestamp: 8B]
-[Data Size: 8B]         # data.kv のサイズ
-[Data Hash: 32B]        # data.kv の SHA256
-[TxLog Size: 8B]        # txlog.dat のサイズ
-[TxLog Hash: 32B]       # txlog.dat の SHA256
-[Metadata Hash: 32B]    # このセクション自体のハッシュ
-
-【クラスタ情報セクション】
-[Cluster Mode: 1B]      # 0=Single, 1=Replicated, 2=Sharded
-[Node Count: 2B]
-[Node URL Array]        # "node1:9876|node2:9876|..."
-
-【バージョン管理セクション】
-[Current Version: 4B]
-[Version Count: 2B]
-[Version Entry 1: Timestamp + Hash]
-[Version Entry 2: Timestamp + Hash]
-...
-```
-
-**JSON表現（参考）：**
-```json
-{
-  "magic": "AADB",
-  "version": 1,
-  "shard_id": 0,
-  "shard_version": 4,
-  "timestamp": "2026-09-09T12:30:00Z",
-  "data_kv": {
-    "size": 1048576,
-    "hash": "a3c4f2e8d9b1c6a7e2f8d9b1c6a7e2f8"
-  },
-  "txlog": {
-    "size": 8192,
-    "hash": "b4d5e3f9a2c7d8b6e3f9a2c7d8b6e3f9"
-  },
-  "cluster": {
-    "mode": "single",
-    "nodes": ["localhost:9876"]
-  },
-  "versions": [
-    {"version": 4, "timestamp": "2026-09-09T12:30:00Z", "hash": "c5e6f4..."},
-    {"version": 3, "timestamp": "2026-09-09T12:25:00Z", "hash": "d6f7e5..."}
-  ]
-}
-```
-
----
-
-**【ファイル2】data.kv（バイナリ形式、可変、通常 1MB～ GB単位）**
-
-KV Store とイベントログを複合管理（アペンド・オンリー）。
-
-```
-【KV Store 部】
-[Key1 Length: 4B][Key1][Value1 Length: 4B][Value1: JSON]
-[Key2 Length: 4B][Key2][Value2 Length: 4B][Value2: JSON]
-...
-
-【イベントログ部（アペンド・オンリー）】
-各キーに対する変更イベント：
-[Timestamp: 8B][Operation: 1B][Key Length: 4B][Key][Event Data Length: 4B][Event Data: JSON]
-...
-
-【インデックス（メモリキャッシュまたは別途管理）】
-Key → オフセット マッピング
-例：
-  "user:1" → Offset: 1024
-  "user:2" → Offset: 2048
-```
-
-**例データ：**
-```
-Offset 0:
-  [4][user:1][52][{"name": "John", "email": "john@example.com"}]
-  [4][user:2][48][{"name": "Jane", "email": "jane@example.com"}]
-
-イベント部：
-  [1694250600000][SET]["user:1"][52][{"name": "John", "email": "john@example.com"}]
-  [1694250605000][UPDATE]["user:1"][52][{"name": "John Doe", "email": "john@example.com"}]
-```
-
----
-
-**【ファイル3】txlog.dat（バイナリ形式、通常 10KB～ MB単位）**
-
-トランザクションログ + ジャーナルログ（Write-Ahead Logging）を統合。
-
-```
-【トランザクションログ部】
-[TX ID: 8B][TX Type: 1B][Status: 1B][Timestamp: 8B][Data Length: 4B][Data][Checksum: 32B]
-
-TX Type:
-  0x00 = SET      # KV 設定
-  0x01 = DELETE   # KV 削除
-  0x02 = APPEND   # イベント追加
-  0x03 = BATCH    # バッチ操作
-
-Status:
-  0x00 = PENDING    # トランザクション開始（未コミット）
-  0x01 = COMMITTED  # コミット完了
-  0x02 = APPLIED    # ファイル適用完了
-  0x03 = ABORTED    # ロールバック
-
-【ジャーナルログ部（WAL - Write-Ahead Logging）】
-トランザクションのコミット前にこのセクションに記録
-[JournalState: 1B][TX ID: 8B][Data][Checksum: 32B]
-...
-```
-
-**例：**
-```
-TX 1001:
-  [001001][SET][PENDING][1694250600][52][{"user:1": {...}}][hash...]
-  [001001][SET][COMMITTED][1694250600][52][{"user:1": {...}}][hash...]
-  [001001][SET][APPLIED][1694250601][52][{"user:1": {...}}][hash...]
-
-TX 1002:
-  [001002][APPEND][PENDING][1694250605][...][hash...]
-  [001002][APPEND][COMMITTED][1694250605][...][hash...]
-```
-
-#### 2.2.5 将来の分散対応設計
-
-ファイル構成を分散対応として設計し、将来以下を実装可能：
-
-**Phase 2：レプリケーション（Master-Replica）**
-```
-Master Node: shard_0, shard_1, shard_2, shard_3
-  ↓ (複製 + チェックサム同期)
-Replica Node A: shard_0, shard_1, shard_2, shard_3
-  ↓ (複製 + チェックサム同期)
-Replica Node B: shard_0, shard_1, shard_2, shard_3
-
-metadata.json で "cluster_nodes" に Replica を追加
-チェックサムが一致していることで整合性保証
-```
-
-**Phase 3：シャーディング（複数ノード分散）**
-```
-Node A: Shard 0, 1
-Node B: Shard 2, 3
-Node C: Shard 4, 5
-
-shard_map.json でシャード配置を管理
-各クライアント要求に対し、Coordinator が適切なノードにルーティング
-ハッシュ検証で各ノードのデータ整合性確認
-```
-
-**Phase 4：分散トランザクション（2-Phase Commit）**
-```
-Client が複数シャードにまたがるトランザクション実行
-→ Coordinator が 2-Phase Commit で調整
-→ すべてのシャードで ACID を保証
-→ 一部失敗時は全ノードロールバック
-→ journal.log でリカバリポイント管理
-```
-
----
+> **注：** 旧アーキテクチャの `metadata.dat`（バイナリ）・`data.kv`・`txlog.dat` ファイル仕様は v2.1 で廃止。現行のファイル仕様は §2.2 を参照。分散フェーズ（Phase 2-4）のストレージ設計は §20 を参照。
 
 ---
 
@@ -2724,19 +2532,12 @@ Client が複数シャードにまたがるトランザクション実行
 
 ### 19.3 インデックス戦略
 
-**Phase 1（メモリベース）：**
-```rust
-HashMap<String, u64> // Key -> Offset マッピング
-- メモリ効率：1キーあたり約100-200バイト
-- 対応データサイズ：< 1GB推奨
+**Phase 1（SQLite B+Tree）：**
 ```
-
-**Phase 1.5（永続化オプション）：**
-```
-ディスク上の B+Tree インデックス
-- 構造：shard_N/index.btree
-- メモリ使用量削減：> 50%
-- 対応データサイズ：< 10GB
+state.db（SQLite）の B+Tree インデックスを使用
+- メモリ効率：SQLite の page cache 設定に従う（デフォルト 2MB）
+- 対応データサイズ：SQLite の上限（< 281 TB）まで対応
+- 独自インデックス実装は不要（§1.3.1 参照）
 ```
 
 **Phase 2（分散インデックス）：**
@@ -3091,7 +2892,10 @@ Adlaire-DB では Phase 1 の KV + Event Log を基盤レイヤーとし、将�
 
 ### 21.1 Prometheus メトリクス
 
-**基本メトリクス：**
+> **後回し（Phase 1 スコープ外）**  
+> Phase 1 は構造化ログ（§21.2）で代替する。Prometheus / Grafana 統合は後回し（§1.3.1 参照）。
+
+**基本メトリクス（将来実装）：**
 ```
 adlaire_db_requests_total
   # リクエスト総数（operation タグ：GET, SET, DELETE, APPEND, JOIN）
@@ -3232,7 +3036,7 @@ FATAL   : サービス停止（起動失敗、致命的障害）
 **テストシナリオ：**
 ```
 1. ファイル破損
-   - data.kv を一部上書き
+   - state.db を一部上書き
    - 起動時の整合性チェック検証
 
 2. ネットワーク遅延
@@ -3392,7 +3196,7 @@ async fn test_distributed_commit_with_network_fault() {
 **バックアップポリシー：**
 ```
 日次フルバックアップ：毎日 深夜 2時
-  ├─ 対象：全シャード（metadata.dat, data.kv, txlog.dat）
+  ├─ 対象：全シャード（metadata.json, state.db, wal.bin）
   ├─ 保持：7日分
   └─ 検証：チェックサム確認
 
@@ -3417,7 +3221,7 @@ async fn test_distributed_commit_with_network_fault() {
 1. サーバー起動
 2. ファイル整合性チェック失敗
 3. 自動で前バージョン（shard_0_v1）から復旧
-4. 操作ログ再実行（txlog.dat）
+4. 操作ログ再実行（wal.bin）
 5. 正常起動
 ```
 
@@ -3484,7 +3288,7 @@ async fn test_distributed_commit_with_network_fault() {
   サーバー側：
     ├─ リクエストから Authorization ヘッダを抽出
     ├─ API Key をハッシュ化
-    ├─ metadata.dat のハッシュ値と比較
+    ├─ metadata.json のハッシュ値と比較
     ├─ 一致時：リクエスト処理
     └─ 不一致時：401 Unauthorized 返答
 ```
@@ -3504,7 +3308,7 @@ async fn test_distributed_commit_with_network_fault() {
   └─ 期限切れ時：自動 401 返答
 
 【保存方式】
-  metadata.dat の credentials セクション：
+  metadata.json の credentials セクション：
   
   [API Key Hash: 32B]
   [Role: 1B]
@@ -3645,12 +3449,10 @@ fn check_permission(api_key: &str, operation: Operation) -> Result<()> {
   /var/lib/adlaire-db/
     ├─ Owner: adlaire-db:adlaire-db
     ├─ Permission: 700 (rwx------)
-    ├─ shard_0/
-    ├─ shard_1/
-    └─ ...
+    └─ data/                    # データディレクトリ（§2.2 参照）
 
 【ファイルレベル権限】
-  metadata.dat, data.kv, txlog.dat
+  metadata.json, state.db, wal.bin
     ├─ Owner: adlaire-db:adlaire-db
     ├─ Permission: 600 (rw-------)
     └─ 他ユーザー・グループアクセス禁止
@@ -3853,7 +3655,7 @@ ReadWritePaths=/var/lib/adlaire-db
 
 ---
 
-## 25. データ保存時暗号化（Phase 1.5）
+## 25. データ保存時暗号化（後回し）
 
 > **後回し（Phase 1 スコープ外）**  
 > TLS によるトランスポート暗号化を Phase 1 で提供する。保存時暗号化（at-rest encryption）はその後の検討課題。
@@ -3880,13 +3682,13 @@ IV（初期化ベクトル）：96 ビット（推奨）
 
 【Data Key】
   ├─ 生成：ファイルごとにランダム生成
-  ├─ 保存：metadata.dat に格納
+  ├─ 保存：metadata.json に格納
   ├─ Master Key で保護
-  └─ IV：metadata.dat ヘッダに平文保存
+  └─ IV：metadata.json ヘッダに平文保存
 
 【Key Rotation】
   新 Master Key に移行する際：
-    1. 全 data.kv を新 Key で復号化
+    1. 全 state.db を新 Key で復号化
     2. 新 Master Key で再暗号化
     3. メタデータ更新
     4. 旧 Key は 90日間保持後削除
@@ -3896,9 +3698,9 @@ IV（初期化ベクトル）：96 ビット（推奨）
 
 **暗号化対象：**
 ```
-✅ data.kv（KV Store + イベントログ）
-✅ txlog.dat（トランザクションログ）
-❌ metadata.dat（平文、鍵情報含む）
+✅ state.db（SQLite 現在状態・スキーマ・インデックス）
+✅ wal.bin（監査 WAL・ハッシュチェーン）
+⚠️ metadata.json（平文。鍵情報は格納しない設計を推奨）
 ```
 
 **コード例（Rust）：**
@@ -3924,23 +3726,17 @@ fn decrypt_data(ciphertext: &[u8], key: &Key<Aes256Gcm>, iv: &[u8]) -> Result<Ve
 }
 ```
 
-### 25.4 Phase 1.5 スケジュール
+### 25.4 実装スケジュール（後回し）
 
 ```
-【Phase 1.5：データ保存時暗号化実装】
-期間：2週間（Phase 1 後、8-10週目）
+【後回し：データ保存時暗号化実装】
+Phase 1 完了後（Week 10 以降）に着手予定。
 
-Week 8-9：
-  1. AES-256-GCM 実装
-  2. 鍵管理機構実装
-  3. ファイル暗号化・復号化機能
+  1. state.db の暗号化（SQLCipher または AES-256-GCM でファイル全体を暗号化）
+  2. wal.bin の暗号化（エントリ単位または全体）
+  3. 鍵管理機構実装
   4. Key Rotation 機能
-  5. ユニットテスト
-
-Week 10：
-  1. 統合テスト
-  2. パフォーマンス測定（暗号化 overhead 評価）
-  3. 本番環境デプロイ準備
+  5. 統合テスト + パフォーマンス測定（暗号化 overhead 評価）
 ```
 
 ---
@@ -4356,9 +4152,9 @@ curl http://localhost:9090/api/v1/query?query=memory_usage_percent
 1. サーバーメモリをアップグレード
    現在：4GB → 推奨：8-16GB
 
-2. インデックス永続化を導入（Phase 1.5）
-   → ディスクベースのインデックスを使用
-   → メモリ使用量 50%削減
+2. state.db の SQLite page cache 設定を調整
+   → PRAGMA cache_size = -65536 で 64MB キャッシュ確保
+   → メモリ使用量を抑制（インデックスはディスク上の state.db が保持）
 
 3. データサイズを分割
    → シャード数を増やす
@@ -4391,8 +4187,8 @@ ls -lh /var/log/adlaire-db/
 1. 古いログを削除
    find /var/log/adlaire-db -name "*.gz" -mtime +30 -delete
 
-2. バックアップファイルを削除（重要：前提：別途保管確認）
-   rm -rf /var/lib/adlaire-db/shard_0_v3/
+2. 不要な古いバックアップを削除（重要：別途保管確認済みのもののみ）
+   rm -rf /backup/adlaire-db/backup-old/
 
 【根本対応】
 1. ストレージをアップグレード
@@ -4413,10 +4209,11 @@ ls -lh /var/log/adlaire-db/
 
 **診断コマンド：**
 ```bash
-# チェックサム検証
-sha256sum /var/lib/adlaire-db/shard_0/data.kv
-# metadata.dat のハッシュと比較
-cat /var/lib/adlaire-db/shard_0/metadata.dat | grep -A1 "data_kv_hash"
+# ハッシュチェーン・整合性検証
+adlaire-db verify --data /var/lib/adlaire-db/data
+
+# state.db と WAL の乖離を確認（exit code 2 → 整合性異常）
+adlaire-db verify --data /var/lib/adlaire-db/data --check-state-db
 
 # ファイルシステムチェック
 fsck /dev/sda1  # デバイス名は環境に応じて変更
@@ -4424,21 +4221,22 @@ fsck /dev/sda1  # デバイス名は環境に応じて変更
 
 **対応方法：**
 ```
-【Phase 1（ロールバック）】
-1. 前バージョンから復旧
-   cp -r /var/lib/adlaire-db/shard_0_v1/* \
-         /var/lib/adlaire-db/shard_0/
+【Phase 1：state.db 再構築】
+1. state.db を WAL から再構築（破損しても WAL が正本・I-1）
+   adlaire-db rebuild --data /var/lib/adlaire-db/data
    systemctl restart adlaire-db
 
-2. WAL から操作を再実行（自動）
-   → サーバー起動時に自動リカバリ
+2. WAL 自体が破損している場合（CRC32 エラー）
+   → 起動時に exit 2 で停止（I-3）
+   → バックアップから wal.bin を復元し rebuild を実行
 
-【Phase 1.5（PITR）】
+【PITR（後回し）】
 1. バックアップから復旧
-   tar xzf /backup/adlaire-db/shard_0-2026-09-09.tar.gz -C /var/lib/adlaire-db/
+   tar xzf /backup/adlaire-db/backup-2026-09-09.tar.gz -C /var/lib/adlaire-db/
+   adlaire-db rebuild --data /var/lib/adlaire-db/data
    systemctl restart adlaire-db
 
-2. 特定時点まで WAL を再適用
+2. 特定時点まで WAL を再適用（wal.bin の seq 指定再生）
 ```
 
 #### **問題5：ネットワーク分断（Network Partition）**
@@ -4527,34 +4325,26 @@ jq 'select(.duration_ms > 50)' /var/log/adlaire-db/*.json
 
 ## 28. 実装リスク・対策
 
-### 28.1 リスク 1：インデックス永続化（Phase 1）
+### 28.1 リスク 1：インデックス永続化（解決済み）
 
-**懸念：**
+> **v2.1 で解決済み**  
+> SQLite をストレージバックエンドとして採用（`state.db`）したことで、インデックス永続化は SQLite の B+Tree が担う。独自のインデックス永続化実装は不要になった。
+
+**旧懸念（参考）：**
 ```
-├─ 1GB 以上のデータでメモリ不足の可能性
-├─ シナリオ3 テスト時にメモリが問題になる可能性
-└─ インデックス永続化は実装後の追加になる
+├─ 1GB 以上のデータでメモリ不足の可能性（→ SQLite がディスク上で管理するため解消）
+├─ カスタム B+Tree 実装コスト（→ SQLite の実績ある実装を利用）
+└─ インデックスと WAL の同期（→ WAL コミット後に state.db へ反映する設計で整合）
 ```
 
-**対策：**
+**現在のリスク（残存）：**
 ```
-├─ Phase 1 実装時にインデックス永続化の設計済みにする
-│  └─ B+Tree インデックス設計を事前に完成
+├─ SQLite の書き込みロック（WAL モード設定が必要）
+│  → state.db は WAL モード（PRAGMA journal_mode=WAL）で初期化する
+│  → Adlaire DB 自身の WAL（wal.bin）と SQLite の WAL（state.db-wal）が共存する
 │
-├─ Phase 1 最後にオプション実装
-│  └─ Week 12-13 で B+Tree インデックスをオプション機能化
-│
-└─ 早期段階でベンチマークして判断
-   ├─ Week 4：100MB データでテスト
-   ├─ Week 8：500MB データでテスト
-   └─ Week 12：1GB データでテスト
-      → メモリ使用量 > 1GB なら B+Tree 導入
-```
-
-**実装優先度：**
-```
-【必須】KV Store + イベントログ（メモリ）
-【オプション】B+Tree インデックス（ディスク永続化）
+└─ state.db の破損リスク
+   → wal.bin から --rebuild で完全再構築できるため影響は限定的（I-1）
 ```
 
 ---
