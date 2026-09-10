@@ -110,6 +110,9 @@ Phase 1 では libSQL クレートのみを許容する。それ以外の外部�
 **I-12：置き換え可能抽象レイヤー**  
 各コンポーネント（ストレージ・WAL エンジン・SQL エンジン）は Phase 2 で Rust trait として定義する。Phase 2 では libSQL を実装として使用し、Phase 3〜5 では同じ trait の自前実装に差し替える。サーバー層（Adlaire サーバー層・OCC・MVCC）は trait 経由でのみコンポーネントと通信し、具体型に依存しない。trait の変更なしに実装を交換できることを Phase 完了条件とする（詳細は §2.5）。
 
+**I-13：配布はバイナリ形式のみ**  
+サーバーバイナリ（`adlaire-db`）および SDK ライブラリは、コンパイル済みバイナリとして配布する。エンドユーザーにソースコードは配布しない。Linux 向けは musl 静的リンク（`x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl`）によりランタイム依存ゼロを保証する。macOS 向けは静的リンク可能な範囲で依存を最小化する。配布物には SHA-256 チェックサムを必ず添付する（詳細は §16.3）。
+
 ---
 
 ## 2. アーキテクチャ
@@ -2052,6 +2055,61 @@ scrape_configs:
 - 全データを DB で管理
 - レガシーシステムとの連携終了
 - 本番運用開始
+
+---
+
+### 16.3 バイナリ配布方針（I-13）
+
+**原則：エンドユーザーへはコンパイル済みバイナリのみを配布する。ソースコードは配布しない。**
+
+#### 16.3.1 配布物一覧
+
+| 配布物 | 形式 | 対象 |
+|---|---|---|
+| `adlaire-db` | 実行バイナリ（静的リンク） | サーバー運用者 |
+| `libadlaire_client.a` | 静的ライブラリ | Rust SDK 組み込み用 |
+| `libadlaire_client.so` | 動的ライブラリ | 他言語 SDK バインディング用 |
+| SDK パッケージ（Go / TS 等） | 言語パッケージマネージャ経由 | アプリケーション開発者 |
+
+#### 16.3.2 ターゲットプラットフォーム
+
+| プラットフォーム | ターゲットトリプル | リンク方式 |
+|---|---|---|
+| Linux x86_64 | `x86_64-unknown-linux-musl` | musl 静的リンク・glibc 依存なし |
+| Linux aarch64 | `aarch64-unknown-linux-musl` | musl 静的リンク・glibc 依存なし |
+| macOS x86_64 | `x86_64-apple-darwin` | 静的リンク最大化（system libs のみ） |
+| macOS aarch64 | `aarch64-apple-darwin` | 静的リンク最大化（system libs のみ） |
+
+#### 16.3.3 ビルド・配布手順
+
+```bash
+# Linux 向け musl 静的リンクビルド
+cargo build --release --target x86_64-unknown-linux-musl
+cargo build --release --target aarch64-unknown-linux-musl
+
+# macOS 向けビルド（CI: GitHub Actions の macOS runner）
+cargo build --release --target x86_64-apple-darwin
+cargo build --release --target aarch64-apple-darwin
+
+# パッケージ化（ターゲットごと）
+tar -czf adlaire-db-v{VERSION}-x86_64-linux.tar.gz \
+    -C target/x86_64-unknown-linux-musl/release adlaire-db
+
+# SHA-256 チェックサム生成（I-13）
+sha256sum adlaire-db-v{VERSION}-*.tar.gz > SHA256SUMS.txt
+```
+
+#### 16.3.4 配布チャネル
+
+- **GitHub Releases**：各バージョンタグにバイナリアーカイブ + `SHA256SUMS.txt` を添付
+- **Rust SDK**（`adlaire-client`）：crates.io でソース配布（Rust エコシステムの慣習に従う。ビルドは利用者側）
+- **他言語 SDK**：GitHub Releases に言語別パッケージを添付。将来的に各言語パッケージマネージャへ公開
+
+**検証手順（エンドユーザー向け）：**
+```bash
+# ダウンロード後にチェックサム検証
+sha256sum -c SHA256SUMS.txt
+```
 
 ---
 
