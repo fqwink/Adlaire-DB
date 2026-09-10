@@ -56,7 +56,7 @@ libSQL 内部コンポーネントの内製化はフェーズ完了後に計画�
 
 ---
 
-## 2. Turso Cloud 機能パリティ
+## 2. 機能スコープ
 
 ### 2.1 クライアント接続
 
@@ -373,7 +373,7 @@ sqld の hrana HTTP ハンドラ関数（axum router 等）は使わない。JSO
 |------|------|---------|
 | ユニットテスト | JWT 検証・hrana JSON 変換・DB 名バリデーション・エラーコード変換 | 60% |
 | 統合テスト | `adlaire-db serve` を起動して curl / TypeScript SDK で叩く（TC-1〜TC-6） | 35% |
-| E2E テスト | libSQL TypeScript SDK の全 API を実際に通す（TC-4・TC-3-1〜TC-3-5） | 5% |
+| E2E テスト | libSQL TypeScript SDK の全 API を実際に通す（TC-4・TC-3-1〜TC-3-6） | 5% |
 
 **CI 構成（GitHub Actions）：**
 
@@ -2578,7 +2578,7 @@ HTTP ステータス：503
 
 | 用語 | 定義 |
 |------|------|
-| Turso Cloud | libSQL のマネージドホスティングサービス。Adlaire DB の機能パリティ参照先 |
+| Turso Cloud | libSQL のマネージドホスティングサービス。Adlaire DB の hrana プロトコル互換の参照実装 |
 | libSQL | SQLite フォーク。HTTP API・WAL レプリケーション等を追加した OSS DB ライブラリ |
 | sqld | libSQL のサーバーコンポーネント。HTTP API・WebSocket API を提供する |
 | libSQL フォーク | Adlaire DB 専用に改変した libSQL（sqld 含む）。本プロジェクトの全体基盤 |
