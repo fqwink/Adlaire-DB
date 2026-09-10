@@ -2496,18 +2496,24 @@ async fn main() {
 
 ---
 
-### 18.5 クライアント接続アーキテクチャ（TCP + HTTP/JSON + SDK 複合）
+### 18.5 クライアント接続アーキテクチャ（SDK 必須・TCP / HTTP/JSON はワイヤ形式）
 
-TCP バイナリプロトコルと HTTP/JSON API を並列で提供し、SDK がそれぞれのワイヤ形式を包む複合アーキテクチャを採用する。
+**アプリケーションは必ず SDK 経由で接続する。** TCP と HTTP/JSON はサーバー側のワイヤ形式であり、アプリケーションが直接扱うものではない。curl・スクリプトなど SDK を使わない場合のみ HTTP/JSON に直接アクセスする。
 
 #### 18.5.1 全体像
 
 ```
 アプリケーション
-    ├─ Rust SDK ──────────────→ TCP :9876（ADLR/ADLA）  高性能パス
-    ├─ 他言語 SDK（Go・TS 等）→ HTTP :8080（JSON）      汎用パス
-    └─ curl / Web / スクリプト→ HTTP :8080（JSON）      ツール直接アクセス
-                   ↓
+    ├─ Rust SDK ──────────────┐
+    ├─ Go SDK ────────────────┤ SDK API（言語ネイティブ）
+    ├─ TypeScript SDK ────────┤  ・OCC リトライ
+    └─ その他言語 SDK ────────┘  ・RAII トランザクション
+             │                   ・論理削除透過
+             │                   ・エラーマッピング
+             │
+             ├─ TCP/ADLR/ADLA → :9876（Rust SDK が使用・高性能）
+             └─ HTTP/JSON     → :8080（その他 SDK が使用・汎用）
+                                  ↑ curl / Web / スクリプトも直接ここへ
     ┌─────────────────────────────────────────┐
     │   Adlaire サーバー                      │
     │   :9876  TCP リスナー（std::net）       │
@@ -2520,32 +2526,32 @@ TCP バイナリプロトコルと HTTP/JSON API を並列で提供し、SDK が
 
 #### 18.5.2 SDK の役割
 
-SDK はワイヤ形式の差異を吸収し、アプリケーションに言語ネイティブな API を提供する。
+SDK がワイヤ形式の差異とプロトコル詳細を吸収する。アプリケーションはワイヤ形式を意識しない。
 
 | SDK 機能 | 内容 |
 |---|---|
-| OCC WriteConflict 自動リトライ | `0x02 WRITE_CONFLICT` 受信時に指数バックオフでリトライ。リトライ上限はコンフィグ可 |
-| トランザクション管理 | BEGIN / COMMIT / ROLLBACK を RAII で包む（Rust では `Drop` でロールバック） |
+| OCC WriteConflict 自動リトライ | `WRITE_CONFLICT` 受信時に指数バックオフでリトライ。上限はコンフィグ可 |
+| トランザクション管理 | BEGIN / COMMIT / ROLLBACK を RAII で包む（Rust: `Drop` でロールバック） |
 | 接続管理 | TCP: コネクションリース。HTTP: Keep-Alive。切断時は自動再接続 |
-| 論理削除透過 | DELETE コマンドを SDK 側で `0x02 DELETE` コマンドに変換（TCP）または DELETE エンドポイントに転送（HTTP） |
+| 論理削除透過 | アプリの DELETE 呼び出しを `0x02 DELETE`（TCP）または DELETE エンドポイント（HTTP）に変換 |
 | エラーマッピング | ステータスバイト / HTTP ステータスコードを言語ネイティブなエラー型へ変換 |
+| ワイヤ形式隠蔽 | アプリは TCP か HTTP かを意識しない。SDK 初期化時に決定される |
 
-#### 18.5.3 ワイヤ形式の選択基準
+#### 18.5.3 SDK 別ワイヤ形式
 
-| ユースケース | 推奨ワイヤ形式 |
-|---|---|
-| Rust アプリ・内部ツール・高スループット | TCP/ADLR/ADLA（§18.1） |
-| Go / TypeScript / Python アプリ | HTTP/JSON（§18.2） |
-| curl・CI スクリプト・監査ツール | HTTP/JSON（§18.2） |
-| Web フロントエンド（ブラウザ） | HTTP/JSON（§18.2） |
+| SDK | ワイヤ形式 | 理由 |
+|---|---|---|
+| `adlaire-client`（Rust） | TCP/ADLR/ADLA（§18.1） | 外部 HTTP クライアント不要・最低レイテンシ |
+| Go / TypeScript / Python SDK | HTTP/JSON（§18.2） | 各言語の標準 HTTP クライアントで実装可 |
+| curl・CI スクリプト・Web | HTTP/JSON（§18.2）直接 | SDK なし・ツール直接アクセス |
 
 #### 18.5.4 Phase 別実装計画
 
 | Phase | 追加内容 |
 |---|---|
-| Phase 2 | TCP/ADLR/ADLA（:9876）実装完了。Rust SDK（基本） |
-| Phase 2+ | HTTP/JSON（:8080）追加。他言語 SDK 雛形（Go / TypeScript） |
-| Phase 3〜 | SDK の OCC リトライ・接続プール強化 |
+| Phase 2 | TCP/ADLR/ADLA（:9876）+ `adlaire-client`（Rust SDK 基本） |
+| Phase 2+ | HTTP/JSON（:8080）+ Go / TypeScript SDK 雛形 |
+| Phase 3〜 | 全 SDK の OCC リトライ・接続プール強化 |
 
 **制約：** HTTP/JSON 実装も外部クレートなし（`std::net` + 自前 HTTP/1.1 パーサ）。`tokio` / `axum` / `hyper` は使用しない（I-11）。
 
