@@ -297,6 +297,82 @@ sqld が独自の hrana 実装を持つ場合、その型をそのまま流用�
 4. `meta/databases.json` からエントリを削除
 5. 成功レスポンスを返す
 
+### 3.5 開発・保守方針
+
+#### 3.5.1 hrana-http 変換層の方針
+
+sqld は hrana-http の型（ステートメント・カラム・行・エラー）を Rust の struct として持つ。Adlaire ではこの**型だけを借用**し、sqld の HTTP サーバーは起動しない。
+
+**採用する方式：sqld 型流用 + Adlaire 独自シリアライズ**
+
+```
+POST /v2/pipeline
+  ↓ Adlaire: JSON → sqld の Statement 型にデシリアライズ
+  ↓ sqld: Connection::execute() を呼び出す
+  ↓ sqld: QueryResult 型を返す
+  ↓ Adlaire: QueryResult → hrana-http v2 JSON にシリアライズ
+  ↓ Adlaire: HTTP レスポンスを返す
+```
+
+sqld の hrana HTTP ハンドラ関数（axum router 等）は使わない。JSON ⇔ sqld 型のシリアライズコードが sqld に存在する場合は `pub use` で再利用することを許容するが、sqld の tokio ランタイムや axum インスタンスには依存しない。
+
+理由：sqld の HTTP サーバーを起動すると認証・管理 API の無効化が困難になり、Adlaire の制御から外れるリスクがある。
+
+#### 3.5.2 libSQL フォーク管理方針
+
+| 項目 | 方針 |
+|------|------|
+| **fork タイミング** | Phase 1 着手直前に `github.com/tursodatabase/libsql` を fork する |
+| **fork リポジトリ名** | `fqwink/libsql`（予定）|
+| **upstream リモート** | `git remote add upstream https://github.com/tursodatabase/libsql` を登録し追従を可能にする |
+| **upstream 追従頻度** | 月 1 回、upstream の `main` をレビューして取り込む。セキュリティパッチは随時 |
+| **独自変更の範囲（Phase 1〜2）** | 最小限。sqld の feature flag 追加のみ。SQL パーサ・WAL・ストレージには触れない |
+| **独自変更の記録** | `ADLAIRE_PATCHES.md` を fork リポジトリに置き、変更の理由と対象コミットを記録する |
+| **upstream との diff 管理** | `git diff upstream/main..HEAD -- sqld/` を CI で常時確認し、意図しない乖離を検出する |
+
+#### 3.5.3 内製化ロードマップ（Phase 5 以降）
+
+内製化の優先順位は「Adlaire の差別化に直結するか」と「upstream との依存切り離し効果が大きいか」で決める。
+
+| 優先 | 対象コンポーネント | 理由 |
+|------|-------------------|----|
+| 1 | HTTP / 認証 / 管理 API | Phase 1〜2 で既に Adlaire 実装済み。sqld 依存なし |
+| 2 | WAL チェックポイント制御 | レプリケーション（Phase 4）に直結。sqld の WAL コードは比較的分離されている |
+| 3 | hrana-http/ws プロトコル変換 | 変換レイヤーを自前化すれば sqld の型依存を完全に排除できる |
+| 4 | クエリエグゼキューター | SQLite との境界。libsql-sys（C バインディング）を直接呼ぶ形に移行 |
+| 5 | SQL パーサ | 最もリスクが高い。Phase 5 後半以降に検討 |
+
+内製化は I-5（段階的・計画的）に従い、**各フェーズで動作するテストスイートが通ることを確認してから**次のコンポーネントに進む。
+
+#### 3.5.4 テスト・CI 方針
+
+**テストの種類と比率（目標）：**
+
+| 種類 | 内容 | 比率目標 |
+|------|------|---------|
+| ユニットテスト | JWT 検証・hrana JSON 変換・DB 名バリデーション・エラーコード変換 | 60% |
+| 統合テスト | `adlaire-db serve` を起動して curl / TypeScript SDK で叩く（TC-1〜TC-6） | 35% |
+| E2E テスト | libSQL TypeScript SDK の全 API を実際に通す（TC-4・TC-3-1〜TC-3-5） | 5% |
+
+**CI 構成（GitHub Actions）：**
+
+```yaml
+# 実行タイミング: PR 作成・push
+jobs:
+  build:    cargo build --release
+  test:     cargo test
+  lint:     cargo clippy -- -D warnings
+  fmt:      cargo fmt --check
+  integ:    cargo test --test integration  # adlaire-db を起動して叩く
+  upstream: git diff upstream/main..HEAD -- libsql/sqld/ | wc -l  # diff 行数を記録
+```
+
+**テストカバレッジ方針：**
+- JWT 検証の全 6 ステップ（正常・各エラー）は必ずユニットテストを書く
+- hrana-http v2 の JSON シリアライズ・デシリアライズはラウンドトリップテストを書く
+- TC-1〜TC-6 の統合テストは `cargo test --test integration` で自動実行する
+- TypeScript SDK E2E は Node.js 環境依存のため手動確認を基本とし、CI は任意とする
+
 ---
 
 ## 4. 設定・起動
