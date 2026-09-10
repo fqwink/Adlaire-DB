@@ -99,7 +99,7 @@ Phase 1 ではフォーク済み libSQL（Cargo ワークスペースメンバ�
 Phase 1 では libSQL をフォークし、libSQL が提供するすべての機能（SQL エンジン・ストレージ・WAL・クラッシュリカバリ）をそのまま採用する。この段階では SQLite / libSQL との互換性が自然に生じるが、それは意図した互換性ではなくフォークの副産物である。Phase 3 以降の内製化によって SQLite ファイルフォーマットを Adlaire 独自形式に移行し、Phase 5 以降で SQL 方言も Adlaire SQL として独立させる計画である。将来的には libSQL / SQLite クライアントとの透過的な接続性は保証しない。
 
 **I-13：配布方針（サーバーはバイナリ・SDK はソースコード）**  
-サーバーバイナリ（`adlaire-db`）はコンパイル済みバイナリとして GitHub Releases で配布する。SDK（Rust / 他言語）はソースコードとして GitHub Releases で配布し、利用者側でビルドする。配布チャネルは GitHub Releases に一本化し、言語パッケージマネージャ（crates.io 等）は使用しない。Linux 向けサーバーバイナリは musl 静的リンク（`x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl`）によりランタイム依存ゼロを保証する。配布物には SHA-256 チェックサムを必ず添付する（詳細は §16.3）。
+サーバーバイナリ（`adlaire-db`）はコンパイル済みバイナリとして GitHub Releases で配布する。SDK（Rust / Go / TypeScript）はソースコードとして GitHub Releases で配布し、利用者側でビルドする。配布チャネルは GitHub Releases に一本化し、言語パッケージマネージャ（crates.io 等）は使用しない。Linux 向けサーバーバイナリは musl 静的リンク（`x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl`）によりランタイム依存ゼロを保証する。配布物には SHA-256 チェックサムを必ず添付する（詳細は §16.6）。
 
 ---
 
@@ -628,36 +628,56 @@ audit-2026-09-09/
 
 #### 4.3.3 検証アルゴリズム（疑似コード）
 
-ハッシュ計算は I-2 の定義と完全一致する。任意の言語で実装可能。
+ハッシュ計算は I-2 の定義と完全一致する。Node.js / Deno / Bun などで実行可能。
 
-```python
-import hashlib, json
+```typescript
+import { createReadStream } from "node:fs";
+import { createHash } from "node:crypto";
+import { createInterface } from "node:readline";
 
-def verify_chain(wal_jsonl_path):
-    prev_hash = bytes(32)  # genesis: 32 zero bytes
+async function verifyChain(walJsonlPath: string): Promise<{ ok: boolean; message: string }> {
+  let prevHash = Buffer.alloc(32, 0); // genesis: 32 zero bytes
 
-    with open(wal_jsonl_path) as f:
-        for line in f:
-            e = json.loads(line)
+  const rl = createInterface({ input: createReadStream(walJsonlPath) });
 
-            # I-2: SHA-256(prev_hash || seq || tx_id || ts || type || key || payload)
-            data = (
-                prev_hash
-                + e["seq"].to_bytes(8, "big")
-                + e["tx_id"].to_bytes(8, "big")
-                + e["ts"].to_bytes(8, "big", signed=True)
-                + e["type"].encode()
-                + e["key"].encode()
-                + e["payload"].encode()
-            )
-            computed = hashlib.sha256(data).hexdigest()
+  for await (const line of rl) {
+    const e = JSON.parse(line) as {
+      seq: number; tx_id: number; ts: number;
+      type: string; key: string; payload: string; hash: string;
+    };
 
-            if computed != e["hash"]:
-                return False, f"改ざん検出: seq={e['seq']}"
+    // I-2: SHA-256(prev_hash || seq || tx_id || ts || type || key || payload)
+    const buf = Buffer.concat([
+      prevHash,
+      toBigEndian8(e.seq),
+      toBigEndian8(e.tx_id),
+      toBigEndian8Signed(e.ts),
+      Buffer.from(e.type),
+      Buffer.from(e.key),
+      Buffer.from(e.payload),
+    ]);
+    const computed = createHash("sha256").update(buf).digest("hex");
 
-            prev_hash = bytes.fromhex(e["hash"])
+    if (computed !== e.hash) {
+      return { ok: false, message: `改ざん検出: seq=${e.seq}` };
+    }
+    prevHash = Buffer.from(e.hash, "hex");
+  }
 
-    return True, "チェーン検証成功"
+  return { ok: true, message: "チェーン検証成功" };
+}
+
+function toBigEndian8(n: number): Buffer {
+  const b = Buffer.alloc(8);
+  b.writeBigUInt64BE(BigInt(n));
+  return b;
+}
+
+function toBigEndian8Signed(n: number): Buffer {
+  const b = Buffer.alloc(8);
+  b.writeBigInt64BE(BigInt(n));
+  return b;
+}
 ```
 
 #### 4.3.4 署名済みチェックポイントによる時点検証
@@ -1943,7 +1963,7 @@ sudo systemctl start adlaire-db
 sudo systemctl status adlaire-db
 ```
 
-#### 16.2.2 ロールバック手順
+#### 16.2.3 ロールバック手順
 
 ```bash
 # 前バージョンをバックアップから復旧
@@ -2110,11 +2130,11 @@ scrape_configs:
 
 ---
 
-### 16.3 バイナリ配布方針（I-13）
+### 16.6 バイナリ配布方針（I-13）
 
 **原則：エンドユーザーへはコンパイル済みバイナリのみを配布する。ソースコードは配布しない。**
 
-#### 16.3.1 配布物一覧
+#### 16.6.1 配布物一覧
 
 | 配布物 | 形式 | 配布チャネル | 対象 |
 |---|---|---|---|
@@ -2124,7 +2144,7 @@ scrape_configs:
 
 **方針：** サーバーバイナリのみコンパイル済みバイナリ配布。SDK はすべてソースコード配布（GitHub Releases）。利用者側でビルドする。
 
-#### 16.3.2 ターゲットプラットフォーム
+#### 16.6.2 ターゲットプラットフォーム
 
 | プラットフォーム | ターゲットトリプル | リンク方式 |
 |---|---|---|
@@ -2133,7 +2153,7 @@ scrape_configs:
 | macOS x86_64 | `x86_64-apple-darwin` | 静的リンク最大化（system libs のみ） |
 | macOS aarch64 | `aarch64-apple-darwin` | 静的リンク最大化（system libs のみ） |
 
-#### 16.3.3 ビルド・配布手順
+#### 16.6.3 ビルド・配布手順
 
 ```bash
 # Linux 向け musl 静的リンクビルド
@@ -2152,7 +2172,7 @@ tar -czf adlaire-db-v{VERSION}-x86_64-linux.tar.gz \
 sha256sum adlaire-db-v{VERSION}-*.tar.gz > SHA256SUMS.txt
 ```
 
-#### 16.3.4 配布チャネル
+#### 16.6.4 配布チャネル
 
 - **GitHub Releases**：すべての配布物を一元管理する唯一の配布チャネル
   - サーバーバイナリアーカイブ（プラットフォーム別）+ `SHA256SUMS.txt`
@@ -2604,7 +2624,7 @@ fn main() {
    └─ 古い WAL エントリの圧縮（state.db が最新なら安全）
 ```
 
-> **注：** 旧アーキテクチャの `metadata.dat`（バイナリ）・`data.kv`・`txlog.dat` ファイル仕様は v2.1 で廃止。現行のファイル仕様は §2.2 を参照。分散フェーズ（Phase 2-4）のストレージ設計は §20 を参照。
+> **注：** 旧アーキテクチャの `metadata.dat`（バイナリ）・`data.kv`・`txlog.dat` ファイル仕様は v2.1 で廃止。現行のファイル仕様は §2.2 を参照。分散フェーズ（Phase 6）のストレージ設計は §20 を参照。
 
 ---
 
@@ -4630,13 +4650,13 @@ jq 'select(.duration_ms > 50)' /var/log/adlaire-db/*.json
 **対策：**
 ```
 ├─ Phase 1 で OCC の単体実装を完全に安定させてから分散化
-├─ Phase 2-4 は §20 の分散実装詳細仕様を Phase 1 完了後に更新
+├─ Phase 6 の §20 分散実装詳細仕様はシングルノード実装安定後に段階的に確定する
 └─ 各フェーズで 1ヶ月以上の DST + Chaos Engineering テスト期間
 ```
 
 ---
 
-### 28.3 リスク 3：本番監視・ロギング構築（運用準備）
+### 28.7 リスク 7：本番監視・ロギング構築（運用準備）
 
 **懸念：**
 ```
