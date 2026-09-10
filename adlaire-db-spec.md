@@ -9,9 +9,9 @@
 ## 1. 概要
 
 ### 1.1 プロジェクト概要
-Rust で実装されるシングルバイナリ DB サーバー。**libSQL をストレージバックエンドとして採用し**、その上に Adlaire 独自の改ざん証明監査層（append-only WAL + ハッシュチェーン）と多クライアント TCP サーバー機能を構築する。libSQL を選んだ理由はファイルベース（SQLite 互換）であること。長期的には libSQL の SQLite 内部実装（B+Tree・WAL エンジン・SQL パーサ）を自前実装に段階的に置き換え、外部依存ゼロを目指す（内製化ロードマップ）。
+Rust で実装されるシングルバイナリ DB サーバー。**libSQL をフォークしてストレージバックエンドとして採用し**、その上に Adlaire 独自の改ざん証明監査層（append-only WAL + ハッシュチェーン）と多クライアント TCP サーバー機能を構築する。libSQL を選んだ理由はファイルベース（SQLite 互換）であること。フォークによってコードベースを直接保有し、以降のフェーズで libSQL の SQLite 内部実装（B+Tree・WAL エンジン・SQL パーサ）を自前実装に段階的に置き換えて外部依存ゼロを達成する（内製化ロードマップ）。
 
-**ポジション：** 「libSQL のサーバー機能特化実装と Adlaire 独自の監査証明を、シングルバイナリで」。libSQL が提供する SQL + ファイルベースストレージを基盤に、append-only WAL + ハッシュチェーンによる改ざん検知、論理削除のみによる完全な変更履歴、多クライアント TCP サーバーを一つのバイナリで実現する。SQLite 内部実装の段階的内製化によって、長期的な自律性と監査可能性を確保する。
+**ポジション：** 「libSQL フォーク上に構築した監査証明付きサーバーを、シングルバイナリで」。libSQL が提供する SQL + ファイルベースストレージを基盤に、append-only WAL + ハッシュチェーンによる改ざん検知、論理削除のみによる完全な変更履歴、多クライアント TCP サーバーを一つのバイナリで実現する。SQLite 内部実装の段階的内製化によって、長期的な自律性と監査可能性を確保する。
 
 ### 1.2 設計目標
 - **libSQL ファーストで即戦力** ：Phase 1 は libSQL をバックエンドとして使い、SQL・ファイル永続化・クラッシュリカバリを即座に利用する
@@ -23,60 +23,38 @@ Rust で実装されるシングルバイナリ DB サーバー。**libSQL を�
 - **libSQL サーバー機能特化** ：多クライアント TCP サーバー・監査 WAL・論理削除強制を libSQL の上位層として実装
 - **デプロイ簡易性** ：シングルバイナリ起動を第一級市民とする
 
-### 1.3 Phase 1 スコープ（含める）
+### 1.3 開発フェーズ概要
 
-**プラットフォーム：**
+開発はフェーズ単位で進める。**Phase 1 は libSQL のフォークから始まる**。フォークした libSQL のコードベース上に Adlaire サーバー層を構築し、以降のフェーズで libSQL の内部実装（B+Tree・WAL エンジン・SQL パーサ）を順番に自前実装に置き換えていく。
+
+| フェーズ | 名称 | 概要 |
+|----------|------|------|
+| **Phase 1** | libSQL フォーク | libSQL をフォークしてプロジェクト基盤を確立 |
+| **Phase 2** | Adlaire サーバー層 | 監査 WAL・OCC・MVCC・TCP サーバーを構築 |
+| **Phase 3** | B+Tree 内製化 | libSQL の SQLite B+Tree を自前実装に置き換え |
+| **Phase 4** | WAL エンジン内製化 | libSQL の SQLite WAL を自前実装に置き換え |
+| **Phase 5** | SQL パーサ内製化 | libSQL の SQL パーサを自前実装に置き換え（外部依存ゼロ達成） |
+| **Phase 6** | 分散対応 | レプリケーション・シャーディング・分散 TX |
+
+**共通制約（全フェーズ）：**
 - Rust / Linux / シングルバイナリ起動（`./adlaire-db --data ./mydb --port 9876`）
-- シングルノード。Phase 2 以降で分散対応
-- **依存：libSQL クレート（`libsql`）のみ**。それ以外の外部クレートは使用しない
+- フォーク外の外部クレートは使用しない（SHA-256・CRC32・TCP は自前実装）
+- TCP のみ（ポート 9876）。REST は後回し
 
-**プロトコル：TCP のみ（ポート 9876）**  
-Phase 1 では TCP カスタムプロトコル 1 本に絞る。REST は後回し。
-
-**ストレージ：**
-- **libSQL（SQLite 互換）**：`state.db` としてファイルに永続化。SQL でデータを管理
-- **Adlaire 監査 WAL**（`wal.bin`）：変更の唯一の監査記録。libSQL への書き込みより先に fsync。libSQL の WAL とは別物
-- SHA-256 / CRC32 は自前実装（外部クレートなし）
-- クラッシュリカバリ：Adlaire WAL の末尾を検査し COMMITTED / PENDING / PARTIAL を判定。state.db は libSQL が自身の WAL で管理
-- スナップショット（CHECKPOINT エントリによる Adlaire WAL 圧縮）
-
-**並行制御：**
-- OCC（楽観的並行制御）：トランザクション開始時に read-version を取得。コミット時に read-set のバージョンを検証し、競合があれば Abort（I-9）
-- MVCC（多版同時実行制御）：読み取りはロックしない。バージョン付きで過去の状態を参照可能（I-10）
-
-**データ操作：**
-- SQL（SELECT / INSERT / UPDATE）+ 論理削除（libSQL が SQL 層を提供）
-- 複数行 ACID トランザクション（OCC ベース）
-- イベント履歴（すべての変更が Adlaire WAL にハッシュチェーンとして永続化）
-- 論理削除のみ（物理削除 API は提供しない → I-4、§3.1.3）
-
-**整合性・保全：**
-- WAL エントリ単位のハッシュチェーン（I-2）
-- 保全異常時の全体ロック（チェックサム不一致・チェーン断絶 → グローバルロック・exit 2）
-- 外部チェックポイント（WAL シーケンス番号 + ハッシュ。ハッシュのみで検証可能、署名なし）
-- バックアップと復元検証
-
-**内製化ロードマップ（Phase 2 以降）：**
-- Phase 2：自前 B+Tree で libSQL の SQLite ストレージ層を置き換え
-- Phase 3：自前 WAL エンジンを実装して libSQL WAL を置き換え
-- Phase 4：自前 SQL パーサ・エグゼキューターを実装して libSQL SQL 層を置き換え
-- Phase 5：libSQL クレートを完全削除。外部依存ゼロを達成
-
-### 1.3.1 後回し（Phase 1 スコープ外）
+### 1.3.1 後回し（Phase 2 スコープ外）
 
 | 項目 | 理由 |
 |------|------|
-| 自前 B+Tree | Phase 2 の内製化ステップ（libSQL が Phase 1 で担当） |
-| 自前 SQL パーサ | Phase 4 の内製化ステップ（libSQL が Phase 1 で担当） |
-| 複数シャード | Phase 2 以降（分散設計が先） |
-| レプリケーション | Adlaire WAL 正本設計確立が先決（Phase 2） |
-| 分散トランザクション | レプリケーション完成後（Phase 3） |
+| 自前 B+Tree | Phase 3 の内製化ステップ |
+| 自前 SQL パーサ | Phase 5 の内製化ステップ |
+| 複数シャード | Phase 6 以降 |
+| レプリケーション | Adlaire WAL 正本設計確立が先決（Phase 6） |
+| 分散トランザクション | レプリケーション完成後（Phase 6） |
 | REST API | TCP プロトコル 1 本に絞る |
 | 保存時暗号化 | トランスポート暗号化を優先 |
-| JWT | Phase 1 は API キー認証 |
+| JWT | Phase 2 は API キー認証 |
 | Prometheus / Grafana | 構造化ログで代替 |
-| 自動フェイルオーバー | Phase 2 以降 |
-| libSQL 依存の完全削除 | Phase 5 の最終内製化目標 |
+| 自動フェイルオーバー | Phase 6 以降 |
 
 ### 1.4 競合との差別化
 
@@ -989,79 +967,146 @@ fn test_recovery_from_event_log() {
 
 ## 11. 実装フェーズ・スケジュール
 
-> **注：** Phase 1 は libSQL ベースのサーバー実装。Phase 2 以降で SQLite 内部コンポーネントを段階的に内製化し、最終的に外部依存ゼロを達成する（I-11）。
+> **注：** 開発はフェーズ単位で進める。Phase 1 は libSQL のフォークから始まる。各フェーズは独立したマイルストーンとして完了条件を定義する。
 
-### 11.1 Phase 1：libSQL ベース サーバー実装（10〜14週）
+### 11.1 Phase 1：libSQL フォーク
 
-**目標** ：libSQL バックエンド + Adlaire 監査 WAL + OCC + MVCC + 多クライアント TCP サーバーが揃った状態でリリースできること。
+**目標** ：libSQL をフォークし、Adlaire DB のプロジェクト基盤を確立する。フォーク後のコードベース上で開発を進めるための環境を整える。
 
-| ステップ | 期間 | 内容 |
-|----------|------|------|
-| **Step 1** | W1-2 | プロジェクト骨格・Adlaire WAL 基盤<br>・RFC 6234 準拠 SHA-256 自前実装（テストベクタで検証）<br>・CRC32 / Castagnoli 自前実装<br>・`wal.bin` append-only 書き込み（Magic, CRC32, Entry 構造）<br>・fsync 境界（COMMIT 後に fsync → クライアント応答・I-1）<br>・`.lock` によるシングル Writer 強制（I-5）<br>・libSQL（`libsql` クレート）セットアップ・`state.db` 初期スキーマ |
-| **Step 2** | W3-4 | libSQL ストレージ層・OCC トランザクション<br>・libSQL を通じた SQL CRUD（records / record_versions テーブル）<br>・Adlaire WAL への先行記録 → libSQL 書き込みの順序保証（I-1）<br>・read-version / read-set / write-set 管理（I-9）<br>・コミット時 read-set 検証 → WriteConflict Abort<br>・global_version インクリメント |
-| **Step 3** | W5-6 | クラッシュリカバリ・MVCC<br>・起動時 Adlaire WAL スキャン（COMMITTED / PENDING / PARTIAL 判定・I-8）<br>・Adlaire WAL から `state.db` を完全再構築（`--rebuild`・I-6）<br>・libSQL record_versions テーブルを使った MVCC（I-10） |
-| **Step 4** | W7-8 | SQL API・論理削除<br>・SQL クエリ（SELECT / INSERT / UPDATE）のパススルー<br>・DELETE → 論理削除 SQL 変換（I-4）<br>・複数行 ACID TX（OCC ベース） |
-| **Step 5** | W8-9 | ハッシュチェーン・外部チェックポイント<br>・WAL エントリ単位 SHA-256（I-2 の計算式）<br>・CRC32 不一致・チェーン断絶 → グローバルロック・exit 2（I-3）<br>・外部チェックポイント生成（Adlaire WAL seq + root_hash・I-7）<br>・`adlaire-db verify` CLI（I-6）<br>・外部検証 JSONL エクスポート CLI（§4.3）|
-| **Step 6** | W9-10 | 多クライアント TCP サーバー・バックアップ<br>・TCP カスタムプロトコル（`std::net`、外部クレートなし）<br>・バックアップ取得（state.db + wal.bin）・復元後ハッシュチェーン検証|
-| **Step 7** | W10-14 | 統合テスト・CLI・ドキュメント<br>・`adlaire-db export-audit` / `import` / `rebuild` / `verify` CLI<br>・バックアップ → 復元 → チェーン検証の一連フロー<br>・パフォーマンス検証 |
+**作業内容：**
+- libSQL（Turso 公式リポジトリ）を GitHub 上でフォーク
+- Adlaire DB 用の Cargo ワークスペース構成を設定
+  - `adlaire-db/`：Adlaire サーバー層（新規実装）
+  - `libsql/`：フォークした libSQL（サブモジュールまたはワークスペースメンバ）
+- フォークした libSQL がビルド・テスト通過することを確認
+- 開発環境・CI（GitHub Actions）の整備
+- libSQL のコードベースのうち Adlaire が改変する対象コンポーネントを特定・文書化
+  - `sqlite3/`：B+Tree ストレージ層（Phase 3 の改変対象）
+  - `libsql-sys/`：WAL エンジン（Phase 4 の改変対象）
+  - `libsql-parser/`：SQL パーサ（Phase 5 の改変対象）
 
-**Phase 1 完了の定義：**
+**完了条件：**
+- フォークした libSQL が `cargo build` / `cargo test` で通過する
+- Adlaire ワークスペース構成が確立されている
+- 改変対象コンポーネントのマッピング文書が完成している
+- CI が green である
+
+---
+
+### 11.2 Phase 2：Adlaire サーバー層の構築
+
+**目標** ：フォークした libSQL の上に Adlaire 独自の監査・並行制御・ネットワーク層を構築し、動作するサーバーをリリースする。
+
+**作業内容：**
+
+| 項目 | 内容 |
+|------|------|
+| Adlaire 監査 WAL | `wal.bin` の append-only 実装。SHA-256（自前）+ CRC32（自前）。fsync 境界（I-1） |
+| ハッシュチェーン | WAL エントリ単位の SHA-256（I-2）。CRC32 不一致・チェーン断絶 → グローバルロック・exit 2（I-3） |
+| OCC トランザクション | read-version / read-set / write-set。コミット時 read-set 検証 → WriteConflict Abort（I-9） |
+| MVCC | libSQL の record_versions テーブルを使ったバージョン管理。非ブロッキング読み取り（I-10） |
+| 論理削除強制 | DELETE → 論理削除 SQL 変換（I-4） |
+| クラッシュリカバリ | 起動時 Adlaire WAL スキャン（COMMITTED / PENDING / PARTIAL 判定・I-8）。WAL から state.db 再構築（I-6） |
+| 外部チェックポイント | Adlaire WAL seq + root_hash（I-7）。`adlaire-db verify` CLI |
+| 多クライアント TCP サーバー | `std::net`（外部クレートなし）。SQL コマンドのパススルー |
+| バックアップ | state.db + wal.bin のバックアップ・復元後チェーン検証 |
+| CLI | `export-audit` / `import` / `rebuild` / `verify` |
+
+**完了条件：**
 - §1.5 の設計不変条件（I-1〜I-11）がすべてテストで証明できる
 - `adlaire-db verify` が正常・改ざんケースで正確に判定する
 - `adlaire-db rebuild` で `state.db` を Adlaire WAL から完全再構築できる
-- SQL CRUD・論理削除が動く（libSQL 経由）
-- OCC により複数 TX の競合が正しく検出・Abort される
-- MVCC により読み取りが書き込みをブロックしないことが証明される
+- SQL CRUD・論理削除・OCC・MVCC が動作する
 - 外部チェックポイントの `root_hash` を手動で検証できる
 - バックアップ → 復元 → チェーン検証の一連フローが完結する
-- 外部クレートが `libsql` のみであることを `cargo tree` で確認
+- フォーク外の外部クレートがゼロであることを `cargo tree` で確認
 
 ---
 
-### 11.2 Phase 2：自前 B+Tree（内製化ステップ 1）
+### 11.3 Phase 3：B+Tree 内製化
 
-**目標** ：libSQL の SQLite B+Tree ストレージ層を自前実装に置き換える。  
-`state.db` の形式を SQLite ファイルから自前ページ管理ファイルへ移行。libSQL クレートの依存を削減。
+**目標** ：libSQL（SQLite）の B+Tree ストレージ層を自前 Rust 実装に置き換える。`state.db` のファイル形式を SQLite から自前ページ管理形式へ移行する。
 
----
+**作業内容：**
+- 自前 B+Tree の実装（ページ管理・挿入・検索・Range スキャン・削除）
+- MVCC バージョンリストの B+Tree リーフノードへの統合
+- libSQL のストレージバックエンドとして自前 B+Tree を接続（libSQL のストレージ抽象化レイヤーに差し込む）
+- `state.db`（SQLite フォーマット）→ 自前ページ管理ファイルへの移行ツール
+- フォーク内の SQLite C コードのうち B+Tree 部分を段階的に削除
 
-### 11.3 Phase 3：自前 WAL エンジン（内製化ステップ 2）
-
-**目標** ：libSQL の SQLite WAL エンジンを自前実装に置き換える。  
-`state.db-wal` を廃止し、Adlaire WAL のみでクラッシュリカバリを完結させる。
-
----
-
-### 11.4 Phase 4：自前 SQL パーサ（内製化ステップ 3）
-
-**目標** ：libSQL の SQL パーサ・エグゼキューターを自前実装に置き換える。  
-libSQL クレートを完全に削除し、外部依存ゼロを達成する（I-11 の最終目標）。
+**完了条件：**
+- 自前 B+Tree が Phase 2 の全テストを通過する
+- SQLite B+Tree への依存がフォーク内で削除されている
+- `adlaire-db rebuild` が自前 B+Tree で動作する
 
 ---
 
-### 11.5 Phase 5：分散対応（後回し）
+### 11.4 Phase 4：WAL エンジン内製化
+
+**目標** ：libSQL（SQLite）の WAL エンジンを自前 Rust 実装に置き換える。`state.db-wal`（SQLite WAL）を廃止し、Adlaire WAL のみでクラッシュリカバリを完結させる。
+
+**作業内容：**
+- 自前 WAL エンジンの実装（SQLite WAL フォーマット互換は不要。Adlaire WAL 形式に統合）
+- libSQL の WAL 抽象化レイヤーに自前 WAL エンジンを接続
+- `state.db-wal` を廃止。Adlaire WAL が唯一の WAL として機能する（I-1 の完全実現）
+- フォーク内の SQLite WAL C コードを段階的に削除
+
+**完了条件：**
+- `state.db-wal` が生成されなくなる
+- クラッシュリカバリが Adlaire WAL のみで完結する
+- Phase 2 の全テストが通過する
+
+---
+
+### 11.5 Phase 5：SQL パーサ内製化（外部依存ゼロ達成）
+
+**目標** ：libSQL の SQL パーサ・エグゼキューターを自前 Rust 実装に置き換える。フォーク内の libSQL 依存を完全に除去し、外部依存ゼロを達成する（I-11 の最終目標）。
+
+**作業内容：**
+- 自前 SQL パーサの実装（Adlaire が必要とする SQL サブセット）
+- 自前クエリエグゼキューターの実装（自前 B+Tree 上で動作）
+- フォーク内の libSQL/SQLite SQL 処理コードを段階的に削除
+- `cargo tree` で外部クレートがゼロになることを確認
+
+**完了条件：**
+- `cargo tree` で外部クレートがゼロ（Rust std のみ）
+- Phase 2 の全テストが通過する
+- SQL CRUD・OCC・MVCC・監査 WAL がすべて自前実装で動作する
+
+---
+
+### 11.6 Phase 6：分散対応（後回し）
 
 > **後回し（§1.3.1 参照）**  
-> Adlaire WAL 正本設計と内製化（Phase 2〜4）が完了した後に着手する。レプリケーション → シャーディング → 分散 TX の順。
+> Phase 5 完了（外部依存ゼロ達成）後に着手する。レプリケーション → シャーディング → 分散 TX の順。
 
 ---
 
-### 11.6 全体スケジュール
+### 11.7 全体スケジュール
 
 ```
-Phase 1 (libSQL ベース サーバー実装)：Week 1-14
-  ├─ Step 1：WAL 基盤 + SHA-256/CRC32 自前実装 + libSQL セットアップ（W1-2）
-  ├─ Step 2：libSQL ストレージ層・OCC TX（W3-4）
-  ├─ Step 3：クラッシュリカバリ・MVCC（W5-6）
-  ├─ Step 4：SQL API・論理削除（W7-8）
-  ├─ Step 5：ハッシュチェーン・外部チェックポイント（W8-9）
-  ├─ Step 6：多クライアント TCP サーバー・バックアップ（W9-10）
-  └─ Step 7：統合テスト・CLI（W10-14）
+Phase 1：libSQL フォーク
+  └─ フォーク・ワークスペース構成・CI 整備・改変対象特定
 
-Phase 2 (自前 B+Tree 内製化)：Phase 1 完了後
-Phase 3 (自前 WAL エンジン内製化)：Phase 2 完了後
-Phase 4 (自前 SQL パーサ内製化 → 外部依存ゼロ達成)：Phase 3 完了後
-Phase 5 (分散対応)：Phase 4 完了後
+Phase 2：Adlaire サーバー層の構築
+  ├─ Adlaire 監査 WAL（SHA-256 / CRC32 自前実装）
+  ├─ OCC + MVCC
+  ├─ 論理削除強制・クラッシュリカバリ
+  ├─ ハッシュチェーン・外部チェックポイント
+  ├─ 多クライアント TCP サーバー
+  └─ バックアップ・CLI・統合テスト
+
+Phase 3：B+Tree 内製化
+  └─ libSQL の SQLite B+Tree → 自前 Rust B+Tree
+
+Phase 4：WAL エンジン内製化
+  └─ SQLite WAL → Adlaire WAL に統合（state.db-wal 廃止）
+
+Phase 5：SQL パーサ内製化（外部依存ゼロ達成）
+  └─ libSQL SQL パーサ・エグゼキューター → 自前実装
+
+Phase 6：分散対応（Phase 5 完了後）
+  └─ レプリケーション → シャーディング → 分散 TX
 ```
 
 ---
