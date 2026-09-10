@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.28  
+**バージョン：** 0.29  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-10  
 
@@ -221,13 +221,25 @@ resolver = "2"
 
 ```toml
 [dependencies]
-sqld = { path = "../../libsql/sqld", default-features = false, features = ["core"] }
-tokio  = { version = "1", features = ["full"] }
-axum   = "0.7"
-tower  = "0.4"
-serde  = { version = "1", features = ["derive"] }
-serde_json = "1"
-jsonwebtoken = "9"
+sqld            = { path = "../../libsql/sqld", default-features = false, features = ["core"] }
+tokio           = { version = "1", features = ["full"] }
+axum            = "0.7"
+tower           = "0.4"
+serde           = { version = "1", features = ["derive"] }
+serde_json      = "1"
+jsonwebtoken    = "9"
+thiserror       = "1"                                      # AppError derive
+anyhow          = "1"                                      # 内部エラーラッパー・main() 戻り値
+chrono          = { version = "0.4", features = ["serde"] } # DateTime<Utc>
+crc32fast       = "1"                                      # WAL フレームチェックサム
+dashmap         = "5"                                      # Metrics・ReplicationState
+regex           = "1"                                      # DB 名バリデーション
+url             = "2"                                      # ServerRole::Replica の primary_url
+bytes           = "1"                                      # WalFrame::data
+clap            = { version = "4", features = ["derive"] } # CLI パース
+tracing         = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json"] } # 構造化ログ出力
+tokio-tungstenite  = "0.21"                                # Phase 3: WebSocket
 
 [build-dependencies]
 # libsql-sys が SQLite をコンパイルするため cc が必要
@@ -2838,6 +2850,18 @@ impl Claims {
             None      => self.a.clone(),
         }
     }
+
+    /// 認証無効モード用（jwt_secret 未設定時のみ使用）
+    pub fn unauthenticated() -> Self {
+        Self {
+            iss: None,
+            sub: String::new(),
+            iat: 0,
+            exp: None,
+            a:   AccessLevel::Rw,
+            dbs: None,
+        }
+    }
 }
 
 pub struct AuthState {
@@ -3117,7 +3141,7 @@ where
 
         // 認証無効モード（jwt_secret 未設定）はスキップ
         if state.auth.is_disabled() {
-            return Ok(Authenticated { claims: Claims::anonymous() });
+            return Ok(Authenticated { claims: Claims::unauthenticated() });
         }
 
         let header = parts.headers
@@ -3183,6 +3207,7 @@ pub fn build_router(state: SharedState) -> axum::Router {
 
 pub fn build_admin_router(state: SharedState) -> axum::Router {
     use axum::routing::{delete, get, post};
+    // AdminAuth Layer を nest 全体に適用し、全管理エンドポイントで Bearer 検証を行う
     axum::Router::new()
         .nest("/admin/v1", axum::Router::new()
             // Phase 2: DB CRUD
@@ -3205,6 +3230,8 @@ pub fn build_admin_router(state: SharedState) -> axum::Router {
             .route("/databases/:name/branches",
                 get(admin::branches::list).post(admin::branches::create))
             .route("/databases/:name/branches/:branch",          delete(admin::branches::delete))
+            // AdminAuth を Layer として nest 全体に適用（各ハンドラから除外）
+            .layer(axum::middleware::from_extractor_with_state::<AdminAuth, _>(state.clone()))
         )
         .with_state(state)
 }
@@ -3236,7 +3263,7 @@ async fn main() -> anyhow::Result<()> {
     let auth = Arc::new(AuthState::load(&config, token_records));
 
     // Step 7: DB 全件オープン（起動時整合性チェック込み）
-    let db_mgr = Arc::new(DbManager::open_all(&config.data_dir, Arc::clone(&config.storage)).await?);
+    let db_mgr = Arc::new(DbManager::open_all(&config.data_dir, Arc::new(config.storage.clone())).await?);
 
     // Step 8: AppState 構築
     let state: SharedState = Arc::new(AppState {
