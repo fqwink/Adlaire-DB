@@ -945,7 +945,106 @@ ETC-8: ストレージビジーエラー
 
 ---
 
-## 8. 実装フェーズ
+## 8. 起動・停止シーケンス
+
+### 8.1 起動シーケンス（`adlaire-db serve`）
+
+```
+Step 1: 設定解決
+  1-1. CLI フラグをパース
+  1-2. --config で指定された config.toml を読み込む（なければスキップ）
+  1-3. 優先順位に従い設定値をマージ（フラグ > config.toml > デフォルト）
+  1-4. --data が未指定なら Error: --data is required で終了
+
+Step 2: JWT シークレット検証
+  2-1. jwt_secret_file が指定されていればファイルを読み込む
+  2-2. いずれも未指定なら WARN "auth is disabled (no jwt_secret configured)"
+  2-3. secret が指定されている場合、長さを検証
+       → 32 バイト未満なら Error: jwt_secret must be at least 32 bytes で終了
+
+Step 3: データディレクトリ準備
+  3-1. {data-dir} が存在しなければ mkdir -p で作成（パーミッション 700）
+  3-2. {data-dir}/meta/ が存在しなければ作成
+  3-3. {data-dir}/databases/ が存在しなければ作成
+  3-4. {data-dir} のパーミッションを確認
+       → 700 未満なら WARN "data directory permissions are too open: {mode}"
+
+Step 4: プロセスロック取得
+  4-1. {data-dir}/.lock の排他ロック（flock LOCK_EX | LOCK_NB）を試みる
+  4-2. 失敗（EWOULDBLOCK）なら Error: another adlaire-db process is running で終了
+  4-3. 成功したら .lock を保持したまま続行
+
+Step 5: メタデータ読み込み（Phase 1 はシングル DB のためスキップ可）
+  5-1. {data-dir}/meta/databases.json が存在すれば読み込みメモリに展開
+       なければ空のリスト `{"databases":[]}` として初期化し書き出す
+  5-2. {data-dir}/meta/tokens.json が存在すれば読み込みメモリに展開
+       なければ空のリスト `{"tokens":[]}` として初期化し書き出す
+
+Step 6: DB オープン（Phase 1 はシングル DB）
+  6-1. {data-dir}/databases/ 以下の各 DB ディレクトリを列挙
+  6-2. 各 DB の data.db を sqld::Database::open()
+  6-3. WAL モードを設定（PRAGMA journal_mode = WAL）
+  6-4. busy timeout を設定（busy_timeout_ms）
+  6-5. synchronous を設定（PRAGMA synchronous = NORMAL）
+  ※ いずれかで失敗した場合は Error: failed to open database '{name}': {err} で終了
+
+Step 7: HTTP サーバー起動
+  7-1. API ポート（デフォルト 0.0.0.0:8080）でソケットを bind
+  7-2. 管理ポート（デフォルト 127.0.0.1:8081）でソケットを bind
+  7-3. いずれかで失敗した場合は Error: failed to bind port {n}: {err} で終了
+
+Step 8: 起動完了
+  INFO {"msg":"Adlaire DB starting","version":"<semver>","data_dir":"...","port":8080}
+  INFO {"msg":"Adlaire DB listening","addr":"0.0.0.0:8080","admin_addr":"127.0.0.1:8081"}
+```
+
+### 8.2 停止シーケンス（SIGINT / SIGTERM 受信時）
+
+```
+Step 1: シャットダウン開始
+  INFO {"msg":"shutdown signal received","signal":"SIGTERM"}
+
+Step 2: 新規リクエスト受付を停止
+  HTTP リスナーを閉じる。処理中のリクエストは最大 --shutdown-timeout（デフォルト 5s）待機する。
+  タイムアウト超過の場合は強制終了する（WARN ログを出力）。
+
+Step 3: DB クローズ
+  各 sqld::Connection を drop する（WAL をフラッシュ）
+  各 sqld::Database を drop する（チェックポイント + ファイルクローズ）
+
+Step 4: プロセスロック解放
+  {data-dir}/.lock の flock を解放する（プロセス終了で自動解放されるが明示的に行う）
+
+Step 5: 停止完了
+  INFO {"msg":"Adlaire DB stopped"}
+  exit code 0
+```
+
+### 8.3 異常終了・リカバリ
+
+| シナリオ | 挙動 |
+|----------|------|
+| クラッシュ（SIGKILL 等） | SQLite WAL がコミット済みデータを保護する。次回起動時に WAL ロールフォワードが自動実行される |
+| `.lock` ゾンビ残留 | flock はプロセス死亡で自動解放される。手動削除は不要 |
+| `databases.json` 破損 | Error: failed to parse databases.json で起動失敗。バックアップから復元する |
+| `tokens.json` 破損 | Error: failed to parse tokens.json で起動失敗。バックアップから復元するか空リストで初期化 |
+| data.db 破損 | SQLite の PRAGMA integrity_check を実行し異常なら起動失敗 |
+
+### 8.4 初期化フラグ優先順位まとめ
+
+```
+--auth-jwt-secret-file > ADLAIRE_JWT_SECRET (env) > --auth-jwt-secret > config.toml [auth] jwt_secret
+--data               > config.toml [storage] data_dir  （config.toml に書かないことを推奨）
+--port               > config.toml [server] port        (default: 8080)
+--admin-port         > config.toml [server] admin_port  (default: 8081)
+--log-level          > ADLAIRE_LOG_LEVEL (env) > config.toml [server] log_level  (default: info)
+--busy-timeout       > config.toml [storage] busy_timeout_ms  (default: 5000)
+```
+
+---
+
+## 9. 実装フェーズ
+
 
 フェーズ単位で機能を積み上げる。各フェーズの内製化計画はフェーズ着手時に策定する。
 
@@ -1121,7 +1220,7 @@ Phase 4 完了後に計画する。候補（優先度未確定）：
 
 ---
 
-## 9. セキュリティ考慮事項
+## 10. セキュリティ考慮事項
 
 ### 9.1 JWT シークレット管理
 
@@ -1205,7 +1304,7 @@ DB 名・ファイルパス生成時に以下を必ず適用する：
 
 ---
 
-## 10. 配布・デプロイ
+## 11. 配布・デプロイ
 
 - シングルバイナリ（`adlaire-db`）として配布
 - ターゲット：Linux x86_64 / aarch64
@@ -1215,7 +1314,7 @@ DB 名・ファイルパス生成時に以下を必ず適用する：
 
 ---
 
-## 11. ログ仕様
+## 12. ログ仕様
 
 ### 10.1 フォーマット
 
@@ -1266,7 +1365,7 @@ DB 名・ファイルパス生成時に以下を必ず適用する：
 
 ---
 
-## 12. WAL 設定
+## 13. WAL 設定
 
 ### 11.1 WAL モード
 
