@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.18  
+**バージョン：** 0.19  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-10  
 
@@ -1836,7 +1836,15 @@ close_stream(stream_id=1)
 
 #### sqld との統合（Phase 3）
 
-Phase 1〜2 と同様、sqld の WebSocket サーバーループは起動しない。sqld の WebSocket ハンドラを Rust ライブラリとして呼び出すか、hrana-ws プロトコル変換レイヤーを Adlaire で実装するかは Phase 3 着手時に判断する（sqld の hrana-ws 実装の再利用可否を確認）。
+Phase 1〜2 と同様、sqld の WebSocket サーバーループは起動しない。**Adlaire 独自の hrana-ws プロトコル変換レイヤーを実装する**（§3.3.3 の hrana-http 変換層と同じ設計方針）。
+
+採用理由：
+
+- sqld の WebSocket ハンドラはセッション管理・認証と密結合しており、ライブラリとして分離が困難
+- Phase 1〜2 で構築した hrana-http 変換レイヤー（§3.3.3）の延長として実装でき、アーキテクチャの一貫性を保てる
+- WebSocket コネクションのライフサイクル（hello / stream_id / baton 管理）を Adlaire が完全制御できる
+
+WebSocket フレームの受受信・送信には `tokio-tungstenite` クレートを使用する。クエリ実行は Phase 1〜2 と同じ `sqld::Connection::execute_batch()` を経由する（§3.3.2）。
 
 #### 埋め込みレプリカ同期
 
@@ -1848,7 +1856,7 @@ GET /v2/replication/snapshot         スナップショット取得
 POST /v2/replication/heartbeat       接続維持
 ```
 
-詳細プロトコルは Phase 3 着手時に sqld の実装を参照して確定する。
+埋め込みレプリカ同期 API のプロトコルは §6.3「埋め込みレプリカ同期 API」に定義済み（SSE 形式 `GET /v2/replication/log`・スナップショット `GET /v2/replication/snapshot`・ハートビート `POST /v2/replication/heartbeat`）。実装は sqld の WAL 読み取りインターフェースを使用し、Adlaire サーバー層で SSE ストリームを生成する。
 
 **完了条件（テストケース）：**
 
