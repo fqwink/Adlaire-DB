@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.24  
+**バージョン：** 0.25  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-10  
 
@@ -2223,54 +2223,6 @@ T4-7: 統合テスト TC-4-1〜TC-4-5
 - PITR API：`POST /admin/v1/databases/{name}/restore/point-in-time`
 - `wal_retention_days` 設定によるアーカイブ保持期間の管理
 
-**WAL アーカイブ構造：**
-
-```
-{data-dir}/
-  databases/{name}/
-    data.db
-    data.db-wal
-    wal-archive/
-      snapshot-000000042.db    ← チェックポイント時点のスナップショット（コピー）
-      frame-000000043.bin      ← WAL フレーム（CRC32 チェックサム付き）
-      frame-000000044.bin
-      ...
-      manifest.json            ← アーカイブメタデータ
-```
-
-`manifest.json` 形式：
-
-```json
-{
-  "db": "my-db",
-  "base_frame": 42,
-  "snapshot": "snapshot-000000042.db",
-  "frames": [
-    {"frame_no": 43, "file": "frame-000000043.bin", "checksum": 3294921183, "ts": "2026-09-10T12:00:00Z"},
-    {"frame_no": 44, "file": "frame-000000044.bin", "checksum": 1234567890, "ts": "2026-09-10T12:00:01Z"}
-  ]
-}
-```
-
-**アーカイブ保存タイミング：**
-
-1. チェックポイント直前に WAL フレームをアーカイブへコピーする
-2. チェックポイント時点の DB ファイルスナップショットを保存する（スナップショットは最新 1 件のみ保持）
-3. `wal_retention_days` を超えた古いフレームは定期クリーンアップで削除する（1 日 1 回）
-
-**PITR リストア処理フロー：**
-
-```
-1. manifest.json を読み込む
-2. 指定 timestamp 以前 / frame_no 以下の最新スナップショットを選択
-3. スナップショットを data.db へコピー
-4. 対象フレームまで WAL フレームを順番にリプレイ（CRC32 検証必須）
-5. PRAGMA integrity_check で確認
-6. DB をオープンしてサービス再開
-```
-
-フレームの CRC32 検証失敗時: リストア中断、元の DB を復元し `409 RESTORE_FRAME_CORRUPT` を返す。
-
 **完了条件（テストケース）：**
 
 ```
@@ -2392,61 +2344,6 @@ T5a-9: 統合テスト
 - ブランチ一覧・削除 API
 - ブランチ DB 命名規則と予約名バリデーション（`___`）
 - 再起動後のブランチ DB 自動復元
-
-**ブランチ DB の命名規則：**
-
-ブランチ DB 内部名: `{source-db}___{branch-name}`（区切りは `___` トリプルアンダースコア）
-
-```
-例: my-db のブランチ feature-x → DB 内部名 my-db___feature-x
-アクセス URL: /{my-db___feature-x}/v2/pipeline
-```
-
-`___` を含む DB 名はブランチ DB として判定され、`POST /admin/v1/databases` での直接作成は拒否する（`400 DB_RESERVED_NAME`）。
-
-**ブランチメタデータ（branches.json）：**
-
-`{data-dir}/meta/branches.json` に全ブランチのメタデータを保存する。
-
-```json
-{
-  "branches": [
-    {
-      "branch_name": "feature-x",
-      "source_db": "my-db",
-      "db_name": "my-db___feature-x",
-      "created_at": "2026-09-10T12:00:00Z",
-      "from_frame": 42
-    }
-  ]
-}
-```
-
-起動時に `branches.json` を読み込み、各ブランチ DB が存在する場合は自動でオープンする。
-
-**ブランチ作成処理フロー：**
-
-`from: "current"` の場合：
-
-```
-1. Online Backup API で source DB のスナップショットを取得
-2. {data-dir}/databases/{name}___{branch-name}/data.db へ書き込み
-3. branches.json へメタデータを追加
-4. 新 DB を sqld でオープン
-5. 201 Created を返す
-```
-
-`from: {timestamp}` / `{frame_no}` の場合：
-
-```
-1. WAL アーカイブから指定時点のスナップショット + フレームを取得（Phase 5a 依存）
-2. PITR リストアと同じ処理でブランチ DB を構築
-3. branches.json へメタデータを追加
-4. 新 DB を sqld でオープン
-5. 201 Created を返す
-```
-
-`from: {timestamp}` / `{frame_no}` は `wal_retention_days > 0` が必須。未設定時は `503 PITR_NOT_ENABLED`。
 
 **完了条件（テストケース）：**
 
