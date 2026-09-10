@@ -107,6 +107,9 @@ Rust で実装されるシングルバイナリ DB サーバー。**libSQL を�
 **I-11：段階的内製化（長期目標：外部依存ゼロ）**  
 Phase 1 では libSQL クレートのみを許容する。それ以外の外部クレートは使用しない（SHA-256・CRC32・TCP サーバーは自前実装）。Phase 2 以降で libSQL の内部コンポーネント（B+Tree・WAL エンジン・SQL パーサ）を自前実装に段階的に置き換え、最終的に外部依存ゼロを達成する。「内製化が大変だから外部に頼り続ける」は理由として認めない。各 Phase の完了条件として内製化ステップを必ず含める。
 
+**I-12：置き換え可能抽象レイヤー**  
+各コンポーネント（ストレージ・WAL エンジン・SQL エンジン）は Phase 2 で Rust trait として定義する。Phase 2 では libSQL を実装として使用し、Phase 3〜5 では同じ trait の自前実装に差し替える。サーバー層（Adlaire サーバー層・OCC・MVCC）は trait 経由でのみコンポーネントと通信し、具体型に依存しない。trait の変更なしに実装を交換できることを Phase 完了条件とする（詳細は §2.5）。
+
 ---
 
 ## 2. アーキテクチャ
@@ -325,6 +328,100 @@ WRITE エントリのペイロード例：
 ```
 
 **発行タイミング：** `adlaire-db checkpoint --sign <keyfile>` コマンドで手動発行（Phase 1）。
+
+---
+
+### 2.5 抽象レイヤー Trait 定義（I-12）
+
+Phase 2 でサーバー層とコンポーネントの境界を Rust trait として確立する。Phase 3〜5 はこの trait の実装を差し替えるだけでよく、サーバー層・OCC・MVCC のコードは変更しない。
+
+#### 2.5.1 StorageBackend
+
+```rust
+/// B+Tree ストレージへのアクセスを抽象化する。
+/// Phase 2: libSQL（SQLite）実装 → Phase 3: 自前 B+Tree 実装に差し替え。
+pub trait StorageBackend: Send + Sync {
+    /// 指定バージョン時点のキーの値を返す（MVCC 読み取り）。
+    fn get(&self, key: &str, version: u64) -> Result<Option<VersionedValue>>;
+
+    /// 指定バージョン時点の範囲スキャン。
+    fn scan(
+        &self,
+        from: &str,
+        to: &str,
+        version: u64,
+    ) -> Result<Vec<(String, VersionedValue)>>;
+
+    /// コミット済み WriteSet をストレージに反映する（Adlaire WAL への書き込み後に呼ぶ）。
+    fn apply_write_set(&mut self, write_set: &WriteSet, version: u64) -> Result<()>;
+
+    /// Adlaire WAL からストレージを完全再構築する（`--rebuild`）。
+    fn rebuild_from_wal(&mut self, wal: &dyn WalEngine) -> Result<()>;
+}
+```
+
+#### 2.5.2 WalEngine
+
+```rust
+/// Adlaire 監査 WAL の I/O を抽象化する。
+/// Phase 2: wal.bin への直書き実装 → Phase 4: 自前 WAL エンジン実装に差し替え。
+pub trait WalEngine: Send + Sync {
+    /// WAL エントリを追記し fsync する（I-1、ハッシュチェーンは実装側が更新する）。
+    fn append_and_fsync(&mut self, entry: &WalEntry) -> Result<()>;
+
+    /// 最後のチェックポイント以降のエントリをイテレートする（クラッシュリカバリ・検証）。
+    fn scan_from_last_checkpoint(
+        &self,
+    ) -> Result<Box<dyn Iterator<Item = Result<WalEntry>> + '_>>;
+
+    /// チェックポイントを記録する（シーケンス番号と root_hash を永続化）。
+    fn write_checkpoint(&mut self, seq: u64, root_hash: [u8; 32]) -> Result<()>;
+}
+```
+
+#### 2.5.3 SqlEngine
+
+```rust
+/// SQL 解析・実行を抽象化する。
+/// Phase 2: libSQL 実装 → Phase 5: 自前パーサ＋自前エグゼキューター実装に差し替え。
+pub trait SqlEngine: Send + Sync {
+    /// SQL 文を実行し結果を返す。TxContext は OCC の read-version などを含む。
+    fn execute(&mut self, sql: &str, ctx: &TxContext) -> Result<QueryResult>;
+
+    /// SQL 文をパースして PreparedStatement を返す。
+    fn prepare(&self, sql: &str) -> Result<PreparedStatement>;
+}
+```
+
+#### 2.5.4 Database 構造体
+
+サーバー層は `Database` を通じてのみ各コンポーネントと通信する。Phase 3〜5 では `new()` に渡す実装を差し替えるだけでよい。
+
+```rust
+pub struct Database {
+    pub storage: Box<dyn StorageBackend>,
+    pub wal: Box<dyn WalEngine>,
+    pub sql: Box<dyn SqlEngine>,
+}
+
+impl Database {
+    pub fn new(
+        storage: Box<dyn StorageBackend>,
+        wal: Box<dyn WalEngine>,
+        sql: Box<dyn SqlEngine>,
+    ) -> Self {
+        Database { storage, wal, sql }
+    }
+}
+```
+
+**Phase 別の実装マッピング：**
+
+| コンポーネント | Phase 2（初期実装） | Phase 3〜5（差し替え実装） |
+|---|---|---|
+| `StorageBackend` | `LibSqlStorage`（libSQL 経由） | `AdlaireStorage`（自前 B+Tree） |
+| `WalEngine` | `AdlaireWalFile`（wal.bin 直書き） | `AdlaireWalEngine`（自前 WAL エンジン） |
+| `SqlEngine` | `LibSqlEngine`（libSQL） | `AdlaireParser` + `AdlaireExecutor` |
 
 ---
 
@@ -1001,6 +1098,9 @@ fn test_recovery_from_event_log() {
 
 | 項目 | 内容 |
 |------|------|
+| **抽象 trait 定義（先行）** | `StorageBackend` / `WalEngine` / `SqlEngine` trait を §2.5 の通り定義する。libSQL 実装を作る前にまずこれを完成させる（I-12） |
+| `Database` 構造体 | `Box<dyn StorageBackend>` / `Box<dyn WalEngine>` / `Box<dyn SqlEngine>` を保持。サーバー層はここ経由のみ |
+| libSQL 初期実装 | `LibSqlStorage` / `AdlaireWalFile` / `LibSqlEngine` を各 trait の実装として作成 |
 | Adlaire 監査 WAL | `wal.bin` の append-only 実装。SHA-256（自前）+ CRC32（自前）。fsync 境界（I-1） |
 | ハッシュチェーン | WAL エントリ単位の SHA-256（I-2）。CRC32 不一致・チェーン断絶 → グローバルロック・exit 2（I-3） |
 | OCC トランザクション | read-version / read-set / write-set。コミット時 read-set 検証 → WriteConflict Abort（I-9） |
@@ -1013,13 +1113,16 @@ fn test_recovery_from_event_log() {
 | CLI | `export-audit` / `import` / `rebuild` / `verify` |
 
 **完了条件：**
-- §1.5 の設計不変条件（I-1〜I-11）がすべてテストで証明できる
+- `StorageBackend` / `WalEngine` / `SqlEngine` trait が §2.5 の通り定義され、libSQL 実装が通過する
+- サーバー層（OCC・MVCC・TCP）が trait 経由のみでコンポーネントにアクセスし、具体型を参照しない
+- §1.5 の設計不変条件（I-1〜I-12）がすべてテストで証明できる
 - `adlaire-db verify` が正常・改ざんケースで正確に判定する
 - `adlaire-db rebuild` で `state.db` を Adlaire WAL から完全再構築できる
 - SQL CRUD・論理削除・OCC・MVCC が動作する
 - 外部チェックポイントの `root_hash` を手動で検証できる
 - バックアップ → 復元 → チェーン検証の一連フローが完結する
 - フォーク外の外部クレートがゼロであることを `cargo tree` で確認
+- trait 実装の差し替え（`LibSqlStorage` → ダミースタブ）がサーバー層のコード変更なしに動作することを確認（Phase 3 への準備検証）
 
 ---
 
