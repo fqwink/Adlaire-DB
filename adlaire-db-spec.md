@@ -1112,6 +1112,114 @@ TC-6: 起動・停止
 **対象外（Phase 2 以降）：**
 - マルチ DB・管理 API・WebSocket・レプリケーション
 
+**Phase 1 実装タスク一覧：**
+
+依存関係に沿った順序で示す。括弧内は対応する spec セクション・テストケース。
+
+```
+T-1: リポジトリ・ビルド基盤
+  [ ] Cargo workspace 初期化（adlaire-server crate + libsql submodule）
+  [ ] libSQL フォークを git submodule として追加
+  [ ] sqld crate が core feature でビルドできることを確認
+  [ ] CI: cargo build / cargo test が通る状態を維持
+  参照: §3.3.1
+
+T-2: CLI フレームワーク
+  [ ] clap による `serve` / `token` サブコマンドの骨格実装
+  [ ] `serve` フラグ: --data, --port, --admin-port, --auth-jwt-secret,
+      --auth-jwt-secret-file, --log-level, --busy-timeout, --shutdown-timeout
+  [ ] config.toml 読み込み（フラグ > config.toml > デフォルト）
+  [ ] --data 未指定時の起動エラー
+  参照: §4.1, §4.2, §8.4
+
+T-3: データディレクトリ初期化
+  [ ] --data パスの作成（mkdir -p）
+  [ ] .lock ファイルによる排他ロック（flock）
+  [ ] databases/ meta/ サブディレクトリ作成
+  [ ] ディレクトリパーミッション警告（700 未満で WARN）
+  参照: §3.2, §8.1 Step 3〜4, §9.3
+
+T-4: sqld 統合・DB オープン
+  [ ] sqld::Database::open() でシングル DB を開く
+  [ ] PRAGMA journal_mode = WAL を起動時に適用
+  [ ] busy_timeout を設定
+  [ ] PRAGMA synchronous = NORMAL を設定
+  [ ] サーバーシャットダウン時に drop（WAL flush + close）
+  参照: §3.3.2, §11, §8.1 Step 6, §8.2 Step 3
+  検証: TC-5（データ永続性）
+
+T-5: HTTP サーバー骨格（axum）
+  [ ] tokio ランタイム起動
+  [ ] axum Router: POST /v2/pipeline, GET /v2/health
+  [ ] --port でバインドアドレスを指定
+  [ ] SIGINT / SIGTERM ハンドラ登録（graceful shutdown）
+  [ ] "Adlaire DB listening" INFO ログ出力
+  参照: §6.1, §8.1 Step 7〜8, §8.2
+  検証: TC-2（ヘルスチェック）, TC-6（起動・停止）
+
+T-6: hrana-http v2 パイプライン実装
+  [ ] POST /v2/pipeline のリクエスト JSON デシリアライズ
+      （baton, requests[].type, requests[].stmt.sql/args/want_rows）
+  [ ] requests を sqld::Connection.execute_batch() に渡す
+  [ ] sqld::QueryResult を hrana-http v2 results[] 形式に変換
+      （cols, rows, rows_affected, last_insert_rowid）
+  [ ] SQL エラーを results[i].type="error" として返す（HTTP 200 のまま）
+  [ ] "close" type リクエストを正しく処理する
+  参照: §6.2, §3.3.3
+  検証: TC-1（SQL 実行）, TC-4（TypeScript SDK 互換）
+
+T-7: JWT 認証ミドルウェア
+  [ ] jsonwebtoken crate で HS256 検証
+  [ ] Authorization: Bearer <JWT> ヘッダ抽出
+  [ ] 6 ステップ検証フロー実装（§5.5）
+      ①ヘッダ有無, ②署名, ③exp, ④revoke リスト照合,
+      ⑤アクセスレベル, ⑥通過
+  [ ] --auth-jwt-secret 未設定時は認証をスキップ（WARN ログ）
+  [ ] 各エラーの HTTP ステータス・コード返却（§7.3）
+  参照: §5.1〜5.5, §7.3
+  検証: TC-3（JWT 認証）, ETC-1（認証エラー）, ETC-2（権限エラー）
+
+T-8: tokens.json 読み込み・revoke リスト
+  [ ] 起動時に meta/tokens.json をメモリに展開（§8.1 Step 5）
+  [ ] なければ空リストで初期化・書き出し
+  [ ] JWT 検証ステップ④での revoke 照合
+  [ ] Phase 1 では tokens.json の更新は CLI のみ（管理 API は Phase 2）
+  参照: §5.5
+
+T-9: `token create` サブコマンド
+  [ ] --secret <VALUE>, --expiry <DURATION>, --access ro|rw フラグ
+  [ ] JWT を HS256 で署名して stdout に出力
+  [ ] tok_<random> 形式の token_id を生成（sub クレーム）
+  [ ] tokens.json に新規トークンを追記
+  参照: §4.1, §5.2, §5.4
+  検証: TC-3（TOKEN=$(./adlaire-db token create ...)）
+
+T-10: ログ実装
+  [ ] tracing crate + tracing-subscriber（JSON Lines 出力）
+  [ ] --log-level フラグ対応
+  [ ] HTTP リクエストごとの INFO ログ（method, path, status, duration_ms）
+  [ ] 起動・停止の INFO ログ
+  参照: §12
+
+T-11: 統合テスト・TC 完走確認
+  [ ] TC-1: curl で SQL 実行（CREATE / INSERT / SELECT）
+  [ ] TC-2: GET /v2/health → {"status":"ok"}
+  [ ] TC-3: JWT 認証（有効・ヘッダなし・不正トークン）
+  [ ] TC-4: TypeScript SDK (@libsql/client) による CRUD
+  [ ] TC-5: データ永続性（再起動後に SELECT）
+  [ ] TC-6: 起動・停止・.lock 解放
+```
+
+**タスク依存グラフ（最短クリティカルパス）：**
+
+```
+T-1 → T-2 → T-3 → T-4 ─┐
+                          ├→ T-5 → T-6 → T-7 → T-8 → T-9 → T-10 → T-11
+                          └→ T-5（並行可）
+```
+
+T-4〜T-5 は並行実装可。T-6（hrana 変換）は T-4・T-5 の両方が揃った後。
+
 ---
 
 ### Phase 2：マルチ DB・管理 API
