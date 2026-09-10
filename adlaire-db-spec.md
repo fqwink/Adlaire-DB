@@ -660,9 +660,53 @@ TC-6: 起動・停止
 - DB ごとのデータ分離
 - DB 単位のアクセス制御（JWT クレーム拡張）
 
-**完了条件：**
-- 複数クライアントがそれぞれ独立した DB に接続できる
-- 管理 API 経由で DB 作成・削除・一覧取得が動作する
+**完了条件（テストケース）：**
+
+```
+TC-2-1: マルチ DB SQL 実行
+  （a）POST /admin/v1/databases {"name":"db_a"} → 201
+  （b）POST /admin/v1/databases {"name":"db_b"} → 201
+  （c）POST /db_a/v2/pipeline で db_a に CREATE TABLE t(v TEXT); INSERT
+  （d）POST /db_b/v2/pipeline で db_b に CREATE TABLE t(v TEXT); 別データ INSERT
+  （e）db_a の SELECT → db_a のデータのみ返る
+  （f）db_b の SELECT → db_b のデータのみ返る（db_a のデータは見えない）
+
+TC-2-2: 管理 API — DB CRUD
+  （a）GET /admin/v1/databases → [] （初期は空リスト）
+  （b）POST /admin/v1/databases {"name":"testdb"} → 201, {id,name,created_at}
+  （c）GET /admin/v1/databases → [testdb] がリストに含まれる
+  （d）GET /admin/v1/databases/testdb → 200, DB の詳細情報
+  （e）DELETE /admin/v1/databases/testdb → 204
+  （f）GET /admin/v1/databases/testdb → 404
+  （g）POST /testdb/v2/pipeline（削除後） → 404 DB_NOT_FOUND
+
+TC-2-3: DB 名バリデーション
+  （a）POST /admin/v1/databases {"name":""} → 400 INVALID_DB_NAME
+  （b）POST /admin/v1/databases {"name":"a b"} → 400 INVALID_DB_NAME（スペース不可）
+  （c）POST /admin/v1/databases {"name":"../evil"} → 400 INVALID_DB_NAME（パストラバーサル不可）
+  （d）POST /admin/v1/databases {"name":"validname"} → 201（英数字・ハイフン・アンダースコアは有効）
+  （e）同名 DB を再作成 → 409 DB_ALREADY_EXISTS
+
+TC-2-4: トークン CRUD
+  （a）POST /admin/v1/tokens {"access":"rw","expiry":"30d"} → 201, {id,token,access,expires_at}
+  （b）GET /admin/v1/tokens → 発行済みトークン一覧（secret は含まない）
+  （c）GET /admin/v1/tokens/{id} → トークン詳細（revoked フラグ含む）
+  （d）DELETE /admin/v1/tokens/{id} → 204（revoke 実行）
+  （e）GET /admin/v1/tokens/{id} → revoked:true になっている
+
+TC-2-5: トークン失効の即時反映
+  （a）有効トークン T で POST /v2/pipeline → 200
+  （b）DELETE /admin/v1/tokens/{T.id} で T を失効
+  （c）同じトークン T で POST /v2/pipeline → 401 AUTH_INVALID（失効反映が即時であること）
+  （d）新規トークン T2 で POST /v2/pipeline → 200（他のトークンは影響なし）
+
+TC-2-6: データディレクトリ永続化（マルチ DB）
+  （a）db_a / db_b を作成し各テーブルにデータ投入
+  （b）サーバーを停止・再起動（同じ --data ディレクトリ）
+  （c）db_a・db_b 両方のデータが復元されること
+  （d）{data-dir}/databases/ 以下に db_a/ db_b/ ディレクトリが存在すること
+  （e）{data-dir}/meta/databases.json に両 DB が記録されていること
+```
 
 ---
 
@@ -712,6 +756,102 @@ Phase 4 完了後に計画する。候補（優先度未確定）：
 - 静的リンク（musl）によるランタイム依存ゼロを目標（Phase 1 完了後に検討）
 - 配布チャネル：GitHub Releases
 - リリース成果物には SHA-256 チェックサムを添付する
+
+---
+
+## 10. ログ仕様
+
+### 10.1 フォーマット
+
+構造化 JSON Lines（1 行 1 イベント）。
+
+```json
+{"ts":"2024-01-01T00:00:00.123Z","level":"INFO","msg":"request completed","method":"POST","path":"/v2/pipeline","status":200,"duration_ms":3,"db":null,"error":null}
+```
+
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `ts` | string (RFC 3339, ms 精度) | ✓ | イベント発生時刻（UTC） |
+| `level` | string | ✓ | `TRACE` / `DEBUG` / `INFO` / `WARN` / `ERROR` |
+| `msg` | string | ✓ | 人間可読メッセージ |
+| `method` | string | HTTP リクエスト時 | HTTP メソッド |
+| `path` | string | HTTP リクエスト時 | リクエストパス |
+| `status` | integer | HTTP レスポンス時 | HTTP ステータスコード |
+| `duration_ms` | integer | HTTP リクエスト時 | 処理時間（ミリ秒） |
+| `db` | string \| null | マルチ DB 時 | 対象 DB 名（Phase 2〜） |
+| `error` | string \| null | エラー時 | エラーコードまたはメッセージ |
+
+### 10.2 ログレベル
+
+| レベル | 用途 |
+|---|---|
+| `ERROR` | リクエスト処理失敗・起動失敗・ファイル I/O エラー |
+| `WARN` | 認証失敗・存在しない DB へのアクセス・設定非推奨 |
+| `INFO` | 起動・停止・HTTP リクエスト完了（デフォルト） |
+| `DEBUG` | SQL 実行詳細・WAL チェックポイント |
+| `TRACE` | hrana プロトコル詳細・バイト列ダンプ |
+
+デフォルトレベル：`INFO`。`--log-level` フラグまたは環境変数 `ADLAIRE_LOG_LEVEL` で変更可。
+
+### 10.3 出力先
+
+- デフォルト：stdout（コンテナ・systemd との親和性）
+- `--log-file <PATH>` 指定時：ファイルへ書き出し（ローテーションは外部ツール任せ）
+- stdout とファイルの同時出力は非サポート（Phase 1 時点）
+
+### 10.4 起動・停止ログ例
+
+```
+{"ts":"...","level":"INFO","msg":"Adlaire DB starting","version":"0.1.0","data_dir":"/var/lib/adlaire","port":8080}
+{"ts":"...","level":"INFO","msg":"Adlaire DB listening","addr":"0.0.0.0:8080","admin_addr":"0.0.0.0:8081"}
+{"ts":"...","level":"INFO","msg":"shutdown signal received"}
+{"ts":"...","level":"INFO","msg":"Adlaire DB stopped"}
+```
+
+---
+
+## 11. WAL 設定
+
+### 11.1 WAL モード
+
+すべての SQLite DB は起動時に WAL モードを有効化する。
+
+```sql
+PRAGMA journal_mode = WAL;
+```
+
+- WAL により複数の同時読み取りと 1 書き込みが並行可能
+- クラッシュ後の自動リカバリは SQLite が保証
+
+### 11.2 設定パラメータ
+
+| パラメータ | デフォルト | CLI フラグ | config.toml キー | 説明 |
+|---|---|---|---|---|
+| busy timeout | 5000 ms | `--busy-timeout` | `[storage] busy_timeout_ms` | ロック待機タイムアウト。超過時 503 BUSY |
+| WAL checkpoint interval | 1000 pages | — | `[storage] wal_checkpoint_pages` | 自動チェックポイントのページ閾値 |
+| WAL checkpoint mode | `PASSIVE` | — | `[storage] wal_checkpoint_mode` | `PASSIVE` / `FULL` / `RESTART` |
+| synchronous | `NORMAL` | — | `[storage] synchronous` | `OFF` は非サポート（I-4 違反） |
+
+### 11.3 チェックポイント挙動
+
+- SQLite のデフォルト自動チェックポイント（1000 pages）をそのまま使用（Phase 1）
+- Phase 1 では手動チェックポイントの API は提供しない
+- Phase 4（レプリケーション）時に WAL チェックポイント制御を再設計する
+
+### 11.4 busy timeout エラー
+
+WAL ロック待機が `busy_timeout_ms` を超えた場合：
+
+```json
+{
+  "error": {
+    "message": "database is busy",
+    "code": "STORAGE_BUSY"
+  }
+}
+```
+
+HTTP ステータス：503
 
 ---
 
