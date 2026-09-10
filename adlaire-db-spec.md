@@ -10,9 +10,9 @@
 
 ### 1.1 プロジェクト概要
 
-Adlaire DB は **Turso Cloud が提供する機能と同等の機能をセルフホストで実現する** DB サーバーである。
+Adlaire DB は **libSQL ワイヤプロトコル（hrana-http v2 / hrana-ws v3）互換のサーバー特化 DB サーバー**である。
 
-Turso Cloud は libSQL のマネージドホスティングサービスとして HTTP API・WebSocket API・レプリケーション・マルチDB管理などを提供している。Adlaire DB はこれと同等の機能を、libSQL フォークを基盤として Rust で実装し、自前インフラ上で運用できるようにする。
+libSQL クライアント SDK（TypeScript・Rust・Go 等）から接続 URL を差し替えるだけで動作する。クライアント側の埋め込みレプリカ機能は対象外とし、サーバー側の HTTP/WebSocket API・マルチDB管理・レプリケーション・バックアップに特化する。
 
 将来的には libSQL フォークの内部コンポーネント（WAL・ページストレージ・SQL エンジン等）を段階的に内製実装へ置き換えることを計画しているが、具体的な詳細・スケジュールはフェーズの進行とともに検討する。
 
@@ -20,7 +20,7 @@ Turso Cloud は libSQL のマネージドホスティングサービスとして
 
 | 比較対象 | Adlaire DB との関係 |
 |----------|---------------------|
-| Turso Cloud | 提供機能の参照実装。クライアント API 互換を目指す |
+| Turso Cloud | ワイヤプロトコル（hrana）互換の参照実装。埋め込みレプリカは対象外 |
 | libSQL / sqld | フォーク元。Adlaire DB の全体基盤 |
 | SQLite | libSQL 経由で互換性を維持 |
 
@@ -30,7 +30,7 @@ Turso Cloud は libSQL のマネージドホスティングサービスとして
 |------|------|
 | 実装言語 | Rust + 標準ライブラリ |
 | ストレージ・SQL 基盤 | libSQL フォーク（sqld 含む）|
-| 目標機能 | Turso Cloud 機能パリティ |
+| 目標機能 | hrana プロトコル互換・サーバー特化機能 |
 | 将来方針 | libSQL 内部の段階的内製化（詳細は各フェーズで検討）|
 | デプロイ形態 | シングルバイナリ起動 |
 | 対象 OS | Linux |
@@ -39,8 +39,8 @@ Turso Cloud は libSQL のマネージドホスティングサービスとして
 
 実装のあらゆる判断においてこれらを最優先する。
 
-**I-1：libSQL クライアント SDK 互換**  
-既存の libSQL クライアント SDK（TypeScript・Rust・Go 等）が、Turso Cloud の URL を Adlaire DB の URL に差し替えるだけで動作しなければならない。クライアント側コードの変更は要求しない。
+**I-1：hrana プロトコル互換**  
+既存の libSQL クライアント SDK（TypeScript・Rust・Go 等）が、Turso Cloud の URL を Adlaire DB の URL に差し替えるだけで動作しなければならない。ただし埋め込みレプリカ（`syncUrl` 指定）は対象外とし、通常の HTTP/WebSocket 接続のみを対象とする。
 
 **I-2：外部 DB 依存は libSQL フォーク一本**  
 SQLite・libSQL フォーク以外の外部 DB ライブラリ（PostgreSQL・MySQL ドライバ等）に依存しない。
@@ -66,7 +66,7 @@ libSQL 内部コンポーネントの内製化はフェーズ完了後に計画�
 | JWT 認証 | 1 | Bearer トークンによる認証 |
 | マルチDB（パスベース） | 2 | URL パスで接続先 DB を指定 |
 | WebSocket API（hrana-ws） | 3 | インタラクティブトランザクション用 |
-| 埋め込みレプリカ同期 | 3 | クライアント側ローカルレプリカとの同期プロトコル |
+| 埋め込みレプリカ同期 | — | **対象外**（サーバー特化のためスコープ外） |
 | ATTACH DATABASE（クロス DB クエリ） | 3 | 管理下 DB 間のみ許可。任意パス指定は禁止 |
 | メトリクス API | 3 | 接続数・クエリ数・ストレージ使用量の取得 |
 | SQLite 拡張機能ロード | 7 | `.so` / Wasm 拡張（Vector Search 等）のロード |
@@ -930,61 +930,6 @@ Response 200:
 
 ストリームが閉じられる前にプロセスが落ちた場合、SQLite のトランザクションは自動ロールバックされる。
 
-#### 埋め込みレプリカ同期 API（Phase 3）
-
-クライアント SDK の embedded replica 機能が使用する内部 API。
-
-```
-GET /v2/replication/log?from_frame=<N>
-Authorization: Bearer <JWT>
-```
-
-**クエリパラメータ：**
-- `from_frame` : 取得開始フレーム番号（初回は `0`）
-
-**レスポンス（200 OK、Server-Sent Events）：**
-
-```
-Content-Type: text/event-stream
-
-data: {"frame_no":0,"data":"<base64-encoded WAL frame>"}
-
-data: {"frame_no":1,"data":"<base64-encoded WAL frame>"}
-
-data: {"frame_no":2,"data":"<base64-encoded WAL frame>"}
-```
-
-フレームがなくなると接続を閉じる（クライアントは再度リクエストして差分取得）。
-
-```
-GET /v2/replication/snapshot
-Authorization: Bearer <JWT>
-```
-
-**レスポンス（200 OK）：**
-
-```
-Content-Type: application/octet-stream
-X-Replication-Frame-No: 42
-
-<SQLite ページダンプのバイナリ>
-```
-
-初回同期時にクライアントがスナップショットを取得し、以後 `/log` で差分を追う。
-
-```
-POST /v2/replication/heartbeat
-Authorization: Bearer <JWT>
-```
-
-**レスポンス（200 OK）：**
-
-```json
-{"frame_no": 42}
-```
-
-クライアントが定期的に呼び出すことでサーバーは `frame_no` 以前の WAL を GC できる（Phase 3 では GC は実装しない、heartbeat の受付のみ）。
-
 ### 6.4 管理 API
 
 管理 API は独立したポート（デフォルト 8081）で提供する。外部に公開しないことを推奨する。
@@ -1517,7 +1462,7 @@ Step 5: 停止完了
 |----------|------|------------|----------|
 | **Phase 1** | シングル DB・HTTP API（hrana-http v2）・JWT 認証 | TC-1〜TC-6 (6件) | T-1〜T-11 (11件) |
 | **Phase 2** | マルチ DB・管理 API・DB スコープ JWT | TC-2-1〜TC-2-6（TC-2-5b 含む）(7件) | T2-1〜T2-6 (6件) |
-| **Phase 3** | WebSocket (hrana-ws v3)・埋め込みレプリカ・ATTACH DB・メトリクス | TC-3-1〜TC-3-7 (7件) | T3-1〜T3-9 (9件) |
+| **Phase 3** | WebSocket（hrana-ws v3）・ATTACH DB・メトリクス | TC-3-1〜TC-3-6 (6件) | T3-1〜T3-8 (8件) |
 | **Phase 4** | プライマリ・レプリカ構成・WAL レプリケーション・書き込みリダイレクト | TC-4-1〜TC-4-5 (5件) | T4-1〜T4-7 (7件) |
 | **Phase 5** | オンラインバックアップ・PITR・WAL アーカイブ | TC-5-1〜TC-5-8 (8件) | T5-1〜T5-9 (9件) |
 | **Phase 6** | ブランチ作成・一覧・削除 | TC-6-1〜TC-6-7 (7件) | T6-1〜T6-7 (7件) |
@@ -1808,9 +1753,9 @@ T2-6: 統合テスト TC-2-1〜TC-2-6（TC-2-5b 含む）
 
 ---
 
-### Phase 3：WebSocket API・埋め込みレプリカ
+### Phase 3：WebSocket API
 
-**目標**：Turso のインタラクティブトランザクション・埋め込みレプリカが動作する
+**目標**：Turso のインタラクティブトランザクション（hrana-ws v3）が動作する
 
 #### hrana-ws v3 プロトコル概要
 
@@ -1902,18 +1847,6 @@ Phase 1〜2 と同様、sqld の WebSocket サーバーループは起動しな�
 
 WebSocket フレームの受受信・送信には `tokio-tungstenite` クレートを使用する。クエリ実行は Phase 1〜2 と同じ `sqld::Connection::execute_batch()` を経由する（§3.3.2）。
 
-#### 埋め込みレプリカ同期
-
-libSQL クライアント SDK の embedded replica 機能は、サーバー側で WAL フレームを HTTP ストリームで提供する同期 API を必要とする。
-
-```
-GET /v2/replication/log              WAL フレームのストリーム取得
-GET /v2/replication/snapshot         スナップショット取得
-POST /v2/replication/heartbeat       接続維持
-```
-
-埋め込みレプリカ同期 API のプロトコルは §6.3「埋め込みレプリカ同期 API」に定義済み（SSE 形式 `GET /v2/replication/log`・スナップショット `GET /v2/replication/snapshot`・ハートビート `POST /v2/replication/heartbeat`）。実装は sqld の WAL 読み取りインターフェースを使用し、Adlaire サーバー層で SSE ストリームを生成する。
-
 **完了条件（テストケース）：**
 
 ```
@@ -1942,17 +1875,6 @@ TC-3-3: 複数ストリームの多重化
 TC-3-4: JWT 認証（WebSocket）
   hello メッセージに有効 JWT → hello_ok
   hello メッセージに不正 JWT → hello_error
-
-TC-3-5: 埋め込みレプリカ同期
-  TypeScript SDK:
-  const db = createClient({
-    url: "file:local.db",
-    syncUrl: "http://localhost:8080",
-    authToken: "<JWT>",
-  });
-  await db.sync();
-  const r = await db.execute("SELECT * FROM t");
-  期待: サーバー側のデータが local.db に同期される
 ```
 
 #### ATTACH DATABASE（クロス DB クエリ）
@@ -1972,7 +1894,7 @@ Turso Cloud と同様に、Adlaire が管理する DB 間に限り `ATTACH DATAB
 **追加テストケース：**
 
 ```
-TC-3-6: ATTACH DATABASE（クロス DB クエリ）
+TC-3-5: ATTACH DATABASE（クロス DB クエリ）
   （a）db_a・db_b を作成し、それぞれにテーブルとデータを投入
   （b）db_a への pipeline で:
       ATTACH DATABASE 'db_b' AS b;
@@ -2018,7 +1940,7 @@ GET /admin/v1/metrics
 **追加テストケース：**
 
 ```
-TC-3-7: メトリクス API
+TC-3-6: メトリクス API
   （a）GET /admin/v1/metrics（管理トークンあり）→ 200、databases 配列に管理下 DB が含まれる
   （b）クエリ実行後に queries_total が増加していること
   （c）GET /admin/v1/metrics（管理トークンなし）→ 401
@@ -2032,10 +1954,9 @@ T3-2: hrana-ws v3 hello ハンドシェイク + JWT 認証
 T3-3: ストリーム多重化レイヤー実装（stream_id ごとの接続状態管理）
 T3-4: execute / batch / sequence / describe リクエスト処理（sqld 境界再利用）
 T3-5: インタラクティブトランザクション状態管理（BEGIN/COMMIT/ROLLBACK）
-T3-6: 埋め込みレプリカ同期 API（GET /v2/replication/log + snapshot + heartbeat）
-T3-7: ATTACH DATABASE インターセプト・DB 名バリデーション・パス解決
-T3-8: メトリクス収集（インメモリカウンター）+ GET /admin/v1/metrics
-T3-9: 統合テスト TC-3-1〜TC-3-7
+T3-6: ATTACH DATABASE インターセプト・DB 名バリデーション・パス解決
+T3-7: メトリクス収集（インメモリカウンター）+ GET /admin/v1/metrics
+T3-8: 統合テスト TC-3-1〜TC-3-6
 ```
 
 ---
@@ -2662,5 +2583,4 @@ HTTP ステータス：503
 | sqld | libSQL のサーバーコンポーネント。HTTP API・WebSocket API を提供する |
 | libSQL フォーク | Adlaire DB 専用に改変した libSQL（sqld 含む）。本プロジェクトの全体基盤 |
 | hrana | Turso / libSQL のワイヤプロトコル名。hrana-http（HTTP版）と hrana-ws（WebSocket版）がある |
-| 埋め込みレプリカ | クライアント側ローカルに SQLite DB を持ち、リモート libSQL DB と同期する仕組み |
 | baton | hrana プロトコルにおけるセッション継続識別子 |

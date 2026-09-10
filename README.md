@@ -1,6 +1,6 @@
 # Adlaire DB
 
-Turso Cloud 互換のセルフホスト DB サーバー。libSQL フォーク（sqld）を基盤として Rust で実装する。
+libSQL ワイヤプロトコル（hrana）互換のセルフホスト DB サーバー。libSQL フォーク（sqld）を基盤として Rust で実装する。
 
 ## 概要
 
@@ -22,7 +22,7 @@ Adlaire DB は [Turso Cloud](https://turso.tech) が提供する機能をセル�
 |----------|------|------|
 | Phase 1 | HTTP API（hrana-http v2）・JWT 認証・シングル DB | 設計中 |
 | Phase 2 | マルチ DB・トークン管理・管理 API | 設計中 |
-| Phase 3 | WebSocket API・埋め込みレプリカ・ATTACH DATABASE・メトリクス | 設計中 |
+| Phase 3 | WebSocket API（hrana-ws v3）・ATTACH DATABASE・メトリクス | 設計中 |
 | Phase 4 | プライマリ・レプリカ構成・WAL レプリケーション | 設計中 |
 | Phase 5 | オンラインバックアップ・PITR | 設計中 |
 | Phase 6 | ブランチ | 設計中 |
