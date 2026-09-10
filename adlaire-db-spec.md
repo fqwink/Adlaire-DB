@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.23  
+**バージョン：** 0.24  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-10  
 
@@ -2211,15 +2211,19 @@ T4-7: 統合テスト TC-4-1〜TC-4-5
 
 ---
 
-### Phase 5a: バックアップ・PITR
+### Phase 5a：バックアップ・PITR
 
-#### 目標
+**目標**：WAL アーカイブからのオンラインバックアップと任意時点リストア（PITR）が動作する
 
-- WAL アーカイブによるポイントインタイムリストア（PITR）の実現
-- オンラインバックアップ API によるエクスポート・インポート
+**スコープ：**
+- WAL アーカイブ書き込み（チェックポイント前フック）
+- manifest.json による WAL フレーム管理
+- バックアップ API：`GET /admin/v1/databases/{name}/backup`
+- リストア API：`POST /admin/v1/databases/{name}/restore`
+- PITR API：`POST /admin/v1/databases/{name}/restore/point-in-time`
 - `wal_retention_days` 設定によるアーカイブ保持期間の管理
 
-#### WAL アーカイブ構造
+**WAL アーカイブ構造：**
 
 ```
 {data-dir}/
@@ -2248,13 +2252,13 @@ T4-7: 統合テスト TC-4-1〜TC-4-5
 }
 ```
 
-#### アーカイブ保存タイミング
+**アーカイブ保存タイミング：**
 
 1. チェックポイント直前に WAL フレームをアーカイブへコピーする
 2. チェックポイント時点の DB ファイルスナップショットを保存する（スナップショットは最新 1 件のみ保持）
 3. `wal_retention_days` を超えた古いフレームは定期クリーンアップで削除する（1 日 1 回）
 
-#### PITR リストア処理フロー
+**PITR リストア処理フロー：**
 
 ```
 1. manifest.json を読み込む
@@ -2267,44 +2271,129 @@ T4-7: 統合テスト TC-4-1〜TC-4-5
 
 フレームの CRC32 検証失敗時: リストア中断、元の DB を復元し `409 RESTORE_FRAME_CORRUPT` を返す。
 
-#### テストケース（Phase 5a）
+**完了条件（テストケース）：**
 
-| ID | シナリオ | 期待結果 |
-|----|---------|---------|
-| TC-5a-1 | バックアップ取得中に書き込みリクエストを同時実行 | バックアップは整合性を保って完了し、書き込みも成功 |
-| TC-5a-2 | バックアップファイルからリストア | リストア後クエリが成功し、元のデータが参照できる |
-| TC-5a-3 | 不正な SQLite ファイルでリストア | `409 RESTORE_INTEGRITY_FAILED` を返す |
-| TC-5a-4 | `wal_retention_days = 0` で PITR 試行 | `503 PITR_NOT_ENABLED` |
-| TC-5a-5 | 有効な timestamp で PITR リストア | 指定時点のデータに復元されている |
-| TC-5a-6 | アーカイブにない timestamp で PITR 試行 | `404 FRAME_NOT_FOUND` |
-| TC-5a-7 | CRC32 不一致フレームで PITR | `409 RESTORE_FRAME_CORRUPT`、元 DB 復元確認 |
-| TC-5a-8 | 古いフレームがクリーンアップ対象になる | `wal_retention_days` 超過フレームが削除されている |
+```
+TC-5a-1: バックアップと同時書き込み
+  （a）GET /admin/v1/databases/{name}/backup を開始（大きな DB でストリーミング）
+  （b）バックアップ中に POST /{name}/v2/pipeline で INSERT を実行
+  （c）バックアップは整合性を保って完了し、書き込みリクエストも 200 で成功
 
-#### 実装タスク（Phase 5a）
+TC-5a-2: バックアップからリストア
+  （a）GET /admin/v1/databases/{name}/backup でバックアップファイルを取得
+  （b）POST /admin/v1/databases/{name}/restore でリストア
+  （c）リストア後 SELECT → 元のデータが参照できる
 
-| タスク ID | 内容 |
-|----------|------|
-| T5a-1 | WAL アーカイブ書き込み: チェックポイント前フックでフレームコピー |
-| T5a-2 | スナップショット保存: チェックポイント時点の DB コピー |
-| T5a-3 | manifest.json 管理: 書き込み・読み込み・整合性確認 |
-| T5a-4 | クリーンアップスレッド: `wal_retention_days` 超過フレームの削除 |
-| T5a-5 | バックアップ API 実装: `GET /admin/v1/databases/{name}/backup` |
-| T5a-6 | リストア API 実装: `POST /admin/v1/databases/{name}/restore` |
-| T5a-7 | PITR API 実装: `POST .../restore/point-in-time`（フレームリプレイ） |
-| T5a-8 | エラーハンドリング: 各 API のエラーコード・冪等性 |
-| T5a-9 | 統合テスト: TC-5a-1〜TC-5a-8 |
+TC-5a-3: 不正ファイルでリストア
+  （a）POST /admin/v1/databases/{name}/restore（不正な SQLite ファイルをアップロード）
+  期待: 409 RESTORE_INTEGRITY_FAILED
+
+TC-5a-4: PITR 無効時の試行
+  設定: wal_retention_days = 0（または未設定）
+  （a）POST /admin/v1/databases/{name}/restore/point-in-time
+  期待: 503 PITR_NOT_ENABLED
+
+TC-5a-5: タイムスタンプ指定 PITR
+  （a）t=T1 に INSERT A、t=T2 に INSERT B
+  （b）POST .../restore/point-in-time {"timestamp": "T1+1s"}
+  （c）SELECT → A が存在し B が存在しない
+
+TC-5a-6: アーカイブ範囲外タイムスタンプ
+  （a）POST .../restore/point-in-time（アーカイブに存在しない timestamp）
+  期待: 404 FRAME_NOT_FOUND
+
+TC-5a-7: CRC32 不一致フレームで PITR
+  （a）フレームファイルを手動で破壊
+  （b）POST .../restore/point-in-time
+  期待: 409 RESTORE_FRAME_CORRUPT、元 DB が復元されている
+
+TC-5a-8: 保持期間超過フレームのクリーンアップ
+  設定: wal_retention_days = 1
+  （a）2 日前のタイムスタンプを持つフレームを作成
+  （b）クリーンアップ実行（または 24h 経過後）
+  （c）該当フレームが削除され、manifest.json から除去されている
+```
+
+**対象外（Phase 5b 以降）：**
+- ブランチ機能（5b）
+- 外部ストレージへのアーカイブ転送
+
+**Phase 5a 実装タスク一覧：**
+
+```
+T5a-1: WAL フレームアーカイブ書き込み
+  [ ] sqld チェックポイント前フックで WAL フレームを wal-archive/ へコピー
+  [ ] フレームごとに CRC32 チェックサムを計算・付与
+  [ ] manifest.json へフレームメタデータを追記
+  参照: §3.2, §3.6.3, §6.4（PITR）
+
+T5a-2: スナップショット保存
+  [ ] チェックポイント完了後に data.db を snapshot-{frame_no}.db へコピー
+  [ ] スナップショットは最新 1 件のみ保持（古い snapshot ファイルを削除）
+  [ ] manifest.json の base_frame / snapshot フィールドを更新
+  参照: §3.6.3
+
+T5a-3: manifest.json 管理
+  [ ] manifest.json の読み込み・書き込みロジック（アトミック更新）
+  [ ] 整合性確認: frames[] と実ファイルの突合
+  [ ] manifest.json 破損時の起動エラー処理
+  参照: §3.6.3, §8.1 Step 5-2
+
+T5a-4: クリーンアップスレッド
+  [ ] wal_retention_days 設定を config.toml から読み込み
+  [ ] 24h ごとに manifest.json をスキャンし期限超過フレームを削除
+  [ ] 削除後に manifest.json を更新
+  参照: §4.2, §3.6.6
+  検証: TC-5a-8
+
+T5a-5: バックアップ API
+  [ ] GET /admin/v1/databases/{name}/backup → sqlite3_backup_* API でオンラインバックアップ
+  [ ] バックアップ中の書き込みをブロックしない（Online Backup API の並行性保証）
+  [ ] レスポンス: SQLite ファイルをストリーミング送信（Content-Type: application/octet-stream）
+  参照: §6.4（バックアップ / PITR / ブランチ）
+  検証: TC-5a-1, TC-5a-2
+
+T5a-6: リストア API
+  [ ] POST /admin/v1/databases/{name}/restore → アップロードされた SQLite ファイルを適用
+  [ ] PRAGMA integrity_check でファイル整合性検証
+  [ ] 検証失敗時: 元 DB を復元し 409 RESTORE_INTEGRITY_FAILED を返す
+  [ ] 成功時: sqld をリロードしてサービス再開
+  参照: §6.4, §7.3
+  検証: TC-5a-2, TC-5a-3
+
+T5a-7: PITR API
+  [ ] POST /admin/v1/databases/{name}/restore/point-in-time（timestamp / frame_no 指定）
+  [ ] wal_retention_days = 0 の場合は即座に 503 PITR_NOT_ENABLED
+  [ ] manifest.json から対象フレームを特定
+  [ ] スナップショット + WAL フレームリプレイ処理を実装
+  [ ] CRC32 検証失敗時: 元 DB 復元 + 409 RESTORE_FRAME_CORRUPT
+  参照: §6.4, §7.3, §3.6.3
+  検証: TC-5a-4〜TC-5a-7
+
+T5a-8: エラーハンドリング・冪等性
+  [ ] 各 API エラーコードを §7.3 の定義に沿って実装
+  [ ] リストア・PITR の中断時に元 DB を必ず復元すること（ロールバック保証）
+  [ ] 管理 API への Admin JWT 検証をバックアップ・リストアエンドポイントにも適用
+  参照: §7.3, §10
+
+T5a-9: 統合テスト
+  [ ] TC-5a-1〜TC-5a-8 を全て実行し PASS することを確認
+  [ ] Phase 1〜4 の TC がリグレッションしないことを確認
+```
 
 ---
 
-### Phase 5b: ブランチ
+### Phase 5b：ブランチ
 
-#### 目標
+**目標**：DB の任意時点からブランチを作成し、独立した DB として読み書き可能にする
 
-- DB の任意時点からブランチを作成し、独立した DB として読み書き可能にする
-- ブランチ一覧・削除 API を提供する
-- ブランチは通常の DB として Phase 2 以降の全 API を利用可能にする
+**スコープ：**
+- ブランチ DB 作成 API（`from: "current"` / `from: {timestamp}` / `from: {frame_no}`）
+- ブランチ一覧・削除 API
+- ブランチ DB 命名規則と予約名バリデーション（`___`）
+- 再起動後のブランチ DB 自動復元
 
-#### ブランチ DB の命名規則
+**ブランチ DB の命名規則：**
 
 ブランチ DB 内部名: `{source-db}___{branch-name}`（区切りは `___` トリプルアンダースコア）
 
@@ -2315,7 +2404,7 @@ T4-7: 統合テスト TC-4-1〜TC-4-5
 
 `___` を含む DB 名はブランチ DB として判定され、`POST /admin/v1/databases` での直接作成は拒否する（`400 DB_RESERVED_NAME`）。
 
-#### ブランチメタデータ（branches.json）
+**ブランチメタデータ（branches.json）：**
 
 `{data-dir}/meta/branches.json` に全ブランチのメタデータを保存する。
 
@@ -2335,9 +2424,9 @@ T4-7: 統合テスト TC-4-1〜TC-4-5
 
 起動時に `branches.json` を読み込み、各ブランチ DB が存在する場合は自動でオープンする。
 
-#### ブランチ作成処理フロー
+**ブランチ作成処理フロー：**
 
-**`from: "current"` の場合：**
+`from: "current"` の場合：
 
 ```
 1. Online Backup API で source DB のスナップショットを取得
@@ -2347,7 +2436,7 @@ T4-7: 統合テスト TC-4-1〜TC-4-5
 5. 201 Created を返す
 ```
 
-**`from: {timestamp}` / `{frame_no}` の場合：**
+`from: {timestamp}` / `{frame_no}` の場合：
 
 ```
 1. WAL アーカイブから指定時点のスナップショット + フレームを取得（Phase 5a 依存）
@@ -2359,29 +2448,97 @@ T4-7: 統合テスト TC-4-1〜TC-4-5
 
 `from: {timestamp}` / `{frame_no}` は `wal_retention_days > 0` が必須。未設定時は `503 PITR_NOT_ENABLED`。
 
-#### テストケース（Phase 5b）
+**完了条件（テストケース）：**
 
-| ID | シナリオ | 期待結果 |
-|----|---------|---------|
-| TC-5b-1 | `from: "current"` でブランチ作成 | ブランチ DB がアクセス可能、元 DB とデータ一致 |
-| TC-5b-2 | ブランチ DB への書き込み | 元 DB に影響しない独立した書き込みが可能 |
-| TC-5b-3 | `from: {timestamp}` でブランチ作成 | 指定時点のデータを持つブランチが作成される |
-| TC-5b-4 | ブランチ一覧取得 | 作成済みブランチが branches.json から正しく返る |
-| TC-5b-5 | ブランチ削除 | DB ファイル削除、branches.json から除去 |
-| TC-5b-6 | `___` を含む名前で DB 作成試行 | `400 DB_RESERVED_NAME` |
-| TC-5b-7 | 再起動後のブランチ DB 自動復元 | branches.json から全ブランチが自動オープンされる |
+```
+TC-5b-1: current から新規ブランチ作成
+  （a）POST /admin/v1/databases/my-db/branches {"branch_name":"feature-x","from":"current"} → 201
+  （b）GET /my-db___feature-x/v2/pipeline SELECT → 元 DB と同じデータが返る
+  （c）GET /admin/v1/databases/my-db/branches → feature-x が含まれる
 
-#### 実装タスク（Phase 5b）
+TC-5b-2: ブランチ DB への独立書き込み
+  （a）ブランチ DB に INSERT A
+  （b）元 DB を SELECT → A が存在しない
+  （c）ブランチ DB を SELECT → A が存在する
 
-| タスク ID | 内容 |
-|----------|------|
-| T5b-1 | branches.json の読み書きロジック |
-| T5b-2 | ブランチ DB 命名・バリデーション（`___` 予約） |
-| T5b-3 | `from: "current"` ブランチ作成（Online Backup API 利用） |
-| T5b-4 | `from: {timestamp}/{frame_no}` ブランチ作成（Phase 5a 依存） |
-| T5b-5 | ブランチ一覧・削除 API 実装 |
-| T5b-6 | 起動時ブランチ自動復元ロジック |
-| T5b-7 | 統合テスト: TC-5b-1〜TC-5b-7 |
+TC-5b-3: タイムスタンプ指定でブランチ作成
+  （a）t=T1 に my-db へ INSERT A、t=T2 に INSERT B
+  （b）POST .../branches {"branch_name":"snap","from":"T1+1s"} → 201
+  （c）ブランチ DB を SELECT → A が存在し B が存在しない
+
+TC-5b-4: ブランチ一覧取得
+  （a）feature-x・snap の 2 ブランチを作成
+  （b）GET /admin/v1/databases/my-db/branches → 両ブランチが含まれる
+
+TC-5b-5: ブランチ削除
+  （a）DELETE /admin/v1/databases/my-db/branches/feature-x → 204
+  （b）GET /admin/v1/databases/my-db/branches → feature-x が含まれない
+  （c）/my-db___feature-x/v2/pipeline → 404 DB_NOT_FOUND
+  （d）{data-dir}/databases/my-db___feature-x/ ディレクトリが削除されている
+
+TC-5b-6: 予約名バリデーション
+  （a）POST /admin/v1/databases {"name":"a___b"} → 400 DB_RESERVED_NAME
+
+TC-5b-7: 再起動後のブランチ自動復元
+  （a）feature-x ブランチを作成
+  （b）サーバーを再起動（同じ --data）
+  （c）/my-db___feature-x/v2/pipeline SELECT → データが復元されている
+```
+
+**対象外（Phase 5c 以降）：**
+- ブランチのマージ
+- ブランチ間 diff
+
+**Phase 5b 実装タスク一覧：**
+
+```
+T5b-1: branches.json 読み書きロジック
+  [ ] {data-dir}/meta/branches.json の読み込み・書き込み（アトミック更新）
+  [ ] 起動時に branches.json を読み込み（§8.1 Step 5-3）
+  [ ] branches.json がない場合は空で初期化
+  参照: §3.2, §8.1 Step 5-3
+
+T5b-2: ブランチ DB 命名・バリデーション
+  [ ] `___` を含む DB 名を予約名として判定
+  [ ] POST /admin/v1/databases で `___` 含む名前 → 400 DB_RESERVED_NAME
+  [ ] ブランチ DB 内部名の生成: {source}___{branch-name}
+  参照: §7.3
+  検証: TC-5b-6
+
+T5b-3: `from: "current"` ブランチ作成
+  [ ] sqlite3_backup_* API で source DB のオンラインスナップショットを取得
+  [ ] {data-dir}/databases/{name}___{branch}/ ディレクトリ作成
+  [ ] スナップショットを data.db として配置
+  [ ] branches.json へメタデータを追加
+  [ ] 新 DB を sqld でオープン・マルチ DB マネージャへ登録
+  参照: §6.4（ブランチ）
+  検証: TC-5b-1, TC-5b-2
+
+T5b-4: `from: {timestamp}/{frame_no}` ブランチ作成
+  [ ] wal_retention_days = 0 の場合は 503 PITR_NOT_ENABLED
+  [ ] T5a-7 の PITR ロジックを再利用してブランチ DB を構築
+  [ ] 構築先: {data-dir}/databases/{name}___{branch}/data.db
+  [ ] branches.json へメタデータを追加（from_frame を記録）
+  参照: §6.4, T5a-7
+  検証: TC-5b-3
+
+T5b-5: ブランチ一覧・削除 API
+  [ ] GET /admin/v1/databases/{name}/branches → branches.json からフィルタして返す
+  [ ] DELETE /admin/v1/databases/{name}/branches/{branch-name}
+        → sqld クローズ・ディレクトリ削除・branches.json 更新
+  参照: §6.4（ブランチ）
+  検証: TC-5b-4, TC-5b-5
+
+T5b-6: 起動時ブランチ自動復元ロジック
+  [ ] branches.json を読み込み、各 db_name の DB ディレクトリが存在すれば sqld でオープン
+  [ ] ディレクトリが存在しないエントリは WARN ログを出力してスキップ
+  参照: §8.1 Step 5-3
+  検証: TC-5b-7
+
+T5b-7: 統合テスト
+  [ ] TC-5b-1〜TC-5b-7 を全て実行し PASS することを確認
+  [ ] Phase 1〜5a の TC がリグレッションしないことを確認
+```
 
 ---
 
