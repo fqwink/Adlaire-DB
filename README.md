@@ -14,7 +14,7 @@ Adlaire DB は [Turso Cloud](https://turso.tech) が提供する機能をセル�
 - **マルチ DB** — URL パスでデータベースを切り替え（`/{db-name}/v2/pipeline`）
 - **JWT 認証** — HS256 Bearer トークン、DB スコープ、失効管理
 - **WAL レプリケーション** — プライマリ・レプリカ構成（Phase 4）
-- **Backup / PITR / ブランチ** — WAL アーカイブからの任意時点復元（Phase 5）
+- **Backup / PITR / ブランチ** — WAL アーカイブからの任意時点復元（Phase 5・6）
 
 ## 実装フェーズ
 
@@ -24,8 +24,8 @@ Adlaire DB は [Turso Cloud](https://turso.tech) が提供する機能をセル�
 | Phase 2 | マルチ DB・トークン管理・管理 API | 設計中 |
 | Phase 3 | WebSocket API・埋め込みレプリカ・ATTACH DATABASE・メトリクス | 設計中 |
 | Phase 4 | プライマリ・レプリカ構成・WAL レプリケーション | 設計中 |
-| Phase 5a | オンラインバックアップ・PITR | 設計中 |
-| Phase 5b | ブランチ | 設計中 |
+| Phase 5 | オンラインバックアップ・PITR | 設計中 |
+| Phase 6 | ブランチ | 設計中 |
 
 ## 起動方法（Phase 1 予定）
 
