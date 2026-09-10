@@ -1121,7 +1121,91 @@ Phase 4 完了後に計画する。候補（優先度未確定）：
 
 ---
 
-## 9. 配布・デプロイ
+## 9. セキュリティ考慮事項
+
+### 9.1 JWT シークレット管理
+
+**優先順位：** `--auth-jwt-secret-file` > `--auth-jwt-secret` > 環境変数 `ADLAIRE_JWT_SECRET` > 設定ファイル `[auth] jwt_secret`
+
+| 方法 | 推奨度 | 用途 |
+|------|--------|------|
+| `--auth-jwt-secret-file <PATH>` | 本番推奨 | ファイルから読み込み。ファイルパーミッション 600 で保護 |
+| 環境変数 `ADLAIRE_JWT_SECRET` | 本番可 | コンテナ・systemd での秘密注入に適す |
+| `--auth-jwt-secret <VALUE>` | 開発のみ | プロセスリストに secret が露出するため本番不可 |
+| config.toml `jwt_secret` | 非推奨 | 設定ファイルが平文で読まれる。git に入れないこと |
+
+secret が未設定の場合は認証を完全に無効化する（起動時に `WARN` ログを出力する）。
+
+**シークレットの最小要件（実装で検証する）：**
+- 長さ 32 バイト以上
+- 未満の場合: 起動失敗 `Error: jwt_secret must be at least 32 bytes`
+
+**ローテーション方針（Phase 1 時点）：**
+- 旧 secret でのトークンは即時無効化される（新 secret で再発行が必要）
+- ローテーション手順: 新 secret で新トークン発行 → クライアント切り替え → 旧 secret 廃止
+- ゼロダウンタイムローテーション（複数 secret の同時受理）は Phase 1 対象外
+
+### 9.2 管理ポート（8081）のアクセス制御
+
+**デフォルト動作：**
+
+```
+bind: 127.0.0.1:8081   ← localhost のみ待機（Phase 1 デフォルト）
+```
+
+外部ネットワークへの公開には `--admin-bind 0.0.0.0:8081` が必要。公開する場合は必ず `[admin] auth_token` を設定し、TLS ターミネーション（リバースプロキシ）を前段に置くこと。
+
+**推奨構成（本番）：**
+
+```
+Internet → Reverse Proxy (TLS) → :8080 (API)
+                                → :8081 (Admin) ← VPN / internal network only
+```
+
+### 9.3 データディレクトリのファイルパーミッション
+
+起動時に `--data` で指定したディレクトリのパーミッションを検証・適用する。
+
+| パス | 推奨パーミッション | 内容 |
+|------|--------------------|------|
+| `{data-dir}/` | `700` | ルートディレクトリ |
+| `{data-dir}/meta/` | `700` | tokens.json・databases.json |
+| `{data-dir}/meta/tokens.json` | `600` | JWT secret と同等の機密 |
+| `{data-dir}/databases/{name}/` | `700` | DB ファイルディレクトリ |
+| `{data-dir}/databases/{name}/data.db` | `600` | SQLite 本体 |
+| `{data-dir}/databases/{name}/data.db-wal` | `600` | WAL ファイル |
+
+実装方針：
+- 起動時に `data-dir` が `700` 未満の場合は `WARN` ログを出力する（強制変更はしない）
+- 新規作成するファイル・ディレクトリは上記パーミッションで作成する
+
+### 9.4 TLS
+
+Phase 1〜2 では TLS をネイティブ実装しない。リバースプロキシ（Nginx・Caddy 等）による TLS ターミネーションを推奨する。
+
+```
+Client → [TLS] → Nginx/Caddy → [plain HTTP] → adlaire-db :8080
+```
+
+TLS ネイティブ対応は Phase 5 以降の検討事項とする。
+
+### 9.5 トークン情報の漏洩防止
+
+- `GET /admin/v1/tokens` および `GET /admin/v1/tokens/{id}` は JWT 文字列（`token` フィールド）を返さない（§6.4 参照）
+- JWT 文字列は `POST /admin/v1/tokens` の発行時レスポンスでのみ返す（以降は再取得不可）
+- `tokens.json` に JWT 文字列は保存しない（`id` と `access` と有効期限のみ保存）
+
+### 9.6 パストラバーサル対策
+
+DB 名・ファイルパス生成時に以下を必ず適用する：
+
+1. DB 名バリデーション（§6.4 の正規表現 `^[a-zA-Z0-9_-]{1,127}$`）
+2. `databases/{name}/` パス構築時に `Path::new(data_dir).join("databases").join(name)` を使用し、`..` を含む入力をバリデーションで事前排除する
+3. 予約語（`meta`・`admin`）のブロック
+
+---
+
+## 10. 配布・デプロイ
 
 - シングルバイナリ（`adlaire-db`）として配布
 - ターゲット：Linux x86_64 / aarch64
@@ -1131,7 +1215,7 @@ Phase 4 完了後に計画する。候補（優先度未確定）：
 
 ---
 
-## 10. ログ仕様
+## 11. ログ仕様
 
 ### 10.1 フォーマット
 
@@ -1182,7 +1266,7 @@ Phase 4 完了後に計画する。候補（優先度未確定）：
 
 ---
 
-## 11. WAL 設定
+## 12. WAL 設定
 
 ### 11.1 WAL モード
 
