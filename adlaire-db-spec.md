@@ -9,9 +9,9 @@
 ## 1. 概要
 
 ### 1.1 プロジェクト概要
-Rust で実装されるシングルバイナリ DB サーバー。**libSQL を全機能ごとフォークし**（SQL エンジン・ファイルベースストレージ・WAL・クラッシュリカバリを含む全機能をそのまま採用）、その上に Adlaire 独自の改ざん証明監査層（append-only WAL + ハッシュチェーン）と多クライアント TCP サーバー機能を構築する。フォークによってコードベースを直接保有し、以降のフェーズで libSQL の内部実装（B+Tree・WAL エンジン・SQL パーサ）を自前実装に段階的に置き換えて外部依存ゼロを達成する（内製化ロードマップ）。将来的には SQLite / libSQL との互換性を維持しない計画であり、Phase 5 完了後は Adlaire 独自の SQL・ストレージ形式として完全に独立する（I-14）。
+Rust で実装されるシングルバイナリ DB サーバー。**libSQL を全機能ごとフォークし**（SQL エンジン・ファイルベースストレージ・WAL・クラッシュリカバリを含む全機能をそのまま採用）、その上に Adlaire 独自の改ざん証明監査層（append-only WAL + ハッシュチェーン）と HTTP/JSON API サーバー機能を構築する。フォークによってコードベースを直接保有し、以降のフェーズで libSQL の内部実装（B+Tree・WAL エンジン・SQL パーサ）を自前実装に段階的に置き換えて外部依存ゼロを達成する（内製化ロードマップ）。将来的には SQLite / libSQL との互換性を維持しない計画であり、Phase 5 完了後は Adlaire 独自の SQL・ストレージ形式として完全に独立する（I-14）。
 
-**ポジション：** 「libSQL フォーク上に構築した監査証明付きサーバーを、シングルバイナリで」。全機能フォーク済みの libSQL（SQL エンジン・ストレージ・WAL・クラッシュリカバリ）を基盤として、append-only WAL + ハッシュチェーンによる改ざん検知、論理削除のみによる完全な変更履歴、多クライアント TCP サーバーを一つのバイナリで実現する。SQLite 内部実装の段階的内製化によって、長期的な自律性と監査可能性を確保する。
+**ポジション：** 「libSQL フォーク上に構築した監査証明付きサーバーを、シングルバイナリで」。全機能フォーク済みの libSQL（SQL エンジン・ストレージ・WAL・クラッシュリカバリ）を基盤として、append-only WAL + ハッシュチェーンによる改ざん検知、論理削除のみによる完全な変更履歴、HTTP/JSON API サーバーを一つのバイナリで実現する。SQLite 内部実装の段階的内製化によって、長期的な自律性と監査可能性を確保する。
 
 ### 1.2 設計目標
 - **libSQL 全機能フォーク** ：Phase 1 は libSQL を全機能ごとフォークし、SQL・ファイル永続化・WAL・クラッシュリカバリをすべてそのまま採用する
@@ -20,7 +20,7 @@ Rust で実装されるシングルバイナリ DB サーバー。**libSQL を�
 - **段階的内製化** ：B+Tree・WAL エンジン・SQL パーサを自前実装に段階的に置き換え、長期的に外部依存をゼロへ近づける
 - **OCC + MVCC** ：楽観的並行制御。読み取りはロックしない。コミット時に競合を検出してリトライ
 - **外部検証可能性** ：専用クライアント不要でファイルから直接ハッシュチェーンを検証できる
-- **libSQL サーバー機能特化** ：多クライアント TCP サーバー・監査 WAL・論理削除強制を libSQL の上位層として実装
+- **libSQL サーバー機能特化** ：HTTP/JSON API サーバー・監査 WAL・論理削除強制を libSQL の上位層として実装
 - **デプロイ簡易性** ：シングルバイナリ起動を第一級市民とする
 
 ### 1.3 開発フェーズ概要
@@ -30,16 +30,16 @@ Rust で実装されるシングルバイナリ DB サーバー。**libSQL を�
 | フェーズ | 名称 | 概要 |
 |----------|------|------|
 | **Phase 1** | libSQL フォーク | libSQL をフォークしてプロジェクト基盤を確立 |
-| **Phase 2** | Adlaire サーバー層 | 監査 WAL・OCC・MVCC・TCP サーバーを構築 |
+| **Phase 2** | Adlaire サーバー層 | 監査 WAL・OCC・MVCC・HTTP/JSON API サーバーを構築 |
 | **Phase 3** | B+Tree 内製化 | libSQL の SQLite B+Tree を自前実装に置き換え |
 | **Phase 4** | WAL エンジン内製化 | libSQL の SQLite WAL を自前実装に置き換え |
 | **Phase 5** | SQL パーサ内製化 | libSQL の SQL パーサを自前実装に置き換え（外部依存ゼロ達成） |
 | **Phase 6** | 分散対応 | レプリケーション・シャーディング・分散 TX |
 
 **共通制約（全フェーズ）：**
-- Rust / Linux / シングルバイナリ起動（`./adlaire-db --data ./mydb --port 9876`）
-- フォーク外の外部クレートは使用しない（SHA-256・CRC32・TCP・HTTP は自前実装）
-- Phase 2 は SDK 経由 TCP のみ（ポート 9876）。HTTP/JSON API（ポート 8080）は Phase 2 完了後に追加（§18.5）
+- Rust / Linux / シングルバイナリ起動（`./adlaire-db --data ./mydb --port 8080`）
+- フォーク外の外部クレートは使用しない（SHA-256・CRC32・HTTP は自前実装）
+- Phase 2 は HTTP/JSON API（ポート 8080）のみ。SDK は HTTP/JSON API のクライアントライブラリとして実装する（§18.5）
 
 ### 1.3.1 後回し項目（フェーズ別）
 
@@ -47,7 +47,6 @@ Rust で実装されるシングルバイナリ DB サーバー。**libSQL を�
 
 | 項目 | 内容 |
 |------|------|
-| HTTP/JSON API（:8080） | curl・Web・スクリプト向け API として追加（§18.2・§18.5） |
 | JWT 認証 | Phase 2 は API キー認証のみ。JWT は Phase 2+ で追加 |
 | 保存時暗号化 | トランスポート暗号化（TLS）を優先。ストレージ暗号化は Phase 2 以降（§25.4） |
 
@@ -133,7 +132,7 @@ Rust で実装されるシングルバイナリ DB サーバー。**libSQL を�
 読み取りトランザクションは書き込みトランザクションをブロックしない。各キーのバージョン履歴を保持し、read-version 時点の値を返す。古いバージョンは定期 GC で回収する（論理削除済みのものも含む）。
 
 **I-11：段階的内製化（長期目標：外部依存ゼロ）**  
-Phase 1 ではフォーク済み libSQL（Cargo ワークスペースメンバとして内包）のみを使用する。フォーク外の外部クレートは使用しない（SHA-256・CRC32・TCP サーバーは自前実装）。Phase 2 以降でフォーク内の libSQL 内部コンポーネント（B+Tree・WAL エンジン・SQL パーサ）を自前実装に段階的に置き換え、最終的に外部依存ゼロを達成する。「内製化が大変だから外部に頼り続ける」は理由として認めない。各 Phase の完了条件として内製化ステップを必ず含める。
+Phase 1 ではフォーク済み libSQL（Cargo ワークスペースメンバとして内包）のみを使用する。フォーク外の外部クレートは使用しない（SHA-256・CRC32・HTTP/1.1 サーバーは自前実装）。Phase 2 以降でフォーク内の libSQL 内部コンポーネント（B+Tree・WAL エンジン・SQL パーサ）を自前実装に段階的に置き換え、最終的に外部依存ゼロを達成する。「内製化が大変だから外部に頼り続ける」は理由として認めない。各 Phase の完了条件として内製化ステップを必ず含める。
 
 **I-12：置き換え可能抽象レイヤー**  
 各コンポーネント（ストレージ・WAL エンジン・SQL エンジン）は Phase 2 で Rust trait として定義する。Phase 2 ではフォーク済み libSQL を初期実装として使用し、Phase 3〜5 では同じ trait の自前実装に差し替える。サーバー層（Adlaire サーバー層・OCC・MVCC）は trait 経由でのみコンポーネントと通信し、具体型に依存しない。trait の変更なしに実装を交換できることを Phase 完了条件とする（詳細は §2.5）。
@@ -153,13 +152,13 @@ Phase 1 では libSQL をフォークし、libSQL が提供するすべての機
 Adlaire WAL（Write-Ahead Log）をすべての変更の唯一の監査記録とする。現在状態・インデックスはフォーク済み libSQL が管理する `state.db`（SQLite ファイル）に保持し、Adlaire WAL から再構築できる派生物として扱う。SQL はフォーク済み libSQL が Phase 1 から提供する。
 
 ```
-クライアント（TCP）
+クライアント（HTTP/JSON API）
         │
-        └─ SQL コマンド / KV コマンド（バイナリプロトコル）
+        └─ HTTP/1.1 リクエスト（JSON ボディ）
         │
         ▼
 ┌────────────────────────────────────┐
-│  Adlaire サーバー層               │  多クライアント TCP 接続管理
+│  Adlaire サーバー層               │  HTTP/JSON API 接続管理（std::net）
 │  ・OCC トランザクション管理        │  read-version 取得
 │  ・MVCC バージョン管理            │  コミット時 read-set 検証（I-9）
 │  ・論理削除強制（I-4）            │  DELETE → 論理削除 SQL に変換
@@ -592,7 +591,7 @@ pub fn get_events_since(&self, timestamp: i64) -> Result<Vec<Event>>
 
 #### 4.3.1 検証ファイル仕様
 
-CLI コマンド一本で監査用アーカイブを生成する（Phase 1 は TCP 経由ではなくローカル CLI のみ）：
+CLI コマンド一本で監査用アーカイブを生成する（Phase 1 はネットワーク経由ではなくローカル CLI のみ）：
 
 ```bash
 adlaire-db export-audit --data ./mydb --out ./audit-2026-09-09.tar.gz
@@ -1142,13 +1141,13 @@ fn test_recovery_from_event_log() {
 | 論理削除強制 | DELETE → 論理削除 SQL 変換（I-4） |
 | クラッシュリカバリ | 起動時 Adlaire WAL スキャン（COMMITTED / PENDING / PARTIAL 判定・I-8）。WAL から state.db 再構築（I-6） |
 | 外部チェックポイント | Adlaire WAL seq + root_hash（I-7）。`adlaire-db verify` CLI |
-| 多クライアント TCP サーバー | `std::net`（外部クレートなし）。SQL コマンドのパススルー |
+| HTTP/JSON API サーバー | `std::net`（外部クレートなし）。自前 HTTP/1.1 パーサ（I-11） |
 | バックアップ | state.db + wal.bin のバックアップ・復元後チェーン検証 |
 | CLI | `export-audit` / `import` / `rebuild` / `verify` |
 
 **完了条件：**
 - `StorageBackend` / `WalEngine` / `SqlEngine` trait が §2.5 の通り定義され、libSQL 実装が通過する
-- サーバー層（OCC・MVCC・TCP）が trait 経由のみでコンポーネントにアクセスし、具体型を参照しない
+- サーバー層（OCC・MVCC・HTTP/JSON API）が trait 経由のみでコンポーネントにアクセスし、具体型を参照しない
 - §1.5 の設計不変条件（I-1〜I-12）がすべてテストで証明できる
 - `adlaire-db verify` が正常・改ざんケースで正確に判定する
 - `adlaire-db rebuild` で `state.db` を Adlaire WAL から完全再構築できる
@@ -1289,7 +1288,7 @@ Phase 2：Adlaire サーバー層の構築
   ├─ OCC + MVCC
   ├─ 論理削除強制・クラッシュリカバリ
   ├─ ハッシュチェーン・外部チェックポイント
-  ├─ 多クライアント TCP サーバー（Adlaire バイナリプロトコル・§18.1）
+  ├─ HTTP/JSON API サーバー（§18.1）
   └─ バックアップ・CLI・統合テスト
 
 Phase 3：B+Tree 内製化
@@ -2038,7 +2037,7 @@ global:
 scrape_configs:
   - job_name: 'adlaire-db'
     static_configs:
-      - targets: ['localhost:9876']
+      - targets: ['localhost:8080']
     metrics_path: '/metrics'
 ```
 
@@ -2167,99 +2166,15 @@ sha256sum -c SHA256SUMS.txt
 
 ## 18. ネットワークインターフェース
 
-**Phase 2 は TCP カスタムプロトコル 1 本のみ。** HTTP/JSON は Phase 2 完了後に追加（§18.5 参照）。
+**HTTP/JSON API（:8080）が唯一の外部インターフェース。** SDK は HTTP/JSON API のクライアントライブラリとして実装する。curl・Web・スクリプトも同じエンドポイントに直接アクセスできる。外部クレートなしで `std::net` + 自前 HTTP/1.1 パーサで実装する（I-11）。
 
-### 18.1 TCP（ポート 9876）：Adlaire バイナリプロトコル
+### 18.1 HTTP/JSON API（ポート 8080）
 
-外部クレートを一切使わない自前バイナリプロトコル。`std::net::TcpListener` のみで実装する。JSON・MessagePack などの外部ライブラリには依存しない。ペイロードは UTF-8 の SQL テキストで渡す（SQL は libSQL が Phase 2 で提供）。
-
-#### 18.1.1 リクエスト形式
-
-```
-[Magic:   4B] 0x41 0x44 0x4C 0x52  ("ADLR")
-[Version: 1B] 0x01
-[Command: 1B] コマンドバイト（下表）
-[Seq:     4B] リクエストシーケンス番号（u32 big-endian）
-[Length:  4B] ペイロード長（u32 big-endian、0 の場合あり）
-[Payload: NB] SQL テキスト（UTF-8）または空
-[CRC32:   4B] Magic から Payload 末尾までの CRC32（big-endian）
-```
-
-```
-Command バイト:
-  0x01 = SQL     SQL テキストをそのまま実行（SELECT / INSERT / UPDATE）
-  0x02 = DELETE  SQL DELETE → 論理削除に変換して実行（I-4）
-  0x10 = BEGIN   トランザクション開始
-  0x11 = COMMIT  コミット（Adlaire WAL fsync 完了後に応答・I-1）
-  0x12 = ROLLBACK アボート
-  0x20 = PING    死活確認（Payload なし）
-```
-
-#### 18.1.2 レスポンス形式
-
-```
-[Magic:   4B] 0x41 0x44 0x4C 0x41  ("ADLA")
-[Version: 1B] 0x01
-[Status:  1B] ステータスバイト（下表）
-[Seq:     4B] 対応するリクエストのシーケンス番号（u32 big-endian）
-[Length:  4B] ペイロード長（u32 big-endian）
-[Payload: NB] 結果 JSONL（行ごとに改行区切り）またはエラーメッセージ（UTF-8）
-[CRC32:   4B] Magic から Payload 末尾までの CRC32（big-endian）
-```
-
-```
-Status バイト:
-  0x00 = OK              正常完了
-  0x01 = ERROR           サーバーエラー（Payload にメッセージ）
-  0x02 = WRITE_CONFLICT  OCC 競合（アプリ側でリトライ・I-9）
-  0x03 = INTEGRITY_LOCK  保全異常によるロック（I-3、再試行不可）
-  0x04 = PONG            PING への応答
-```
-
-#### 18.1.3 セッションフロー
-
-```
-クライアント                            サーバー
-    │                                      │
-    ├─ BEGIN（seq=1）─────────────────────►│  TX 開始・read-version 取得（I-9）
-    │◄── OK（seq=1）──────────────────────┤
-    │                                      │
-    ├─ SQL SELECT ...（seq=2）────────────►│  MVCC 読み取り（I-10）
-    │◄── OK + JSONL 結果（seq=2）─────────┤
-    │                                      │
-    ├─ SQL INSERT ...（seq=3）────────────►│  write-set に追加（まだ WAL 書かない）
-    │◄── OK（seq=3）──────────────────────┤
-    │                                      │
-    ├─ COMMIT（seq=4）────────────────────►│  1. read-set 検証（I-9）
-    │                                      │  2. Adlaire WAL append + fsync（I-1）
-    │                                      │  3. libSQL（state.db）更新
-    │◄── OK（seq=4）──────────────────────┤  ← fsync 完了後に応答
-    │                                      │
-    ├─ COMMIT（seq=N）────────────────────►│  ← 競合発生時
-    │◄── WRITE_CONFLICT（seq=N）──────────┤  ← アプリ側でリトライ（I-9）
-```
-
-#### 18.1.4 実装上の制約
-
-- Magic・Version が一致しない接続は即時切断する
-- CRC32 不一致のパケットは即時切断する（再送不可・クライアント側でリトライ）
-- 1 コネクション = 1 TX コンテキスト。コネクション切断時は ROLLBACK 扱い
-- `std::net` のみ使用。非同期ランタイム（tokio 等）は使用しない
-
----
-
-### 18.2 HTTP/JSON API（ポート 8080）
-
-> **Phase 2 完了後に実装（§18.5 参照）。**  
-> Phase 2 は TCP（§18.1）のみ。HTTP/JSON API は Phase 2 完了後に追加し、curl・Web クライアント・スクリプトの接続先とする。外部クレートなしで `std::net` + 自前 HTTP/1.1 パーサで実装する（I-11）。
-
-**用途** ：curl・Web・CI スクリプトなど SDK を使わないクライアントの直接アクセス先。SDK は TCP（§18.1）を使用する。
-
-#### 18.2.1 API エンドポイント
+**用途** ：SDK（全言語）・curl・Web・CI スクリプトすべてのクライアントの接続先。SDK は HTTP/JSON API を内部で呼び出すクライアントライブラリ。
 
 **基本URL** ：`http://localhost:8080/api/v1`
 
-#### 18.2.2 KV API
+#### 18.1.1 KV API
 
 **Get**
 ```bash
@@ -2308,7 +2223,7 @@ curl -X DELETE http://localhost:8080/api/v1/kv/user:1
 }
 ```
 
-#### 18.2.3 Event Log API
+#### 18.1.2 Event Log API
 
 **Append Event**
 ```bash
@@ -2347,7 +2262,7 @@ curl "http://localhost:8080/api/v1/events/order:1?from=0&limit=100"
 }
 ```
 
-#### 18.2.4 JOIN API
+#### 18.1.3 JOIN API
 
 ```bash
 GET /api/v1/join/:left_key/:right_table?on=field
@@ -2367,7 +2282,7 @@ curl "http://localhost:8080/api/v1/join/user:1/dept?on=dept_id"
 }
 ```
 
-#### 18.2.5 クライアント実装例（PHP）
+#### 18.1.4 SDK 実装例（PHP）
 
 ```php
 <?php
@@ -2453,7 +2368,7 @@ var_dump($history);
 ?>
 ```
 
-#### 18.2.6 クライアント実装例（JavaScript）
+#### 18.1.5 SDK 実装例（JavaScript）
 
 ```javascript
 class AdlaireDBClient {
@@ -2523,20 +2438,7 @@ console.log(history);
 
 ---
 
-### 18.3 TCP vs HTTP/JSON API パフォーマンス比較
-
-| 項目 | SDK（TCP・:9876） | HTTP/JSON API（:8080） |
-|------|---|---|
-| **レイテンシ** | 低（1-5ms） | 中（5-15ms） |
-| **スループット** | 高 | 中 |
-| **オーバーヘッド** | 少ない | HTTP ヘッダ分多い |
-| **用途** | SDK 経由アプリ・高性能パス | curl・Web・スクリプト直接アクセス |
-| **ロードバランサー** | 対応可 | 標準対応 |
-| **ブラウザ接続** | 不可 | 可（JavaScript Fetch API） |
-
----
-
-### 18.4 サーバ実装（Rust）概要
+### 18.2 サーバ実装（Rust）概要
 
 外部クレートなし（I-11）。`std::net` のスレッドモデルで実装する（非同期ランタイム不使用）。
 
@@ -2549,16 +2451,12 @@ use std::thread;
 fn main() {
     let db = Arc::new(Mutex::new(Database::new(/* ... */)));
 
-    // TCP サーバ（ポート 9876）
-    let tcp_listener = TcpListener::bind("127.0.0.1:9876").unwrap();
-    for stream in tcp_listener.incoming() {
+    // HTTP/JSON API サーバ（ポート 8080）
+    let http_listener = TcpListener::bind("127.0.0.1:8080").unwrap();
+    for stream in http_listener.incoming() {
         let db = Arc::clone(&db);
-        thread::spawn(move || handle_adlr_connection(stream.unwrap(), db));
+        thread::spawn(move || handle_http_connection(stream.unwrap(), db));
     }
-
-    // HTTP/JSON サーバ（ポート 8080）← Phase 2 完了後に追加（§18.2・§18.5 参照）
-    // let http_listener = TcpListener::bind("127.0.0.1:8080").unwrap();
-    // thread::spawn(move || { for stream in http_listener.incoming() { ... } });
 }
 ```
 
@@ -2590,11 +2488,11 @@ fn main() {
 
 ---
 
-### 18.5 クライアント接続アーキテクチャ（SDK は TCP・HTTP/JSON API は直接アクセス）
+### 18.3 クライアント接続アーキテクチャ（全クライアントが HTTP/JSON API を使用）
 
-**アプリケーションは SDK 経由で接続する。SDK は TCP（:9876）を使用する。** HTTP/JSON API（:8080）は curl・Web・スクリプトなど SDK を使わないクライアントの直接アクセス先。
+**すべてのクライアントが HTTP/JSON API（:8080）を使用する。** SDK は HTTP/JSON API を内部で呼び出すクライアントライブラリ。curl・Web・スクリプトは同じエンドポイントに直接アクセスする。
 
-#### 18.5.1 全体像
+#### 18.3.1 全体像
 
 ```
 アプリケーション
@@ -2605,14 +2503,13 @@ fn main() {
              │                   ・論理削除透過
              │                   ・エラーマッピング
              │
-             └─ TCP/ADLR/ADLA → :9876（全 SDK が使用・高性能）
+             └─ HTTP/JSON API → :8080
 
-curl / Web / スクリプト（SDK なし）
+curl / Web / スクリプト
              └─ HTTP/JSON API → :8080（直接アクセス）
 
     ┌─────────────────────────────────────────┐
     │   Adlaire サーバー                      │
-    │   :9876  TCP リスナー（std::net）       │
     │   :8080  HTTP/1.1 リスナー（std::net）  │
     └──────────────┬──────────────────────────┘
                    │ 共通処理（OCC・WAL・フォーク済み libSQL）
@@ -2620,36 +2517,36 @@ curl / Web / スクリプト（SDK なし）
               Database { StorageBackend, WalEngine, SqlEngine }（§2.5）
 ```
 
-#### 18.5.2 SDK の役割
+#### 18.3.2 SDK の役割
 
-SDK が TCP プロトコルの詳細とプロトコル実装を吸収する。アプリケーションはプロトコルを意識しない。
+SDK が HTTP/JSON API の詳細を吸収する。アプリケーションは HTTP を意識しない。
 
 | SDK 機能 | 内容 |
 |---|---|
-| OCC WriteConflict 自動リトライ | `WRITE_CONFLICT` 受信時に指数バックオフでリトライ。上限はコンフィグ可 |
+| OCC WriteConflict 自動リトライ | `write_conflict` エラー受信時に指数バックオフでリトライ。上限はコンフィグ可 |
 | トランザクション管理 | BEGIN / COMMIT / ROLLBACK を RAII で包む（Rust: `Drop` でロールバック） |
-| 接続管理 | TCP コネクションリース・切断時自動再接続 |
-| 論理削除透過 | アプリの DELETE 呼び出しを `0x02 DELETE`（TCP）コマンドに変換 |
-| エラーマッピング | ステータスバイトを言語ネイティブなエラー型へ変換 |
-| プロトコル隠蔽 | アプリは TCP バイナリプロトコルの詳細を意識しない |
+| HTTP 接続管理 | HTTP Keep-Alive・切断時自動再接続 |
+| 論理削除透過 | アプリの DELETE 呼び出しを DELETE エンドポイントへのリクエストに変換 |
+| エラーマッピング | HTTP ステータス・JSON エラーを言語ネイティブなエラー型へ変換 |
+| API 隠蔽 | アプリは HTTP/JSON の詳細を意識しない |
 
-#### 18.5.3 クライアント別接続方式
+#### 18.3.3 クライアント別接続方式
 
 | クライアント | 接続方式 | 備考 |
 |---|---|---|
-| `adlaire-client`（Rust SDK） | TCP/ADLR/ADLA（§18.1） | 高性能・外部 HTTP クライアント不要 |
-| Go / TypeScript / Python SDK | TCP/ADLR/ADLA（§18.1） | SDK が TCP プロトコルを実装 |
-| curl・CI スクリプト・Web | HTTP/JSON API（§18.2）直接 | SDK なし・HTTP/JSON API に直接アクセス |
+| `adlaire-client`（Rust SDK） | HTTP/JSON API（§18.1） | 自前 HTTP クライアント（std::net） |
+| Go / TypeScript / Python SDK | HTTP/JSON API（§18.1） | SDK が HTTP/JSON ラッパーを実装 |
+| curl・CI スクリプト・Web | HTTP/JSON API（§18.1）直接 | SDK なし |
 
-#### 18.5.4 Phase 別実装計画
+#### 18.3.4 Phase 別実装計画
 
 | Phase | 追加内容 |
 |---|---|
-| Phase 2 | TCP/ADLR/ADLA（:9876）+ `adlaire-client`（Rust SDK 基本） |
-| Phase 2+ | HTTP/JSON API（:8080）+ Go / TypeScript SDK 雛形（TCP 実装） |
+| Phase 2 | HTTP/JSON API（:8080）+ `adlaire-client`（Rust SDK 基本） |
+| Phase 2+ | Go / TypeScript SDK 雛形（HTTP/JSON ラッパー） |
 | Phase 3〜 | 全 SDK の OCC リトライ・接続プール強化 |
 
-**制約：** HTTP/JSON 実装も外部クレートなし（`std::net` + 自前 HTTP/1.1 パーサ）。`tokio` / `axum` / `hyper` は使用しない（I-11）。
+**制約：** 外部クレートなし（`std::net` + 自前 HTTP/1.1 パーサ）。`tokio` / `axum` / `hyper` / `reqwest` は使用しない（I-11）。
 
 ---
 
@@ -2657,12 +2554,12 @@ SDK が TCP プロトコルの詳細とプロトコル実装を吸収する。�
 
 ### 19.1 パフォーマンス目標
 
-| 項目 | SDK（TCP・:9876） | HTTP/JSON API（:8080） | 測定環境 |
-|------|---|---|---|
-| **レイテンシ** | < 5ms（P99） | < 15ms（P99） | 推奨仕様マシン |
-| **スループット** | 1000+ ops/sec | 500+ ops/sec | 推奨仕様マシン |
-| **最大接続数** | 1000+ 同時接続 | 500+ 同時接続 | 推奨仕様マシン |
-| **メモリ使用量** | < 500MB（待機時） | < 800MB（100ops/sec） | 推奨仕様マシン |
+| 項目 | HTTP/JSON API（:8080） | 測定環境 |
+|------|---|---|
+| **レイテンシ** | < 15ms（P99） | 推奨仕様マシン |
+| **スループット** | 500+ ops/sec | 推奨仕様マシン |
+| **最大接続数** | 500+ 同時接続 | 推奨仕様マシン |
+| **メモリ使用量** | < 800MB（100ops/sec） | 推奨仕様マシン |
 
 ### 19.2 大規模データテスト基準
 
@@ -3057,7 +2954,7 @@ adlaire_db_requests_total
   # リクエスト総数（operation タグ：GET, SET, DELETE, APPEND, JOIN）
 
 adlaire_db_request_duration_seconds
-  # リクエストレイテンシ分布（SDK（TCP）vs HTTP/JSON API）
+  # リクエストレイテンシ分布（HTTP/JSON API・:8080）
 
 adlaire_db_errors_total
   # エラー数（error_type タグ：TIMEOUT, CORRUPTED, LOCK_TIMEOUT）
@@ -3107,7 +3004,7 @@ adlaire_db_wal_lag_entries
   "error_code": "LOCK_TIMEOUT|FILE_CORRUPTED|...",
   "error_message": "説明文",
   "client_addr": "192.168.1.100:54321",
-  "protocol": "TCP|HTTP"
+  "protocol": "HTTP"
 }
 ```
 
@@ -3196,7 +3093,7 @@ FATAL   : サービス停止（起動失敗、致命的障害）
    - 起動時の整合性チェック検証
 
 2. ネットワーク遅延
-   - TCP リクエストに人為的遅延追加
+   - HTTP リクエストに人為的遅延追加
    - レイテンシ基準を満たす確認
 
 3. ディスク容量不足
@@ -3486,8 +3383,8 @@ for seed in 0..1000 { test_crash_during_commit(seed); }
 **推奨：TLS 1.3 必須**
 
 ```
-【TCP（ポート 9876）】
-  実装：自前 TLS 1.3 ハンドシェイク実装（外部クレートなし・I-11）
+【HTTP/JSON API（ポート 8080 → ポート 443）】
+  実装：自前 HTTP/1.1 パーサ + 自前 TLS 1.3（外部クレートなし・I-11）
   プロトコル：TLS 1.3 のみ（TLS 1.2 以下は非対応）
   
   設定ファイル：
@@ -3499,11 +3396,8 @@ for seed in 0..1000 { test_crash_during_commit(seed); }
       "key_path": "/etc/adlaire-db/key.pem"
     }
   }
-
-【HTTP/JSON（ポート 8080 → ポート 443）】
-  実装：自前 HTTP/1.1 パーサ + 自前 TLS 1.3（外部クレートなし・I-11）
   
-  リダイレクト設定：
+  本番構成：
     HTTP ポート 8080 でリッスン
     ↓
     全リクエストを HTTPS ポート 443 へ 301 リダイレクト
@@ -3672,7 +3566,7 @@ ReadWritePaths=/var/lib/adlaire-db
   "error_code": null,
   "error_message": null,
   "client_addr": "192.168.1.100:54321",
-  "protocol": "TCP|HTTP"
+  "protocol": "HTTP"
 }
 ```
 
@@ -3751,9 +3645,8 @@ ReadWritePaths=/var/lib/adlaire-db
   □ バックアップファイル権限確認（600）
 
 【ファイアウォール】
-  □ TCP 9876 → Admin サーバーのみ許可
-  □ TCP 443 → 外部アクセス許可
-  □ TCP 8080 → HTTPS リダイレクト用
+  □ TCP 8080 → HTTP/JSON API（開発・内部）
+  □ TCP 443 → HTTPS（本番・外部アクセス）
 
 【監視・ロギング】
   □ Audit Log 有効化
@@ -3993,9 +3886,9 @@ Body:
 }
 ```
 
-**curl 実装例（HTTP/JSON 直接アクセス・SDK は TCP/ADLR/ADLA を使用・§18.5）：**
+**curl 実装例（HTTP/JSON API への直接アクセス）：**
 ```bash
-# HTTP/JSON エンドポイントには curl・Web・スクリプトから直接アクセスする。SDK は TCP（§18.1）を使用する。
+# SDK も curl も同じ HTTP/JSON API（:8080）を使用する。
 curl -X PUT https://localhost:443/api/v1/kv/user:1 \
   -H "Authorization: Bearer sk_live_abc123def456..." \
   -H "Content-Type: application/json" \
@@ -4153,9 +4046,9 @@ func main() {
 GET /api/v1/join/:left_key/:right_table?on=field
 ```
 
-**curl 実装例（HTTP/JSON 直接アクセス・SDK は TCP/ADLR/ADLA を使用・§18.5）：**
+**curl 実装例（HTTP/JSON API への直接アクセス）：**
 ```bash
-# HTTP/JSON エンドポイントには curl・Web・スクリプトから直接アクセスする。SDK は TCP（§18.1）を使用する。
+# SDK も curl も同じ HTTP/JSON API（:8080）を使用する。
 curl -X GET "https://localhost:443/api/v1/join/order:1/order_items?on=order_id" \
   -H "Authorization: Bearer sk_live_abc123def456..."
 ```
