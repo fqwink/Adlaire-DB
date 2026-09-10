@@ -39,50 +39,7 @@ Rust で実装されるシングルバイナリ DB サーバー。**libSQL を�
 **共通制約（全フェーズ）：**
 - Rust / Linux / シングルバイナリ起動（`./adlaire-db --data ./mydb --port 9876`）
 - フォーク外の外部クレートは使用しない（SHA-256・CRC32・TCP・HTTP は自前実装）
-- Phase 2 は SDK 経由 TCP のみ（ポート 9876）。HTTP/JSON API（ポート 8080）は Phase 2 完了後に追加（§18.5）
-
-### 1.3.1 後回し項目（フェーズ別）
-
-**Phase 2 完了後（Phase 3 着手前）：**
-
-| 項目 | 内容 |
-|------|------|
-| HTTP/JSON API（:8080） | curl・Web・スクリプト向け API として追加（§18.2・§18.5） |
-| JWT 認証 | Phase 2 は API キー認証のみ。JWT は Phase 2+ で追加 |
-| 保存時暗号化 | トランスポート暗号化（TLS）を優先。ストレージ暗号化は Phase 2 以降（§25.4） |
-
-**Phase 3：B+Tree 内製化**
-
-| 項目 | 内容 |
-|------|------|
-| 自前 B+Tree | フォーク済み libSQL の SQLite B+Tree を Adlaire 独自実装に置き換え |
-
-**Phase 4：WAL エンジン内製化**
-
-| 項目 | 内容 |
-|------|------|
-| 自前 WAL エンジン | フォーク済み libSQL の SQLite WAL を Adlaire 独自 WAL エンジンに置き換え |
-
-**Phase 5：SQL パーサ内製化**
-
-| 項目 | 内容 |
-|------|------|
-| 自前 SQL パーサ | フォーク済み libSQL の libsql-parser を Adlaire 独自パーサに置き換え（外部依存ゼロ達成） |
-
-**Phase 6：分散対応**
-
-| 項目 | 内容 |
-|------|------|
-| レプリケーション | Adlaire WAL 正本設計の確立が先決 |
-| 複数シャード / Range-based Sharding | レプリケーション完成後 |
-| 分散トランザクション（OCC ベース） | シャーディング完成後 |
-| 自動フェイルオーバー | 分散対応完成後 |
-
-**フェーズ未定（将来検討）：**
-
-| 項目 | 内容 |
-|------|------|
-| Prometheus / Grafana | 構造化ログで代替（メトリクス出力は §20 参照） |
+- TCP ポート 9876：SDK 専用バイナリプロトコル（§18.1）。HTTP/JSON API ポート 8080：curl・Web・スクリプト用直接アクセス（§18.2、§18.5）
 
 ### 1.4 Adlaire DB の特徴
 
@@ -142,7 +99,7 @@ Phase 1 ではフォーク済み libSQL（Cargo ワークスペースメンバ�
 Phase 1 では libSQL をフォークし、libSQL が提供するすべての機能（SQL エンジン・ストレージ・WAL・クラッシュリカバリ）をそのまま採用する。この段階では SQLite / libSQL との互換性が自然に生じるが、それは意図した互換性ではなくフォークの副産物である。Phase 3 以降の内製化によって SQLite ファイルフォーマットを Adlaire 独自形式に移行し、Phase 5 以降で SQL 方言も Adlaire SQL として独立させる計画である。将来的には libSQL / SQLite クライアントとの透過的な接続性は保証しない。
 
 **I-13：配布方針（サーバーはバイナリ・SDK はソースコード）**  
-サーバーバイナリ（`adlaire-db`）はコンパイル済みバイナリとして GitHub Releases で配布する。SDK（Rust / 他言語）はソースコードとして GitHub Releases で配布し、利用者側でビルドする。配布チャネルは GitHub Releases に一本化し、言語パッケージマネージャ（crates.io 等）は使用しない。Linux 向けサーバーバイナリは musl 静的リンク（`x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl`）によりランタイム依存ゼロを保証する。配布物には SHA-256 チェックサムを必ず添付する（詳細は §16.3）。
+サーバーバイナリ（`adlaire-db`）はコンパイル済みバイナリとして GitHub Releases で配布する。SDK（Rust / Go / TypeScript）はソースコードとして GitHub Releases で配布し、利用者側でビルドする。配布チャネルは GitHub Releases に一本化し、言語パッケージマネージャ（crates.io 等）は使用しない。Linux 向けサーバーバイナリは musl 静的リンク（`x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl`）によりランタイム依存ゼロを保証する。配布物には SHA-256 チェックサムを必ず添付する（詳細は §16.6）。
 
 ---
 
@@ -206,7 +163,7 @@ adlaire_db/（データディレクトリ）
 - `state.db` が失われても Adlaire WAL から完全再構築できる（`adlaire-db rebuild --data ./mydb`）
 - Phase 1 ではフォーク済み libSQL の全機能をそのまま使用。B+Tree・SQL はフォーク内 libSQL に委任（I-11）
 - Phase 2 以降で libSQL の内部コンポーネントを自前実装に段階的に置き換える（I-11）
-- 複数シャード・shard_map.json は後回し（→ 1.3.1 参照）
+- 複数シャード・shard_map.json は Phase 6 で実装（§20.6）
 
 **state.db の管理：**
 
@@ -509,17 +466,68 @@ pub fn scan(&self, prefix: Option<&str>) -> Result<Vec<String>>
 
 ---
 
-### 3.2 スキーマ定義 API（後回し）
+### 3.2 スキーマ定義 API（SQL DDL）
 
-> **後回し（§1.3.1 参照）**  
-> スキーマ・型・制約は SQL Layer の責務。Phase 1 のコア KV エンジンには含まない。将来の SQL Layer 実装時に定義する。
+フォーク済み libSQL（Phase 1-2）が SQL DDL を提供する。クライアントは TCP プロトコル（§18.1）経由で DDL を送信する。
+
+**テーブル作成：**
+```sql
+CREATE TABLE records (
+    key      TEXT NOT NULL PRIMARY KEY,
+    version  INTEGER NOT NULL,
+    tx_id    INTEGER NOT NULL,
+    ts       INTEGER NOT NULL,       -- Unix ナノ秒
+    state    TEXT NOT NULL,          -- 'Active' | 'Deleted'
+    value    BLOB
+);
+
+CREATE TABLE record_versions (
+    key      TEXT NOT NULL,
+    version  INTEGER NOT NULL,
+    tx_id    INTEGER NOT NULL,
+    ts       INTEGER NOT NULL,
+    state    TEXT NOT NULL,
+    value    BLOB,
+    PRIMARY KEY (key, version)
+);
+
+CREATE INDEX idx_records_key ON records(key);
+CREATE INDEX idx_versions_key_ver ON record_versions(key, version);
+```
+
+**制約：** 物理削除 DDL（`DROP TABLE`・`TRUNCATE`）はサーバー層でブロックする。DDL は Adlaire WAL にも記録し改ざん検知対象とする。
 
 ---
 
-### 3.3 SQL クエリ API（後回し）
+### 3.3 SQL クエリ API
 
-> **後回し（§1.3.1 参照）**  
-> SQL（SELECT / INSERT / UPDATE / DELETE）は将来の SQL Layer として実装する。Phase 1 は純粋な KV API のみ提供する。SQL Layer は Adlaire DB の Layer API（§3.1 の `layer()` / Range スキャン）の上に構築される。
+フォーク済み libSQL が SQL 実行エンジンを提供する（Phase 1-2）。クライアントは TCP プロトコル（§18.1）の `0x01 = SQL` コマンドで SQL テキストを送信する。
+
+**基本クエリ：**
+```sql
+-- 読み取り（バージョン指定）
+SELECT key, value, version, ts
+  FROM records
+ WHERE key = 'user:123'
+   AND state = 'Active';
+
+-- 書き込み（OCC トランザクション内）
+INSERT INTO records (key, version, tx_id, ts, state, value)
+     VALUES ('user:123', $ver, $tx_id, $ts, 'Active', $value)
+ON CONFLICT(key) DO UPDATE SET
+     version = excluded.version,
+     tx_id   = excluded.tx_id,
+     ts      = excluded.ts,
+     state   = excluded.state,
+     value   = excluded.value;
+
+-- 論理削除（DELETE は必ずこの形式に変換・I-4）
+UPDATE records
+   SET state = 'Deleted', value = '{"__state":"deleted"}'
+ WHERE key = 'user:123';
+```
+
+**制約：** DELETE 文は Adlaire サーバー層で上記 UPDATE 形式に変換する（I-4）。クライアントが直接 DELETE 文を送信した場合も論理削除に変換する。Phase 5 以降は Adlaire SQL パーサが処理する。
 
 ---
 
@@ -620,36 +628,56 @@ audit-2026-09-09/
 
 #### 4.3.3 検証アルゴリズム（疑似コード）
 
-ハッシュ計算は I-2 の定義と完全一致する。任意の言語で実装可能。
+ハッシュ計算は I-2 の定義と完全一致する。Node.js / Deno / Bun などで実行可能。
 
-```python
-import hashlib, json
+```typescript
+import { createReadStream } from "node:fs";
+import { createHash } from "node:crypto";
+import { createInterface } from "node:readline";
 
-def verify_chain(wal_jsonl_path):
-    prev_hash = bytes(32)  # genesis: 32 zero bytes
+async function verifyChain(walJsonlPath: string): Promise<{ ok: boolean; message: string }> {
+  let prevHash = Buffer.alloc(32, 0); // genesis: 32 zero bytes
 
-    with open(wal_jsonl_path) as f:
-        for line in f:
-            e = json.loads(line)
+  const rl = createInterface({ input: createReadStream(walJsonlPath) });
 
-            # I-2: SHA-256(prev_hash || seq || tx_id || ts || type || key || payload)
-            data = (
-                prev_hash
-                + e["seq"].to_bytes(8, "big")
-                + e["tx_id"].to_bytes(8, "big")
-                + e["ts"].to_bytes(8, "big", signed=True)
-                + e["type"].encode()
-                + e["key"].encode()
-                + e["payload"].encode()
-            )
-            computed = hashlib.sha256(data).hexdigest()
+  for await (const line of rl) {
+    const e = JSON.parse(line) as {
+      seq: number; tx_id: number; ts: number;
+      type: string; key: string; payload: string; hash: string;
+    };
 
-            if computed != e["hash"]:
-                return False, f"改ざん検出: seq={e['seq']}"
+    // I-2: SHA-256(prev_hash || seq || tx_id || ts || type || key || payload)
+    const buf = Buffer.concat([
+      prevHash,
+      toBigEndian8(e.seq),
+      toBigEndian8(e.tx_id),
+      toBigEndian8Signed(e.ts),
+      Buffer.from(e.type),
+      Buffer.from(e.key),
+      Buffer.from(e.payload),
+    ]);
+    const computed = createHash("sha256").update(buf).digest("hex");
 
-            prev_hash = bytes.fromhex(e["hash"])
+    if (computed !== e.hash) {
+      return { ok: false, message: `改ざん検出: seq=${e.seq}` };
+    }
+    prevHash = Buffer.from(e.hash, "hex");
+  }
 
-    return True, "チェーン検証成功"
+  return { ok: true, message: "チェーン検証成功" };
+}
+
+function toBigEndian8(n: number): Buffer {
+  const b = Buffer.alloc(8);
+  b.writeBigUInt64BE(BigInt(n));
+  return b;
+}
+
+function toBigEndian8Signed(n: number): Buffer {
+  const b = Buffer.alloc(8);
+  b.writeBigInt64BE(BigInt(n));
+  return b;
+}
 ```
 
 #### 4.3.4 署名済みチェックポイントによる時点検証
@@ -684,8 +712,7 @@ def verify_chain(wal_jsonl_path):
 
 ## 5. JOIN 仕様
 
-> **後回し（Phase 1 スコープ外）**  
-> JOIN はアプリケーション層で複数の Get を組み合わせることで代替できる。コアのストレージ不変条件が確立されるまで実装しない。本セクションは将来の参考仕様として保持する。
+JOIN は Phase 2 以降で実装する。Phase 2 はアプリケーション層で複数の Get を組み合わせることで代替可能だが、以下の仕様は Phase 2 完了後の正式 JOIN API として確定している。
 
 ### 5.1 JOIN の概念
 
@@ -1271,10 +1298,17 @@ SQL テキスト
 
 ---
 
-### 11.6 Phase 6：分散対応（後回し）
+### 11.6 Phase 6：分散対応
 
-> **後回し（§1.3.1 参照）**  
-> Phase 5 完了（外部依存ゼロ達成）後に着手する。レプリケーション → シャーディング → 分散 TX の順。
+Phase 5 完了（外部依存ゼロ達成）後に着手する。詳細仕様は §20 を参照。
+
+**完了条件：**
+- Raft ベースのレプリケーションが動作し、Follower がリードを返せる
+- シャーディングが機能し、shard_map.json によるルーティングが動作する（§20.6）
+- 2PC 分散トランザクションが OCC/MVCC の不変条件（I-9・I-10）を維持したまま動作する
+- 分散 WAL ハッシュチェーンが全ノードで検証可能
+
+**実装順序：** レプリケーション（§20.2）→ シャーディング（§20.6）→ 分散 TX（§20.4）
 
 ---
 
@@ -1417,13 +1451,18 @@ pub struct Database {
 
 ---
 
-## 14. 今後の拡張（プロトタイプ後）
+## 14. フェーズ別主要実装項目
 
-- **分散対応** ：イベントレプリケーション、マスター・スレーブ構成
-- **GC戦略** ：履歴圧縮、ウィンドウ管理
-- **インデックス最適化** ：B+ Tree 導入
-- **SQLクエリ層** ：SQL パーサ・エグゼキューター（オプション）
-- **外部 API** ：HTTP/JSON API（§18.2）
+各 Phase の詳細は §11 を参照。以下は Phase ごとの主要実装項目の要約。
+
+| Phase | 主要実装項目 | 参照 |
+|-------|------------|------|
+| Phase 1 | libSQL フォーク・Cargo ワークスペース構成 | §11.1 |
+| Phase 2 | 監査 WAL・OCC・MVCC・TCP サーバー・HTTP/JSON API | §11.2、§18 |
+| Phase 3 | B+Tree 内製化（VFS 差し替え） | §11.3 |
+| Phase 4 | WAL エンジン内製化 | §11.4 |
+| Phase 5 | SQL パーサ内製化（外部依存ゼロ達成） | §11.5 |
+| Phase 6 | 分散対応（レプリケーション・シャーディング・分散 TX） | §11.6、§20 |
 
 ---
 
@@ -1924,7 +1963,7 @@ sudo systemctl start adlaire-db
 sudo systemctl status adlaire-db
 ```
 
-#### 16.2.2 ロールバック手順
+#### 16.2.3 ロールバック手順
 
 ```bash
 # 前バージョンをバックアップから復旧
@@ -2091,11 +2130,11 @@ scrape_configs:
 
 ---
 
-### 16.3 バイナリ配布方針（I-13）
+### 16.6 バイナリ配布方針（I-13）
 
 **原則：エンドユーザーへはコンパイル済みバイナリのみを配布する。ソースコードは配布しない。**
 
-#### 16.3.1 配布物一覧
+#### 16.6.1 配布物一覧
 
 | 配布物 | 形式 | 配布チャネル | 対象 |
 |---|---|---|---|
@@ -2105,7 +2144,7 @@ scrape_configs:
 
 **方針：** サーバーバイナリのみコンパイル済みバイナリ配布。SDK はすべてソースコード配布（GitHub Releases）。利用者側でビルドする。
 
-#### 16.3.2 ターゲットプラットフォーム
+#### 16.6.2 ターゲットプラットフォーム
 
 | プラットフォーム | ターゲットトリプル | リンク方式 |
 |---|---|---|
@@ -2114,7 +2153,7 @@ scrape_configs:
 | macOS x86_64 | `x86_64-apple-darwin` | 静的リンク最大化（system libs のみ） |
 | macOS aarch64 | `aarch64-apple-darwin` | 静的リンク最大化（system libs のみ） |
 
-#### 16.3.3 ビルド・配布手順
+#### 16.6.3 ビルド・配布手順
 
 ```bash
 # Linux 向け musl 静的リンクビルド
@@ -2133,7 +2172,7 @@ tar -czf adlaire-db-v{VERSION}-x86_64-linux.tar.gz \
 sha256sum adlaire-db-v{VERSION}-*.tar.gz > SHA256SUMS.txt
 ```
 
-#### 16.3.4 配布チャネル
+#### 16.6.4 配布チャネル
 
 - **GitHub Releases**：すべての配布物を一元管理する唯一の配布チャネル
   - サーバーバイナリアーカイブ（プラットフォーム別）+ `SHA256SUMS.txt`
@@ -2167,7 +2206,7 @@ sha256sum -c SHA256SUMS.txt
 
 ## 18. ネットワークインターフェース
 
-**Phase 2 は TCP カスタムプロトコル 1 本のみ。** HTTP/JSON は Phase 2 完了後に追加（§18.5 参照）。
+**ポート構成：** TCP（ポート 9876）= SDK 専用バイナリプロトコル、HTTP/JSON（ポート 8080）= curl・Web・スクリプト用直接アクセス（§18.5 参照）。
 
 ### 18.1 TCP（ポート 9876）：Adlaire バイナリプロトコル
 
@@ -2250,8 +2289,7 @@ Status バイト:
 
 ### 18.2 HTTP/JSON API（ポート 8080）
 
-> **Phase 2 完了後に実装（§18.5 参照）。**  
-> Phase 2 は TCP（§18.1）のみ。HTTP/JSON API は Phase 2 完了後に追加し、curl・Web クライアント・スクリプトの接続先とする。外部クレートなしで `std::net` + 自前 HTTP/1.1 パーサで実装する（I-11）。
+curl・Web・CI スクリプトなど SDK を使わないクライアント向けの直接アクセス先。外部クレートなしで `std::net` + 自前 HTTP/1.1 パーサで実装する（I-11）。SDK は TCP（§18.1）を使用する（§18.5 参照）。
 
 **用途** ：curl・Web・CI スクリプトなど SDK を使わないクライアントの直接アクセス先。SDK は TCP（§18.1）を使用する。
 
@@ -2556,7 +2594,7 @@ fn main() {
         thread::spawn(move || handle_adlr_connection(stream.unwrap(), db));
     }
 
-    // HTTP/JSON サーバ（ポート 8080）← Phase 2 完了後に追加（§18.2・§18.5 参照）
+    // HTTP/JSON サーバ（ポート 8080）← §18.2・§18.5 参照
     // let http_listener = TcpListener::bind("127.0.0.1:8080").unwrap();
     // thread::spawn(move || { for stream in http_listener.incoming() { ... } });
 }
@@ -2586,7 +2624,7 @@ fn main() {
    └─ 古い WAL エントリの圧縮（state.db が最新なら安全）
 ```
 
-> **注：** 旧アーキテクチャの `metadata.dat`（バイナリ）・`data.kv`・`txlog.dat` ファイル仕様は v2.1 で廃止。現行のファイル仕様は §2.2 を参照。分散フェーズ（Phase 2-4）のストレージ設計は §20 を参照。
+> **注：** 旧アーキテクチャの `metadata.dat`（バイナリ）・`data.kv`・`txlog.dat` ファイル仕様は v2.1 で廃止。現行のファイル仕様は §2.2 を参照。分散フェーズ（Phase 6）のストレージ設計は §20 を参照。
 
 ---
 
@@ -2698,7 +2736,7 @@ SDK が TCP プロトコルの詳細とプロトコル実装を吸収する。�
 state.db（libSQL SQLite B+Tree）のインデックスを使用
 - メモリ効率：SQLite の page cache 設定に従う（デフォルト 2MB）
 - 対応データサイズ：SQLite の上限（< 281 TB）まで対応
-- 独自インデックス実装は不要（§1.3.1 参照）
+- 独自インデックス実装は Phase 3 以降（B+Tree 内製化時に置き換え）
 ```
 
 **Phase 2（分散インデックス）：**
@@ -2709,10 +2747,9 @@ Coordinator が複数ノードのインデックス集約
 
 ---
 
-## 20. 分散実装の詳細仕様（Phase 2-4）
+## 20. 分散実装の詳細仕様（Phase 6）
 
-> **後回し（Phase 1 完了後に着手）**  
-> Phase 1 のシングルノード実装、WAL 不変条件の確立、クラッシュリカバリの検証が完了した後に設計を確定する。以下は研究知見に基づく将来設計草案であり、現時点では確定仕様ではない。
+Phase 5 完了（外部依存ゼロ達成）後に着手する。シングルノードの設計不変条件（I-1〜I-14）を維持したまま分散化する確定仕様。
 
 Adlaire DB の分散フェーズは OCC+MVCC トランザクションモデルを拡張し、シングルノードの設計不変条件（I-1〜I-14）を維持したまま分散化する。
 
@@ -3048,10 +3085,13 @@ Adlaire-DB では生の KV の上に高レベルデータモデルを独立レ�
 
 ### 21.1 Prometheus メトリクス
 
-> **後回し（Phase 1 スコープ外）**  
-> Phase 1 は構造化ログ（§21.2）で代替する。Prometheus / Grafana 統合は後回し（§1.3.1 参照）。
+**エンドポイント：** `GET /metrics`（HTTP/JSON API ポート 8080 上）  
+**形式：** Prometheus テキスト形式（OpenMetrics 互換）  
+**認証：** `Authorization: Bearer sk_live_...`（§24.1 参照）
 
-**基本メトリクス（将来実装）：**
+Grafana ダッシュボードは公式リポジトリの `grafana/adlaire-db-dashboard.json` として提供する（Phase 2 以降）。
+
+**基本メトリクス：**
 ```
 adlaire_db_requests_total
   # リクエスト総数（operation タグ：GET, SET, DELETE, APPEND, JOIN）
@@ -3481,6 +3521,74 @@ for seed in 0..1000 { test_crash_during_commit(seed); }
 
 ---
 
+### 24.1.2 JWT 認証（Phase 2 以降）
+
+HTTP/JSON API（ポート 8080）では API Key に加えて JWT Bearer トークンによる認証も受け付ける。TCP プロトコル（§18.1）では API Key のみ使用する。
+
+**JWT 仕様：**
+```
+アルゴリズム：HS256（HMAC-SHA256）
+署名鍵：サーバー側の ADLAIRE_JWT_SECRET 環境変数（256 ビット以上）
+有効期限：`exp` クレーム必須（最大 24 時間）
+```
+
+**ペイロード構造：**
+```json
+{
+  "sub": "sk_live_abc123...",
+  "role": 1,
+  "iat": 1757462400,
+  "exp": 1757548800,
+  "iss": "adlaire-db"
+}
+```
+
+**発行フロー：**
+```bash
+# 1. API Key でトークン発行エンドポイントを叩く
+POST /auth/token
+Authorization: Bearer sk_live_abc123...
+
+# 2. レスポンス
+{
+  "token": "eyJhbGciOiJIUzI1NiJ9...",
+  "expires_in": 86400
+}
+
+# 3. 以後のリクエストは JWT で認証
+GET /api/v1/kv/user:1
+Authorization: Bearer eyJhbGciOiJIUzI1NiJ9...
+```
+
+**サーバー側検証（自前実装・外部クレートなし）：**
+```rust
+fn verify_jwt(token: &str, secret: &[u8]) -> Result<JwtClaims> {
+    let parts: Vec<&str> = token.splitn(3, '.').collect();
+    if parts.len() != 3 { return Err(AuthError::InvalidToken); }
+
+    let sig_input = format!("{}.{}", parts[0], parts[1]);
+    let expected_sig = hmac_sha256(secret, sig_input.as_bytes()); // 自前実装
+    let actual_sig = base64url_decode(parts[2])?;
+    if !constant_time_eq(&expected_sig, &actual_sig) {
+        return Err(AuthError::InvalidSignature);
+    }
+
+    let claims: JwtClaims = json_parse(&base64url_decode(parts[1])?)?;
+    let now = unix_ts_secs();
+    if claims.exp <= now { return Err(AuthError::TokenExpired); }
+    Ok(claims)
+}
+```
+
+**TCP プロトコル（§18.1）での認証：**
+```
+TCP プロトコルでは JWT を使用しない。
+ADLR リクエストの Payload 先頭に API Key ハッシュ（32B）を付与する方式で認証する。
+詳細は §18.1.1 リクエスト形式を参照。
+```
+
+---
+
 ### 24.2 通信暗号化（TLS 1.3）
 
 **推奨：TLS 1.3 必須**
@@ -3803,10 +3911,9 @@ ReadWritePaths=/var/lib/adlaire-db
 
 ---
 
-## 25. データ保存時暗号化（後回し）
+## 25. データ保存時暗号化
 
-> **後回し（Phase 1 スコープ外）**  
-> TLS によるトランスポート暗号化を Phase 1 で提供する。保存時暗号化（at-rest encryption）はその後の検討課題。
+保存時暗号化（at-rest encryption）は Phase 2 で実装する。トランスポート暗号化（TLS）は §22 を参照。
 
 ### 25.1 暗号化方式
 
@@ -3853,7 +3960,7 @@ IV（初期化ベクトル）：96 ビット（推奨）
 
 **コード例（Rust・擬似コード）：**
 
-> **注意（I-11）：** 外部クレート（`aes_gcm` 等）は使用しない。AES-256-GCM は自前実装する（後回し・§25.4 参照）。以下は API 設計の参考用擬似コードである。
+> **注意（I-11）：** 外部クレート（`aes_gcm` 等）は使用しない。AES-256-GCM は自前実装する（§25.4 参照）。以下は API 設計の参考用擬似コードである。
 
 ```rust
 // 自前 AES-256-GCM 実装（擬似コード）
@@ -3869,17 +3976,35 @@ fn decrypt_data(ciphertext: &[u8], key: &[u8; 32], iv: &[u8; 12]) -> Result<Vec<
 }
 ```
 
-### 25.4 実装スケジュール（後回し）
+### 25.4 実装ステップ（Phase 2+）
+
+Phase 2 での実装順序：
 
 ```
-【後回し：データ保存時暗号化実装】
-Phase 1 完了後（Week 10 以降）に着手予定。
+1. AES-256-GCM 自前実装（I-11）
+   - S-Box・MixColumns・KeySchedule を自前実装
+   - GCM（Galois/Counter Mode）を自前実装
+   - GHASH（認証タグ生成）を自前実装
+   - ベクトルテストによる正確性検証（NIST AES テストベクタ使用）
 
-  1. state.db の暗号化（AES-256-GCM でファイル全体を暗号化・自前実装 I-11）
-  2. wal.bin の暗号化（エントリ単位または全体）
-  3. 鍵管理機構実装
-  4. Key Rotation 機能
-  5. 統合テスト + パフォーマンス測定（暗号化 overhead 評価）
+2. state.db の暗号化
+   - AES-256-GCM でファイル全体を暗号化（エンベロープ方式）
+   - ヘッダ: [Magic 4B]["ADEC"] [IV 12B] [EncryptedDataKey 48B] [AuthTag 16B]
+
+3. wal.bin の暗号化（エントリ単位）
+   - 各 WAL エントリのペイロード部分を暗号化
+   - ハッシュチェーンはエントリ全体（暗号化後）で計算
+
+4. 鍵管理機構
+   - Master Key: 環境変数 ADLAIRE_MASTER_KEY から読み込み
+   - Data Key: 起動時にランダム生成、metadata.json に Master Key 暗号化して保存
+
+5. Key Rotation（`adlaire-db rotate-key --new-key $NEW_KEY`）
+   - 全 state.db・wal.bin を新 Key で復号化 → 再暗号化
+   - 旧 Key は 90 日間保持後削除
+
+6. 統合テスト + パフォーマンス計測
+   - 暗号化 overhead 評価（目標：読み書き性能 10% 以内の低下）
 ```
 
 ---
@@ -4305,7 +4430,7 @@ fsck /dev/sda1  # デバイス名は環境に応じて変更
    → 起動時に exit 2 で停止（I-3）
    → バックアップから wal.bin を復元し rebuild を実行
 
-【PITR（後回し）】
+【PITR（Phase 2 以降）】
 1. バックアップから復旧
    tar xzf /backup/adlaire-db/backup-2026-09-09.tar.gz -C /var/lib/adlaire-db/
    adlaire-db rebuild --data /var/lib/adlaire-db/data
@@ -4525,13 +4650,13 @@ jq 'select(.duration_ms > 50)' /var/log/adlaire-db/*.json
 **対策：**
 ```
 ├─ Phase 1 で OCC の単体実装を完全に安定させてから分散化
-├─ Phase 2-4 は §20 の分散実装詳細仕様を Phase 1 完了後に更新
+├─ Phase 6 の §20 分散実装詳細仕様はシングルノード実装安定後に段階的に確定する
 └─ 各フェーズで 1ヶ月以上の DST + Chaos Engineering テスト期間
 ```
 
 ---
 
-### 28.3 リスク 3：本番監視・ロギング構築（運用準備）
+### 28.7 リスク 7：本番監視・ロギング構築（運用準備）
 
 **懸念：**
 ```
