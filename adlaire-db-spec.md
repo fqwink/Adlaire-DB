@@ -56,19 +56,19 @@ Rust で実装されるシングルバイナリ DB サーバー。**libSQL を�
 | Prometheus / Grafana | 構造化ログで代替 |
 | 自動フェイルオーバー | Phase 6 以降 |
 
-### 1.4 競合との差別化
+### 1.4 Adlaire DB の特徴
 
-| 項目 | immudb | FoundationDB | **Adlaire DB** |
-|------|--------|-------------|----------------|
-| 物理削除 | 不可（設計上禁止） | 可 | **論理削除のみ（削除事実は証明可能）** |
-| 並行制御 | シンプルロック | OCC + MVCC | **OCC + MVCC** |
-| 監査ログ | 完全対応 | なし | **append-only WAL + ハッシュチェーン** |
-| 外部検証 | 専用クライアント必要 | なし | **ファイル単体で検証可能** |
-| SQL | なし | なし（Layer） | **Phase 1-2: libSQL をそのまま採用。Phase 5 以降: Adlaire SQL（将来的に非互換化計画・I-14）** |
-| 外部依存 | 多数 | 多数 | **Phase 1 は libSQL のみ。段階的内製化で最終的にゼロ** |
-| ストレージ | 独自形式 | 独自形式 | **Phase 1-2: libSQL をそのまま採用（ファイルベース）→ Phase 3 以降: Adlaire 独自形式（将来的に非互換化計画・I-14）** |
-| デプロイ | サーバー + クライアント | 複数ロール（複雑） | **シングルバイナリ** |
-| 分散対応 | 限定的 | ✓（ネイティブ） | **Phase 2 以降** |
+| 項目 | **Adlaire DB** |
+|------|----------------|
+| 削除モデル | 論理削除のみ。削除の実行と削除の証明を両立する |
+| 並行制御 | OCC + MVCC。読み取りはロックしない。コミット時に競合検出 |
+| 監査ログ | append-only WAL + SHA-256 ハッシュチェーン |
+| 外部検証 | 専用クライアント不要。`wal.bin` とチェックポイントから独立検証可能 |
+| SQL | Phase 1-2: libSQL をそのまま採用。Phase 5 以降: Adlaire SQL（将来的に非互換化計画・I-14） |
+| 外部依存 | Phase 1 は libSQL のみ。段階的内製化で最終的にゼロ |
+| ストレージ | Phase 1-2: libSQL（ファイルベース）→ Phase 3 以降: Adlaire 独自形式（I-14） |
+| デプロイ | シングルバイナリ起動 |
+| 分散対応 | Phase 6 以降 |
 
 ### 1.5 設計不変条件（Design Invariants）
 
@@ -466,7 +466,7 @@ pub fn delete(&mut self, key: &str) -> Result<()>
 - **削除モデル（重要）** ：**物理削除 API は提供しない**。Delete は常に論理削除。
   - KV の現在値は「削除済み」状態に遷移（`scan` の結果から除外）
   - `Deleted` イベントがハッシュチェーンに永続記録される → 「誰がいつ削除したか」を外部検証可能
-  - immudb との差異：Adlaire DB は「削除の実行」と「削除の証明」を両立する
+  - Adlaire DB は「削除の実行」と「削除の証明」を両立する
   - GDPR「忘れられる権利」対応：削除は実行できる。削除した事実の監査ログは消去できない（設計上の制約として明示）
 - **パフォーマンス** ：O(1) + イベント記録
 
@@ -560,7 +560,7 @@ pub fn get_events_since(&self, timestamp: i64) -> Result<Vec<Event>>
 
 ### 4.3 外部検証（External Verification）
 
-**設計思想：** 専用クライアントを必要とせず、`wal.bin` の JSONL エクスポートと署名済みチェックポイントを受け取った第三者が独自にハッシュチェーンを検証できる。これは immudb との重要な差異であり、Adlaire DB の外部検証可能性の核心。
+**設計思想：** 専用クライアントを必要とせず、`wal.bin` の JSONL エクスポートと署名済みチェックポイントを受け取った第三者が独自にハッシュチェーンを検証できる。Adlaire DB の外部検証可能性の核心。
 
 #### 4.3.1 検証ファイル仕様
 
@@ -909,7 +909,7 @@ pub struct Database {
 
 ### 8.3 イベントログ圧縮（Compaction）
 
-immudb の教訓：ストレージが無限増大し、インデックスの削除もできないと運用上の問題になる。Adlaire DB は Phase 1 から圧縮ポリシーを設計に組み込む。
+ストレージが無限増大すると運用上の問題になる。Adlaire DB は Phase 1 から圧縮ポリシーを設計に組み込む。
 
 **圧縮ポリシー（設定ファイルで変更可能）：**
 ```
@@ -1395,7 +1395,7 @@ pub struct Database {
 - **GC戦略** ：履歴圧縮、ウィンドウ管理
 - **インデックス最適化** ：B+ Tree 導入
 - **SQLクエリ層** ：SQL パーサ・エグゼキューター（オプション）
-- **外部API** ：REST API、gRPC インターフェース
+- **外部API** ：HTTP/JSON API（§18.2）
 
 ---
 
@@ -2497,7 +2497,7 @@ console.log(history);
 
 ### 18.3 パフォーマンス比較
 
-| 項目 | TCP（ポート 9876） | REST API（ポート 8080） |
+| 項目 | TCP（ポート 9876） | HTTP/JSON（ポート 8080） |
 |------|---|---|
 | **レイテンシ** | 低（1-5ms） | 中（5-15ms） |
 | **スループット** | 高 | 中 |
@@ -2627,7 +2627,7 @@ SDK がワイヤ形式の差異とプロトコル詳細を吸収する。アプ�
 
 ### 19.1 パフォーマンス目標
 
-| 項目 | TCP（ポート 9876） | REST API（ポート 8080） | 測定環境 |
+| 項目 | TCP（ポート 9876） | HTTP/JSON（ポート 8080） | 測定環境 |
 |------|---|---|---|
 | **レイテンシ** | < 5ms（P99） | < 15ms（P99） | 推奨仕様マシン |
 | **スループット** | 1000+ ops/sec | 500+ ops/sec | 推奨仕様マシン |
@@ -2665,7 +2665,7 @@ SDK がワイヤ形式の差異とプロトコル詳細を吸収する。アプ�
 
 **Phase 1（SQLite B+Tree）：**
 ```
-state.bin（自前 B+Tree）のインデックスを使用
+state.db（libSQL SQLite B+Tree）のインデックスを使用
 - メモリ効率：SQLite の page cache 設定に従う（デフォルト 2MB）
 - 対応データサイズ：SQLite の上限（< 281 TB）まで対応
 - 独自インデックス実装は不要（§1.3.1 参照）
@@ -2684,11 +2684,11 @@ Coordinator が複数ノードのインデックス集約
 > **後回し（Phase 1 完了後に着手）**  
 > Phase 1 のシングルノード実装、WAL 不変条件の確立、クラッシュリカバリの検証が完了した後に設計を確定する。以下は研究知見に基づく将来設計草案であり、現時点では確定仕様ではない。
 
-FoundationDB の「アンバンドル・アーキテクチャ」と OCC+MVCC トランザクションモデルを参考に設計する。FDB の既知の制約（トランザクション 5 秒ハード制限、ACL なし）を Adlaire-DB では改善する。
+Adlaire DB の分散フェーズは OCC+MVCC トランザクションモデルを拡張し、シングルノードの設計不変条件（I-1〜I-14）を維持したまま分散化する。
 
 ### 20.1 アンバンドル・アーキテクチャ（Unbundled Architecture）
 
-FDB はすべてのコンポーネントを独立したロールに分離し、各ロールが単一責務を持つ。Adlaire-DB の分散フェーズもこの原則を採用する。
+各コンポーネントを独立したロールに分離し、各ロールが単一責務を持つ。
 
 **ロールマップ：**
 ```
@@ -2735,7 +2735,7 @@ FDB はすべてのコンポーネントを独立したロールに分離し、�
 
 ### 20.2 OCC + MVCC トランザクションモデル
 
-FDB の OCC（楽観的並行制御）+ MVCC（多版並行制御）を Adlaire-DB の分散フェーズに採用する。
+OCC（楽観的並行制御）+ MVCC（多版並行制御）を Adlaire-DB の分散フェーズに採用する。
 
 **設計原則：**
 - **読み取り時にロックを取得しない**（OCC）。読み取りはすべてスナップショットバージョンで行う（MVCC）
@@ -2772,10 +2772,9 @@ FDB の OCC（楽観的並行制御）+ MVCC（多版並行制御）を Adlaire-
    - 競合 ABORT を受けたクライアントは RV を再取得して最初からやり直し
 ```
 
-**Adlaire-DB 独自の改善点（FDB との差分）：**
-- FDB はトランザクション制限が**ハードコード**（5 秒、10MB、10KB key、100KB value）
-- Adlaire-DB は**設定ファイルで調整可能**（→ 20.8 参照）
-- FDB は ACL/認証なし → Adlaire-DB は Phase 2 から認証を組み込む（→ 20.9 参照）
+**Adlaire-DB の設計方針：**
+- トランザクション制限は**設定ファイルで調整可能**（→ 20.8 参照）
+- Phase 2 から認証を組み込む（→ 20.9 参照）
 
 ### 20.3 WAL-first 耐久性設計
 
@@ -2802,7 +2801,7 @@ FDB の OCC（楽観的並行制御）+ MVCC（多版並行制御）を Adlaire-
 
 ### 20.4 Generation-based リカバリ
 
-FDB の Generation-based Recovery を採用。システム障害時の回復を高速化する。
+Generation-based Recovery を採用。システム障害時の回復を高速化する。
 
 **Generation の定義：**
 - すべてのコミットには **CommitVersion（CV）** と **世代番号（Generation ID）** が付与される
@@ -2870,7 +2869,7 @@ async fn verify_replica_hash_chain(
 
 ### 20.6 Phase 3：シャーディング（Range-based Sharding）
 
-FDB の Range-based Sharding（Ordered Key-Value）を採用。Hash-based よりも範囲スキャンに有利。
+Range-based Sharding（Ordered Key-Value）を採用。Hash-based よりも範囲スキャンに有利。
 
 **シャード配置：**
 ```
@@ -2906,7 +2905,7 @@ shard_map.json:
 
 ### 20.7 Phase 4：分散トランザクション（OCC ベース）
 
-**OCC による分散トランザクション（FDB 相当）：**
+**OCC による分散トランザクション：**
 
 2PC（Two-Phase Commit）は「ロック保持中の参加者クラッシュ」で停止するリスクがある。OCC は読み取り時にロックを取らないため、2PC のブロッキング問題を回避できる。
 
@@ -2938,19 +2937,19 @@ shard_map.json:
 
 ### 20.8 設定可能なトランザクション制約
 
-FDB ではトランザクション制限がハードコードされている（5 秒、10MB）。Adlaire-DB では設定ファイルで調整可能とする。
+Adlaire-DB ではトランザクション制限を設定ファイルで調整可能とする。
 
 **設定項目（`adlaire-db.toml` 内 `[distributed]` セクション）：**
 ```toml
 [distributed.transaction]
-timeout_seconds = 10          # FDB は 5 秒ハード制限（Adlaire-DB は設定可能）
-max_payload_bytes = 20971520  # デフォルト 20MB（FDB は 10MB）
-max_key_bytes = 10240         # デフォルト 10KB（FDB 同等）
-max_value_bytes = 204800      # デフォルト 200KB（FDB は 100KB）
+timeout_seconds = 10          # タイムアウト秒数（設定可能）
+max_payload_bytes = 20971520  # デフォルト 20MB
+max_key_bytes = 10240         # デフォルト 10KB
+max_value_bytes = 204800      # デフォルト 200KB
 max_read_keys = 100000        # 1 TX あたりの最大 read キー数
 
 [distributed.resolver]
-conflict_window_seconds = 30  # Resolver が保持する書き込み履歴（FDB は 5 秒ハード）
+conflict_window_seconds = 30  # Resolver が保持する書き込み履歴
 
 [distributed.replication]
 replica_count = 2             # デフォルトレプリカ数
@@ -2964,9 +2963,7 @@ hash_check_interval_seconds = 60  # イベントログ・ハッシュ検証間�
 
 ### 20.9 認証・アクセス制御（分散フェーズ）
 
-**FDB の既知の弱点：ゼロ ACL。**  
-FDB ネットワークに到達できたクライアントはすべての操作を行える。  
-Adlaire-DB は Phase 2 から認証を組み込む。
+Adlaire-DB は Phase 2 から認証を組み込む。ネットワークに到達できたクライアントが無制限に操作できる設計を避け、すべてのアクセスに認証を要求する。
 
 **Phase 2 〜 4 の認証方式：**
 ```
@@ -2996,9 +2993,7 @@ node_key_path = "/etc/adlaire-db/node.key"
 
 ### 20.10 Layers：データモデルの抽象化
 
-FDB の「Layers」概念：生の KV の上に高レベルデータモデルを独立レイヤーとして実装する。
-
-Adlaire-DB では Phase 1 の KV + Event Log を基盤レイヤーとし、将来の拡張をレイヤーとして追加できる設計を明示する：
+Adlaire-DB では生の KV の上に高レベルデータモデルを独立レイヤーとして実装する。Phase 1 の KV + Event Log を基盤レイヤーとし、将来の拡張をレイヤーとして追加できる設計を明示する：
 
 ```
 ┌─────────────────────────────────────┐
@@ -3032,7 +3027,7 @@ adlaire_db_requests_total
   # リクエスト総数（operation タグ：GET, SET, DELETE, APPEND, JOIN）
 
 adlaire_db_request_duration_seconds
-  # リクエストレイテンシ分布（TCP vs REST API）
+  # リクエストレイテンシ分布（TCP vs HTTP/JSON）
 
 adlaire_db_errors_total
   # エラー数（error_type タグ：TIMEOUT, CORRUPTED, LOCK_TIMEOUT）
@@ -3167,7 +3162,7 @@ FATAL   : サービス停止（起動失敗、致命的障害）
 **テストシナリオ：**
 ```
 1. ファイル破損
-   - state.bin を一部上書き
+   - state.db を一部上書き
    - 起動時の整合性チェック検証
 
 2. ネットワーク遅延
@@ -3226,7 +3221,7 @@ FATAL   : サービス停止（起動失敗、致命的障害）
 
 ### 22.6 決定論的シミュレーションテスト（DST）
 
-FoundationDB は Flow 言語と決定論的シミュレーターにより約 1 兆 CPU 時間分のテストを実施し、Jepsen が「既知の全障害パターンに耐性がある」と評価した。Adlaire DB は **自前の決定論的シミュレーター**（外部クレートなし・I-11）を使用して同等のテスト戦略を実装する。
+Adlaire DB は **自前の決定論的シミュレーター**（外部クレートなし・I-11）を使用して分散システムの正確性を検証する。決定論的シミュレーションにより、膨大な障害シナリオを再現性のある形でテストできる。
 
 **基本原則：**
 - すべての非決定論的要素（ディスク I/O、時刻、乱数）をシミュレータが制御する
@@ -3319,7 +3314,7 @@ for seed in 0..1000 { test_crash_during_commit(seed); }
 **バックアップポリシー：**
 ```
 日次フルバックアップ：毎日 深夜 2時
-  ├─ 対象：全ファイル（metadata.json, state.bin, wal.bin）
+  ├─ 対象：全ファイル（metadata.json, state.db, wal.bin）
   ├─ 保持：7日分
   └─ 検証：チェックサム確認
 
@@ -3575,7 +3570,7 @@ fn check_permission(api_key: &str, operation: Operation) -> Result<()> {
     └─ data/                    # データディレクトリ（§2.2 参照）
 
 【ファイルレベル権限】
-  metadata.json, state.bin, wal.bin
+  metadata.json, state.db, wal.bin
     ├─ Owner: adlaire-db:adlaire-db
     ├─ Permission: 600 (rw-------)
     └─ 他ユーザー・グループアクセス禁止
@@ -3811,7 +3806,7 @@ IV（初期化ベクトル）：96 ビット（推奨）
 
 【Key Rotation】
   新 Master Key に移行する際：
-    1. 全 state.bin を新 Key で復号化
+    1. 全 state.db を新 Key で復号化
     2. 新 Master Key で再暗号化
     3. メタデータ更新
     4. 旧 Key は 90日間保持後削除
@@ -3821,31 +3816,26 @@ IV（初期化ベクトル）：96 ビット（推奨）
 
 **暗号化対象：**
 ```
-✅ state.bin（自前 B+Tree 現在状態・インデックス）
+✅ state.db（libSQL 現在状態・インデックス）
 ✅ wal.bin（監査 WAL・ハッシュチェーン）
 ⚠️ metadata.json（平文。鍵情報は格納しない設計を推奨）
 ```
 
-**コード例（Rust）：**
+**コード例（Rust・擬似コード）：**
+
+> **注意（I-11）：** 外部クレート（`aes_gcm` 等）は使用しない。AES-256-GCM は自前実装する（後回し・§25.4 参照）。以下は API 設計の参考用擬似コードである。
 
 ```rust
-use aes_gcm::{Aes256Gcm, Nonce, Key};
-use aes_gcm::aead::{Aad, Payload};
-
-fn encrypt_data(plaintext: &[u8], key: &Key<Aes256Gcm>, iv: &[u8]) -> Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new(key);
-    let nonce = Nonce::from_slice(iv);
-    
-    cipher.encrypt(nonce, Payload::from(plaintext))
-        .map_err(|e| EncryptionError(e))
+// 自前 AES-256-GCM 実装（擬似コード）
+fn encrypt_data(plaintext: &[u8], key: &[u8; 32], iv: &[u8; 12]) -> Result<Vec<u8>> {
+    // AES-256-GCM 暗号化：自前実装（外部クレートなし・I-11）
+    // ciphertext || tag（16バイト）を返す
+    todo!("自前 AES-256-GCM 実装")
 }
 
-fn decrypt_data(ciphertext: &[u8], key: &Key<Aes256Gcm>, iv: &[u8]) -> Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new(key);
-    let nonce = Nonce::from_slice(iv);
-    
-    cipher.decrypt(nonce, Payload::from(ciphertext))
-        .map_err(|e| DecryptionError(e))
+fn decrypt_data(ciphertext: &[u8], key: &[u8; 32], iv: &[u8; 12]) -> Result<Vec<u8>> {
+    // AES-256-GCM 復号化：認証タグ検証 → 平文返却
+    todo!("自前 AES-256-GCM 実装")
 }
 ```
 
@@ -3855,7 +3845,7 @@ fn decrypt_data(ciphertext: &[u8], key: &Key<Aes256Gcm>, iv: &[u8]) -> Result<Ve
 【後回し：データ保存時暗号化実装】
 Phase 1 完了後（Week 10 以降）に着手予定。
 
-  1. state.bin の暗号化（AES-256-GCM でファイル全体を暗号化）
+  1. state.db の暗号化（AES-256-GCM でファイル全体を暗号化・自前実装 I-11）
   2. wal.bin の暗号化（エントリ単位または全体）
   3. 鍵管理機構実装
   4. Key Rotation 機能
@@ -3866,7 +3856,7 @@ Phase 1 完了後（Week 10 以降）に着手予定。
 
 ## 26. API リファレンス（実装例）
 
-### 26.1 REST API エンドポイント
+### 26.1 HTTP/JSON API エンドポイント
 
 **基本情報：**
 ```
@@ -3973,38 +3963,14 @@ Body:
 }
 ```
 
-**Rust 実装例（HTTP/JSON を直接使う場合。Rust SDK は TCP/ADLR/ADLA を使用・§18.5）：**
-```rust
-// 注：Rust SDK（adlaire-client）は TCP/ADLR/ADLA で接続する。
-// 以下は HTTP/JSON エンドポイントをテスト目的で直接叩く例（reqwest は SDK 内部では使わない）。
-use reqwest::Client;
-use serde_json::json;
-
-#[tokio::main]
-async fn main() {
-    let client = Client::new();
-    
-    let body = json!({
-        "value": {
-            "name": "John Doe",
-            "email": "john@example.com"
-        }
-    });
-
-    let response = client
-        .put("https://localhost:443/api/v1/kv/user:1")
-        .header("Authorization", "Bearer sk_live_abc123def456...")
-        .json(&body)
-        .send()
-        .await
-        .unwrap();
-
-    if response.status().is_success() {
-        println!("Key set successfully");
-    } else {
-        println!("Error: {}", response.status());
-    }
-}
+**curl 実装例（HTTP/JSON 直接アクセス。Rust SDK は TCP/ADLR/ADLA を使用・§18.5）：**
+```bash
+# 注：Rust SDK（adlaire-client）は TCP/ADLR/ADLA で接続する。
+# HTTP/JSON エンドポイントには curl またはその他言語 SDK から直接アクセスする。
+curl -X PUT https://localhost:443/api/v1/kv/user:1 \
+  -H "Authorization: Bearer sk_live_abc123def456..." \
+  -H "Content-Type: application/json" \
+  -d '{"value": {"name": "John Doe", "email": "john@example.com"}}'
 ```
 
 **PHP 実装例：**
@@ -4158,28 +4124,12 @@ func main() {
 GET /api/v1/join/:left_key/:right_table?on=field
 ```
 
-**Rust 実装例（HTTP/JSON を直接使う場合。Rust SDK は TCP/ADLR/ADLA を使用・§18.5）：**
-```rust
-// 注：Rust SDK（adlaire-client）は TCP/ADLR/ADLA で接続する。
-// 以下は HTTP/JSON エンドポイントをテスト目的で直接叩く例。
-use reqwest::Client;
-
-#[tokio::main]
-async fn main() {
-    let client = Client::new();
-
-    let response = client
-        .get("https://localhost:443/api/v1/join/order:1/order_items?on=order_id")
-        .header("Authorization", "Bearer sk_live_abc123def456...")
-        .send()
-        .await
-        .unwrap();
-
-    if response.status().is_success() {
-        let body = response.json::<serde_json::Value>().await.unwrap();
-        println!("Join result: {}", body);
-    }
-}
+**curl 実装例（HTTP/JSON 直接アクセス。Rust SDK は TCP/ADLR/ADLA を使用・§18.5）：**
+```bash
+# 注：Rust SDK（adlaire-client）は TCP/ADLR/ADLA で接続する。
+# HTTP/JSON エンドポイントには curl またはその他言語 SDK から直接アクセスする。
+curl -X GET "https://localhost:443/api/v1/join/order:1/order_items?on=order_id" \
+  -H "Authorization: Bearer sk_live_abc123def456..."
 ```
 
 ---
@@ -4271,7 +4221,7 @@ curl http://localhost:9090/api/v1/query?query=memory_usage_percent
    systemctl reload adlaire-db
 
 2. インデックスキャッシュをクリア（Phase 1）
-   # REST API経由
+   # HTTP/JSON API 経由
    curl -X POST https://localhost:443/api/v1/admin/cache/clear \
      -H "Authorization: Bearer sk_live_admin_xxx"
 
@@ -4279,9 +4229,9 @@ curl http://localhost:9090/api/v1/query?query=memory_usage_percent
 1. サーバーメモリをアップグレード
    現在：4GB → 推奨：8-16GB
 
-2. state.bin の B+Tree ページキャッシュ 設定を調整
+2. state.db の B+Tree ページキャッシュ 設定を調整
    → PRAGMA cache_size = -65536 で 64MB キャッシュ確保
-   → メモリ使用量を抑制（インデックスはディスク上の state.bin が保持）
+   → メモリ使用量を抑制（インデックスはディスク上の state.db が保持）
 
 3. データサイズを分割
    → シャード数を増やす
@@ -4339,7 +4289,7 @@ ls -lh /var/log/adlaire-db/
 # ハッシュチェーン・整合性検証
 adlaire-db verify --data /var/lib/adlaire-db/data
 
-# state.bin と WAL の乖離を確認（exit code 2 → 整合性異常）
+# state.db と WAL の乖離を確認（exit code 2 → 整合性異常）
 adlaire-db verify --data /var/lib/adlaire-db/data --check-state-db
 
 # ファイルシステムチェック
@@ -4348,8 +4298,8 @@ fsck /dev/sda1  # デバイス名は環境に応じて変更
 
 **対応方法：**
 ```
-【Phase 1：state.bin 再構築】
-1. state.bin を WAL から再構築（破損しても WAL が正本・I-1）
+【Phase 1：state.db 再構築】
+1. state.db を WAL から再構築（破損しても WAL が正本・I-1）
    adlaire-db rebuild --data /var/lib/adlaire-db/data
    systemctl restart adlaire-db
 
@@ -4577,8 +4527,7 @@ jq 'select(.duration_ms > 50)' /var/log/adlaire-db/*.json
 **対策：**
 ```
 ├─ Phase 1 で OCC の単体実装を完全に安定させてから分散化
-├─ Phase 2-4 は FoundationDB の論文・実装を詳細に研究して着手
-│  → §20 の分散実装詳細仕様を Phase 1 完了後に更新
+├─ Phase 2-4 は §20 の分散実装詳細仕様を Phase 1 完了後に更新
 └─ 各フェーズで 1ヶ月以上の DST + Chaos Engineering テスト期間
 ```
 
