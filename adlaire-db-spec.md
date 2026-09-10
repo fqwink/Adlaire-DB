@@ -39,7 +39,7 @@ Rust で実装されるシングルバイナリ DB サーバー。**libSQL を�
 **共通制約（全フェーズ）：**
 - Rust / Linux / シングルバイナリ起動（`./adlaire-db --data ./mydb --port 9876`）
 - フォーク外の外部クレートは使用しない（SHA-256・CRC32・TCP・HTTP は自前実装）
-- Phase 2 は Rust SDK 経由 TCP のみ（ポート 9876）。他言語 SDK 用 HTTP/JSON（ポート 8080）は Phase 2 完了後に追加（§18.5）
+- Phase 2 は SDK 経由 TCP のみ（ポート 9876）。HTTP/JSON API（ポート 8080）は Phase 2 完了後に追加（§18.5）
 
 ### 1.3.1 後回し項目（フェーズ別）
 
@@ -47,7 +47,7 @@ Rust で実装されるシングルバイナリ DB サーバー。**libSQL を�
 
 | 項目 | 内容 |
 |------|------|
-| 他言語 SDK（HTTP/JSON・:8080） | 他言語 SDK の wire format として追加（§18.2・§18.5） |
+| HTTP/JSON API（:8080） | curl・Web・スクリプト向け API として追加（§18.2・§18.5） |
 | JWT 認証 | Phase 2 は API キー認証のみ。JWT は Phase 2+ で追加 |
 | 保存時暗号化 | トランスポート暗号化（TLS）を優先。ストレージ暗号化は Phase 2 以降（§25.4） |
 
@@ -1423,7 +1423,7 @@ pub struct Database {
 - **GC戦略** ：履歴圧縮、ウィンドウ管理
 - **インデックス最適化** ：B+ Tree 導入
 - **SQLクエリ層** ：SQL パーサ・エグゼキューター（オプション）
-- **外部 API** ：他言語 SDK（HTTP/JSON・§18.2）
+- **外部 API** ：HTTP/JSON API（§18.2）
 
 ---
 
@@ -2248,12 +2248,12 @@ Status バイト:
 
 ---
 
-### 18.2 他言語 SDK ワイヤ形式：HTTP/JSON（ポート 8080）
+### 18.2 HTTP/JSON API（ポート 8080）
 
-> **Phase 2 完了後に実装。他言語 SDK の wire format として位置づける（§18.5 参照）。**  
-> Phase 2 は TCP（§18.1）のみ。HTTP/JSON は Phase 2 完了後に追加し、Go / TypeScript / Python SDK および curl・Web クライアントの接続先とする。外部クレートなしで `std::net` + 自前 HTTP/1.1 パーサで実装する。
+> **Phase 2 完了後に実装（§18.5 参照）。**  
+> Phase 2 は TCP（§18.1）のみ。HTTP/JSON API は Phase 2 完了後に追加し、curl・Web クライアント・スクリプトの接続先とする。外部クレートなしで `std::net` + 自前 HTTP/1.1 パーサで実装する（I-11）。
 
-**用途** ：Go/TS/Python SDK・curl・Web クライアントの接続先。Rust SDK（§18.1）は TCP を使用するため、HTTP/JSON を使わない。
+**用途** ：curl・Web・CI スクリプトなど SDK を使わないクライアントの直接アクセス先。SDK は TCP（§18.1）を使用する。
 
 #### 18.2.1 API エンドポイント
 
@@ -2523,14 +2523,14 @@ console.log(history);
 
 ---
 
-### 18.3 SDK 別パフォーマンス比較（Rust SDK vs 他言語 SDK）
+### 18.3 TCP vs HTTP/JSON API パフォーマンス比較
 
-| 項目 | Rust SDK（TCP・:9876） | 他言語 SDK（HTTP/JSON・:8080） |
+| 項目 | SDK（TCP・:9876） | HTTP/JSON API（:8080） |
 |------|---|---|
 | **レイテンシ** | 低（1-5ms） | 中（5-15ms） |
 | **スループット** | 高 | 中 |
 | **オーバーヘッド** | 少ない | HTTP ヘッダ分多い |
-| **用途** | Rust アプリ・高性能パス | Go/TS/Python SDK・curl・Web |
+| **用途** | SDK 経由アプリ・高性能パス | curl・Web・スクリプト直接アクセス |
 | **ロードバランサー** | 対応可 | 標準対応 |
 | **ブラウザ接続** | 不可 | 可（JavaScript Fetch API） |
 
@@ -2590,9 +2590,9 @@ fn main() {
 
 ---
 
-### 18.5 クライアント接続アーキテクチャ（SDK 必須・TCP / HTTP/JSON はワイヤ形式）
+### 18.5 クライアント接続アーキテクチャ（SDK は TCP・HTTP/JSON API は直接アクセス）
 
-**アプリケーションは必ず SDK 経由で接続する。** TCP と HTTP/JSON はサーバー側のワイヤ形式であり、アプリケーションが直接扱うものではない。curl・スクリプトなど SDK を使わない場合のみ HTTP/JSON に直接アクセスする。
+**アプリケーションは SDK 経由で接続する。SDK は TCP（:9876）を使用する。** HTTP/JSON API（:8080）は curl・Web・スクリプトなど SDK を使わないクライアントの直接アクセス先。
 
 #### 18.5.1 全体像
 
@@ -2605,46 +2605,48 @@ fn main() {
              │                   ・論理削除透過
              │                   ・エラーマッピング
              │
-             ├─ TCP/ADLR/ADLA → :9876（Rust SDK が使用・高性能）
-             └─ HTTP/JSON     → :8080（その他 SDK が使用・汎用）
-                                  ↑ curl / Web / スクリプトも直接ここへ
+             └─ TCP/ADLR/ADLA → :9876（全 SDK が使用・高性能）
+
+curl / Web / スクリプト（SDK なし）
+             └─ HTTP/JSON API → :8080（直接アクセス）
+
     ┌─────────────────────────────────────────┐
     │   Adlaire サーバー                      │
     │   :9876  TCP リスナー（std::net）       │
     │   :8080  HTTP/1.1 リスナー（std::net）  │
     └──────────────┬──────────────────────────┘
-                   │ 共通処理（OCC・WAL・libSQL）
+                   │ 共通処理（OCC・WAL・フォーク済み libSQL）
                    ▼
               Database { StorageBackend, WalEngine, SqlEngine }（§2.5）
 ```
 
 #### 18.5.2 SDK の役割
 
-SDK がワイヤ形式の差異とプロトコル詳細を吸収する。アプリケーションはワイヤ形式を意識しない。
+SDK が TCP プロトコルの詳細とプロトコル実装を吸収する。アプリケーションはプロトコルを意識しない。
 
 | SDK 機能 | 内容 |
 |---|---|
 | OCC WriteConflict 自動リトライ | `WRITE_CONFLICT` 受信時に指数バックオフでリトライ。上限はコンフィグ可 |
 | トランザクション管理 | BEGIN / COMMIT / ROLLBACK を RAII で包む（Rust: `Drop` でロールバック） |
-| 接続管理 | TCP: コネクションリース。HTTP: Keep-Alive。切断時は自動再接続 |
-| 論理削除透過 | アプリの DELETE 呼び出しを `0x02 DELETE`（TCP）または DELETE エンドポイント（HTTP）に変換 |
-| エラーマッピング | ステータスバイト / HTTP ステータスコードを言語ネイティブなエラー型へ変換 |
-| ワイヤ形式隠蔽 | アプリは TCP か HTTP かを意識しない。SDK 初期化時に決定される |
+| 接続管理 | TCP コネクションリース・切断時自動再接続 |
+| 論理削除透過 | アプリの DELETE 呼び出しを `0x02 DELETE`（TCP）コマンドに変換 |
+| エラーマッピング | ステータスバイトを言語ネイティブなエラー型へ変換 |
+| プロトコル隠蔽 | アプリは TCP バイナリプロトコルの詳細を意識しない |
 
-#### 18.5.3 SDK 別ワイヤ形式
+#### 18.5.3 クライアント別接続方式
 
-| SDK | ワイヤ形式 | 理由 |
+| クライアント | 接続方式 | 備考 |
 |---|---|---|
-| `adlaire-client`（Rust） | TCP/ADLR/ADLA（§18.1） | 外部 HTTP クライアント不要・最低レイテンシ |
-| Go / TypeScript / Python SDK | HTTP/JSON（§18.2） | 各言語の標準 HTTP クライアントで実装可 |
-| curl・CI スクリプト・Web | HTTP/JSON（§18.2）直接 | SDK なし・ツール直接アクセス |
+| `adlaire-client`（Rust SDK） | TCP/ADLR/ADLA（§18.1） | 高性能・外部 HTTP クライアント不要 |
+| Go / TypeScript / Python SDK | TCP/ADLR/ADLA（§18.1） | SDK が TCP プロトコルを実装 |
+| curl・CI スクリプト・Web | HTTP/JSON API（§18.2）直接 | SDK なし・HTTP/JSON API に直接アクセス |
 
 #### 18.5.4 Phase 別実装計画
 
 | Phase | 追加内容 |
 |---|---|
 | Phase 2 | TCP/ADLR/ADLA（:9876）+ `adlaire-client`（Rust SDK 基本） |
-| Phase 2+ | HTTP/JSON（:8080）+ Go / TypeScript SDK 雛形 |
+| Phase 2+ | HTTP/JSON API（:8080）+ Go / TypeScript SDK 雛形（TCP 実装） |
 | Phase 3〜 | 全 SDK の OCC リトライ・接続プール強化 |
 
 **制約：** HTTP/JSON 実装も外部クレートなし（`std::net` + 自前 HTTP/1.1 パーサ）。`tokio` / `axum` / `hyper` は使用しない（I-11）。
@@ -2655,7 +2657,7 @@ SDK がワイヤ形式の差異とプロトコル詳細を吸収する。アプ�
 
 ### 19.1 パフォーマンス目標
 
-| 項目 | Rust SDK（TCP・:9876） | 他言語 SDK（HTTP/JSON・:8080） | 測定環境 |
+| 項目 | SDK（TCP・:9876） | HTTP/JSON API（:8080） | 測定環境 |
 |------|---|---|---|
 | **レイテンシ** | < 5ms（P99） | < 15ms（P99） | 推奨仕様マシン |
 | **スループット** | 1000+ ops/sec | 500+ ops/sec | 推奨仕様マシン |
@@ -3055,7 +3057,7 @@ adlaire_db_requests_total
   # リクエスト総数（operation タグ：GET, SET, DELETE, APPEND, JOIN）
 
 adlaire_db_request_duration_seconds
-  # リクエストレイテンシ分布（Rust SDK（TCP）vs 他言語 SDK（HTTP/JSON））
+  # リクエストレイテンシ分布（SDK（TCP）vs HTTP/JSON API）
 
 adlaire_db_errors_total
   # エラー数（error_type タグ：TIMEOUT, CORRUPTED, LOCK_TIMEOUT）
@@ -3884,7 +3886,7 @@ Phase 1 完了後（Week 10 以降）に着手予定。
 
 ## 26. API リファレンス（実装例）
 
-### 26.1 他言語 SDK ワイヤ：HTTP/JSON API エンドポイント
+### 26.1 HTTP/JSON API エンドポイント
 
 **基本情報：**
 ```
@@ -3991,10 +3993,9 @@ Body:
 }
 ```
 
-**curl 実装例（HTTP/JSON 直接アクセス。Rust SDK は TCP/ADLR/ADLA を使用・§18.5）：**
+**curl 実装例（HTTP/JSON 直接アクセス・SDK は TCP/ADLR/ADLA を使用・§18.5）：**
 ```bash
-# 注：Rust SDK（adlaire-client）は TCP/ADLR/ADLA で接続する。
-# HTTP/JSON エンドポイントには curl またはその他言語 SDK から直接アクセスする。
+# HTTP/JSON エンドポイントには curl・Web・スクリプトから直接アクセスする。SDK は TCP（§18.1）を使用する。
 curl -X PUT https://localhost:443/api/v1/kv/user:1 \
   -H "Authorization: Bearer sk_live_abc123def456..." \
   -H "Content-Type: application/json" \
@@ -4152,10 +4153,9 @@ func main() {
 GET /api/v1/join/:left_key/:right_table?on=field
 ```
 
-**curl 実装例（HTTP/JSON 直接アクセス。Rust SDK は TCP/ADLR/ADLA を使用・§18.5）：**
+**curl 実装例（HTTP/JSON 直接アクセス・SDK は TCP/ADLR/ADLA を使用・§18.5）：**
 ```bash
-# 注：Rust SDK（adlaire-client）は TCP/ADLR/ADLA で接続する。
-# HTTP/JSON エンドポイントには curl またはその他言語 SDK から直接アクセスする。
+# HTTP/JSON エンドポイントには curl・Web・スクリプトから直接アクセスする。SDK は TCP（§18.1）を使用する。
 curl -X GET "https://localhost:443/api/v1/join/order:1/order_items?on=order_id" \
   -H "Authorization: Bearer sk_live_abc123def456..."
 ```
