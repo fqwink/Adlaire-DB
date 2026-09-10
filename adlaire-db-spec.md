@@ -564,20 +564,120 @@ GET    /admin/v1/tokens          発行済みトークン一覧
 }
 ```
 
-### 7.3 エラーコード一覧（主要なもの）
+### 7.3 エラーコード一覧
 
-| コード | 説明 |
-|--------|------|
-| `SQLITE_ERROR` | SQL 実行エラー |
-| `SQLITE_CONSTRAINT` | 制約違反 |
-| `SQLITE_BUSY` | DB ロック中 |
-| `AUTH_REQUIRED` | 認証トークンなし |
-| `AUTH_INVALID` | JWT 検証失敗 |
-| `AUTH_EXPIRED` | トークン期限切れ |
-| `DB_NOT_FOUND` | DB が存在しない |
-| `DB_ALREADY_EXISTS` | DB が既に存在する |
-| `PERMISSION_DENIED` | アクセス権限なし |
-| `INTERNAL_ERROR` | サーバー内部エラー |
+| コード | HTTP | 説明 |
+|--------|------|------|
+| `AUTH_REQUIRED` | 401 | Authorization ヘッダがない |
+| `AUTH_INVALID` | 401 | JWT 署名検証失敗・失効済みトークン |
+| `AUTH_EXPIRED` | 401 | JWT exp 切れ |
+| `PERMISSION_DENIED` | 403 | ro トークンで書き込み操作 |
+| `DB_NOT_FOUND` | 404 | 指定 DB が存在しない |
+| `TOKEN_NOT_FOUND` | 404 | 指定トークン ID が存在しない |
+| `DB_ALREADY_EXISTS` | 409 | 同名 DB が既に存在する |
+| `INVALID_DB_NAME` | 400 | DB 名がバリデーションを通過しない |
+| `INVALID_REQUEST` | 400 | リクエスト JSON が不正 |
+| `SQLITE_ERROR` | 400 | SQL 構文・実行エラー |
+| `SQLITE_CONSTRAINT` | 400 | 制約違反（UNIQUE 等） |
+| `STORAGE_BUSY` | 503 | WAL ロック待機タイムアウト |
+| `INTERNAL_ERROR` | 500 | サーバー内部エラー |
+
+### 7.4 エラーレスポンステストケース
+
+```
+ETC-1: 認証エラー
+  （a）Authorization ヘッダなし
+      POST /v2/pipeline （ヘッダなし）
+      → 401 {"error":"authentication required","code":"AUTH_REQUIRED"}
+
+  （b）Bearer プレフィックスなし
+      Authorization: <rawtoken>
+      → 401 {"error":"...","code":"AUTH_INVALID"}
+
+  （c）署名が異なる JWT
+      Authorization: Bearer <valid_header.valid_payload.wrong_signature>
+      → 401 {"error":"...","code":"AUTH_INVALID"}
+
+  （d）exp が過去の JWT
+      Authorization: Bearer <JWT with exp=past>
+      → 401 {"error":"...","code":"AUTH_EXPIRED"}
+
+  （e）失効済みトークン（revoked:true）
+      Authorization: Bearer <revoked_JWT>
+      → 401 {"error":"...","code":"AUTH_INVALID"}
+
+ETC-2: 権限エラー
+  （a）ro トークンで INSERT 実行
+      Authorization: Bearer <ro_token>
+      POST /v2/pipeline {"requests":[{"type":"execute","stmt":{"sql":"INSERT INTO t VALUES(1)"}},...]}
+      → 403 {"error":"permission denied","code":"PERMISSION_DENIED"}
+
+  （b）ro トークンで SELECT 実行
+      → 200 （SELECT は ro トークンで許可）
+
+ETC-3: DB 未存在エラー（Phase 2〜）
+  （a）存在しない DB 名でパイプライン
+      POST /nonexistent-db/v2/pipeline
+      → 404 {"error":"database not found: nonexistent-db","code":"DB_NOT_FOUND"}
+
+  （b）削除済み DB 名でパイプライン
+      （DB 作成→削除→同名でアクセス）
+      → 404 {"error":"database not found: ...","code":"DB_NOT_FOUND"}
+
+  （c）GET /admin/v1/databases/nonexistent
+      → 404 {"error":"database not found: nonexistent","code":"DB_NOT_FOUND"}
+
+ETC-4: SQL エラー
+  （a）構文エラー
+      {"stmt":{"sql":"SELEKT * FROM t"}}
+      → 200 （pipeline 自体は成功）、results[0].type="error"
+        {"type":"error","error":{"message":"near \"SELEKT\"...","code":"SQLITE_ERROR"}}
+
+  （b）存在しないテーブル
+      {"stmt":{"sql":"SELECT * FROM no_such_table"}}
+      → results[0].type="error", code="SQLITE_ERROR"
+
+  （c）UNIQUE 制約違反
+      （同一 PRIMARY KEY で 2 回 INSERT）
+      → results[0].type="error", code="SQLITE_CONSTRAINT"
+
+ETC-5: リクエスト不正
+  （a）JSON が壊れている
+      POST /v2/pipeline body: "not json{"
+      → 400 {"error":"invalid request body","code":"INVALID_REQUEST"}
+
+  （b）requests フィールドがない
+      POST /v2/pipeline {"baton":null}
+      → 400 {"error":"...","code":"INVALID_REQUEST"}
+
+  （c）type が不明
+      {"type":"unknown_type"}
+      → 400 または results[0].type="error"（hrana 仕様に従う）
+
+ETC-6: DB 名バリデーション（Phase 2〜）
+  （a）空文字列 POST /admin/v1/databases {"name":""}
+      → 400 {"error":"...","code":"INVALID_DB_NAME"}
+
+  （b）スペース含む POST /admin/v1/databases {"name":"my db"}
+      → 400 {"code":"INVALID_DB_NAME"}
+
+  （c）パストラバーサル POST /admin/v1/databases {"name":"../etc"}
+      → 400 {"code":"INVALID_DB_NAME"}
+
+  （d）127 文字以内・英数字・ハイフン・アンダースコアのみ有効
+      "valid-name_123" → 201
+      長さ 128 文字の文字列 → 400 {"code":"INVALID_DB_NAME"}
+
+ETC-7: 重複エラー（Phase 2〜）
+  POST /admin/v1/databases {"name":"dup"}
+  POST /admin/v1/databases {"name":"dup"}（同名再作成）
+  → 409 {"error":"database already exists: dup","code":"DB_ALREADY_EXISTS"}
+
+ETC-8: ストレージビジーエラー
+  （意図的な長時間トランザクション保持中に別接続で書き込み試行、
+    --busy-timeout を短く設定してテスト）
+  → 503 {"error":"database is busy","code":"STORAGE_BUSY"}
+```
 
 ---
 
