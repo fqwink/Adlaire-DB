@@ -280,24 +280,112 @@ Turso Cloud の認証トークンと同じ JWT クレーム構造を採用し、
 }
 ```
 
-### 5.3 スコープ
+### 5.3 スコープ（Phase 1）
 
 | `a` 値 | 許可操作 |
 |--------|---------|
-| `rw` | 全 DB への読み書き（Phase 1 は全体一律）|
+| `rw` | 全 DB への読み書き |
 | `ro` | 全 DB への読み取りのみ |
 
-DB 単位のスコープは Phase 2 で追加する。
+Phase 1 ではトークンのスコープは全体一律。DB 単位の制御は Phase 2 で追加する。
+
+### 5.3b DB スコープ（Phase 2）
+
+Phase 2 から JWT に省略可能な `dbs` クレームを追加する。
+
+**グローバルトークン（Phase 1 互換・Phase 2 以降も有効）：**
+
+```json
+{
+  "iss": "adlaire-db",
+  "sub": "tok_abc123",
+  "iat": 1700000000,
+  "exp": 1800000000,
+  "a":  "rw"
+}
+```
+
+`dbs` が存在しない場合は全 DB に `a` クレームのアクセスを適用する（Phase 1 挙動と同じ）。
+
+**DB スコープトークン（Phase 2〜）：**
+
+```json
+{
+  "iss": "adlaire-db",
+  "sub": "tok_def456",
+  "iat": 1700000000,
+  "exp": 1800000000,
+  "a":  "ro",
+  "dbs": {
+    "analytics": "rw",
+    "reports":   "ro"
+  }
+}
+```
+
+`dbs` クレームが存在する場合の権限解決ルール：
+
+| 条件 | 適用アクセス |
+|------|-------------|
+| `dbs[db_name]` が存在する | `dbs[db_name]` の値を使用 |
+| `dbs[db_name]` が存在しない | `a` クレームを使用 |
+
+つまり `dbs` は個別 DB のデフォルト（`a`）を上書きする。全 DB を拒否するには `"a": "ro"` のうえ書き込みが必要な DB のみ `"dbs": {"target": "rw"}` で許可するパターンを使う。
+
+**POST /admin/v1/tokens の DB スコープ指定：**
+
+```json
+{
+  "access": "ro",
+  "expiry": "30d",
+  "dbs": {
+    "analytics": "rw"
+  }
+}
+```
+
+`dbs` 省略時はグローバルトークン（`dbs` クレームなし）を発行する。
+
+**Phase 2 JWT 検証フロー（DB スコープ対応版）：**
+
+```
+1. Authorization: Bearer <JWT> ヘッダを取得
+   → なし → 401 AUTH_REQUIRED
+
+2. JWT 署名を HS256 で検証
+   → 失敗 → 401 AUTH_INVALID
+
+3. exp クレームを確認
+   → 期限切れ → 401 AUTH_EXPIRED
+
+4. sub クレーム（token_id）を tokens.json と照合
+   → revoked=true → 401 AUTH_INVALID
+
+5. リクエスト対象 DB のアクセスレベルを解決
+   dbs[db_name] が存在する → その値を使用
+   存在しない              → a クレームを使用
+
+6. 解決したアクセスレベルと要求操作を照合
+   → ro で書き込み操作 → 403 PERMISSION_DENIED
+
+7. 検証通過 → リクエスト処理へ
+```
 
 ### 5.4 トークン生成
 
 ```bash
-# CLI でトークンを生成（Phase 1 では CLI のみ。Phase 2 で管理 API からも発行可能）
+# グローバル rw トークン（Phase 1 と同じ）
 adlaire-db token create --secret "my-secret" --expiry 30d
-# → eyJ...（標準出力）
 
-# 読み取り専用トークン
+# グローバル ro トークン
 adlaire-db token create --secret "my-secret" --access ro
+
+# DB スコープトークン（Phase 2〜）
+adlaire-db token create --secret "my-secret" \
+  --access ro \
+  --db analytics:rw \
+  --db reports:ro
+# → eyJ...（標準出力）
 ```
 
 ### 5.5 トークン失効管理
@@ -310,6 +398,7 @@ adlaire-db token create --secret "my-secret" --access ro
     {
       "id":         "tok_abc123",
       "access":     "rw",
+      "dbs":        null,
       "created_at": "2026-09-10T12:00:00Z",
       "expires_at": "2026-10-10T12:00:00Z",
       "revoked":    false,
@@ -318,14 +407,17 @@ adlaire-db token create --secret "my-secret" --access ro
     {
       "id":         "tok_def456",
       "access":     "ro",
+      "dbs":        {"analytics": "rw", "reports": "ro"},
       "created_at": "2026-09-01T00:00:00Z",
       "expires_at": null,
-      "revoked":    true,
-      "revoked_at": "2026-09-10T08:00:00Z"
+      "revoked":    false,
+      "revoked_at": null
     }
   ]
 }
 ```
+
+`dbs` フィールド：`null` = グローバルトークン、オブジェクト = DB スコープトークン。
 
 **JWT 検証フロー（リクエストごと）：**
 
@@ -874,6 +966,14 @@ TC-2-5: トークン失効の即時反映
   （b）DELETE /admin/v1/tokens/{T.id} で T を失効
   （c）同じトークン T で POST /v2/pipeline → 401 AUTH_INVALID（失効反映が即時であること）
   （d）新規トークン T2 で POST /v2/pipeline → 200（他のトークンは影響なし）
+
+TC-2-5b: DB スコープトークン
+  （a）POST /admin/v1/tokens {"access":"ro","dbs":{"db_a":"rw"}} → 201
+  （b）発行トークンで POST /db_a/v2/pipeline INSERT → 200（db_a は rw 許可）
+  （c）発行トークンで POST /db_b/v2/pipeline INSERT → 403 PERMISSION_DENIED
+       （db_b は dbs に含まれないため a="ro" が適用）
+  （d）発行トークンで POST /db_b/v2/pipeline SELECT → 200（読み取りは ro で許可）
+  （e）GET /admin/v1/tokens/{id} → dbs フィールドに {"db_a":"rw"} が含まれる
 
 TC-2-6: データディレクトリ永続化（マルチ DB）
   （a）db_a / db_b を作成し各テーブルにデータ投入
