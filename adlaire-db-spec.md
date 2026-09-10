@@ -9,7 +9,7 @@
 ## 1. 概要
 
 ### 1.1 プロジェクト概要
-Rust で実装されるシングルバイナリ DB サーバー。**libSQL をフォークしてストレージバックエンドとして採用し**、その上に Adlaire 独自の改ざん証明監査層（append-only WAL + ハッシュチェーン）と多クライアント TCP サーバー機能を構築する。libSQL を選んだ理由はファイルベース（SQLite 互換）であること。フォークによってコードベースを直接保有し、以降のフェーズで libSQL の SQLite 内部実装（B+Tree・WAL エンジン・SQL パーサ）を自前実装に段階的に置き換えて外部依存ゼロを達成する（内製化ロードマップ）。
+Rust で実装されるシングルバイナリ DB サーバー。**libSQL をフォークしてストレージバックエンドとして採用し**、その上に Adlaire 独自の改ざん証明監査層（append-only WAL + ハッシュチェーン）と多クライアント TCP サーバー機能を構築する。libSQL を選んだ理由はファイルベースのストレージを即座に利用できることであり、SQLite / libSQL との互換性を維持することは目的としない（I-14）。フォークによってコードベースを直接保有し、以降のフェーズで libSQL の内部実装（B+Tree・WAL エンジン・SQL パーサ）を自前実装に段階的に置き換えて外部依存ゼロを達成する（内製化ロードマップ）。Phase 5 完了後は Adlaire 独自の SQL・ストレージ形式として完全に独立する。
 
 **ポジション：** 「libSQL フォーク上に構築した監査証明付きサーバーを、シングルバイナリで」。libSQL が提供する SQL + ファイルベースストレージを基盤に、append-only WAL + ハッシュチェーンによる改ざん検知、論理削除のみによる完全な変更履歴、多クライアント TCP サーバーを一つのバイナリで実現する。SQLite 内部実装の段階的内製化によって、長期的な自律性と監査可能性を確保する。
 
@@ -64,9 +64,9 @@ Rust で実装されるシングルバイナリ DB サーバー。**libSQL を�
 | 並行制御 | シンプルロック | OCC + MVCC | **OCC + MVCC** |
 | 監査ログ | 完全対応 | なし | **append-only WAL + ハッシュチェーン** |
 | 外部検証 | 専用クライアント必要 | なし | **ファイル単体で検証可能** |
-| SQL | なし | なし（Layer） | **✓（libSQL が Phase 1 で提供）** |
+| SQL | なし | なし（Layer） | **Phase 1-2: libSQL 経由。Phase 5 以降: Adlaire SQL（SQLite 互換を維持しない・I-14）** |
 | 外部依存 | 多数 | 多数 | **Phase 1 は libSQL のみ。段階的内製化で最終的にゼロ** |
-| ストレージ | 独自形式 | 独自形式 | **Phase 1：libSQL（SQLite ファイル）→ 段階的に自前実装へ** |
+| ストレージ | 独自形式 | 独自形式 | **Phase 1-2: libSQL（ファイルベース）→ Phase 3 以降: Adlaire 独自形式（SQLite 互換を維持しない・I-14）** |
 | デプロイ | サーバー + クライアント | 複数ロール（複雑） | **シングルバイナリ** |
 | 分散対応 | 限定的 | ✓（ネイティブ） | **Phase 2 以降** |
 
@@ -110,6 +110,9 @@ Phase 1 では libSQL クレートのみを許容する。それ以外の外部�
 **I-12：置き換え可能抽象レイヤー**  
 各コンポーネント（ストレージ・WAL エンジン・SQL エンジン）は Phase 2 で Rust trait として定義する。Phase 2 では libSQL を実装として使用し、Phase 3〜5 では同じ trait の自前実装に差し替える。サーバー層（Adlaire サーバー層・OCC・MVCC）は trait 経由でのみコンポーネントと通信し、具体型に依存しない。trait の変更なしに実装を交換できることを Phase 完了条件とする（詳細は §2.5）。
 
+**I-14：libSQL / SQLite 互換性は長期的に維持しない**  
+libSQL フォークは Phase 1-2 のブートストラップ手段であり、SQLite ファイル形式・SQL 方言・libSQL API との互換性を長期的に維持することは目標としない。Phase 3 以降の内製化によって SQLite ファイルフォーマットを廃止し、Adlaire 独自形式に移行する。Phase 5 完了後は SQL 方言も Adlaire SQL として独立させる。libSQL / SQLite クライアントからの透過的な接続性は保証しない。
+
 **I-13：配布方針（サーバーはバイナリ・SDK はソースコード）**  
 サーバーバイナリ（`adlaire-db`）はコンパイル済みバイナリとして GitHub Releases で配布する。SDK（Rust / 他言語）はソースコードとして GitHub Releases で配布し、利用者側でビルドする。配布チャネルは GitHub Releases に一本化し、言語パッケージマネージャ（crates.io 等）は使用しない。Linux 向けサーバーバイナリは musl 静的リンク（`x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl`）によりランタイム依存ゼロを保証する。配布物には SHA-256 チェックサムを必ず添付する（詳細は §16.3）。
 
@@ -142,7 +145,7 @@ Adlaire WAL（Write-Ahead Log）をすべての変更の唯一の監査記録と
    │  WAL コミット後に libSQL へ書き込み
    ▼
 ┌────────────────────────────────────┐
-│  libSQL（state.db）               │  SQLite 互換ファイルベースストレージ
+│  libSQL（state.db）               │  Phase 1-2 ストレージ（Phase 3 以降で自前形式へ移行・I-14）
 │  ・SQL エンジン                   │  SQL クエリ・スキーマ管理
 │  ・SQLite B+Tree                  │  ← 派生物（Adlaire WAL から再構築可能）
 │  ・SQLite WAL                     │  Phase 2 以降で段階的に内製化（I-11）
@@ -1164,6 +1167,8 @@ static sqlite3_vfs adlaire_vfs = {
 - 自前 B+Tree + Adlaire VFS が Phase 2 の全テストを通過する
 - SQLite デフォルト VFS への依存がフォーク内で削除されている
 - `adlaire-db rebuild` が自前 B+Tree で動作する
+- `state.db`（SQLite ページフォーマット）を廃止し、Adlaire 独自ページファイルに移行済み（I-14 の最初のマイルストーン）
+- SQLite ページフォーマットへの依存がフォーク内に残っていないことを確認する
 
 ---
 
