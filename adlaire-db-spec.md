@@ -110,8 +110,8 @@ Phase 1 では libSQL クレートのみを許容する。それ以外の外部�
 **I-12：置き換え可能抽象レイヤー**  
 各コンポーネント（ストレージ・WAL エンジン・SQL エンジン）は Phase 2 で Rust trait として定義する。Phase 2 では libSQL を実装として使用し、Phase 3〜5 では同じ trait の自前実装に差し替える。サーバー層（Adlaire サーバー層・OCC・MVCC）は trait 経由でのみコンポーネントと通信し、具体型に依存しない。trait の変更なしに実装を交換できることを Phase 完了条件とする（詳細は §2.5）。
 
-**I-13：配布はバイナリ形式のみ**  
-サーバーバイナリ（`adlaire-db`）および SDK ライブラリは、コンパイル済みバイナリとして配布する。エンドユーザーにソースコードは配布しない。Linux 向けは musl 静的リンク（`x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl`）によりランタイム依存ゼロを保証する。macOS 向けは静的リンク可能な範囲で依存を最小化する。配布物には SHA-256 チェックサムを必ず添付する（詳細は §16.3）。
+**I-13：配布方針（サーバーはバイナリ・SDK はソースコード）**  
+サーバーバイナリ（`adlaire-db`）はコンパイル済みバイナリとして GitHub Releases で配布する。SDK（Rust / 他言語）はソースコードとして GitHub Releases で配布し、利用者側でビルドする。配布チャネルは GitHub Releases に一本化し、言語パッケージマネージャ（crates.io 等）は使用しない。Linux 向けサーバーバイナリは musl 静的リンク（`x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl`）によりランタイム依存ゼロを保証する。配布物には SHA-256 チェックサムを必ず添付する（詳細は §16.3）。
 
 ---
 
@@ -2064,12 +2064,13 @@ scrape_configs:
 
 #### 16.3.1 配布物一覧
 
-| 配布物 | 形式 | 対象 |
-|---|---|---|
-| `adlaire-db` | 実行バイナリ（静的リンク） | サーバー運用者 |
-| `libadlaire_client.a` | 静的ライブラリ | Rust SDK 組み込み用 |
-| `libadlaire_client.so` | 動的ライブラリ | 他言語 SDK バインディング用 |
-| SDK パッケージ（Go / TS 等） | 言語パッケージマネージャ経由 | アプリケーション開発者 |
+| 配布物 | 形式 | 配布チャネル | 対象 |
+|---|---|---|---|
+| `adlaire-db` | 実行バイナリ（静的リンク） | GitHub Releases | サーバー運用者 |
+| `adlaire-client`（Rust SDK） | ソースコード（tar.gz） | GitHub Releases | Rust アプリ開発者 |
+| Go / TypeScript / 他言語 SDK | ソースコード（tar.gz） | GitHub Releases | 各言語アプリ開発者 |
+
+**方針：** サーバーバイナリのみコンパイル済みバイナリ配布。SDK はすべてソースコード配布（GitHub Releases）。利用者側でビルドする。
 
 #### 16.3.2 ターゲットプラットフォーム
 
@@ -2101,9 +2102,11 @@ sha256sum adlaire-db-v{VERSION}-*.tar.gz > SHA256SUMS.txt
 
 #### 16.3.4 配布チャネル
 
-- **GitHub Releases**：各バージョンタグにバイナリアーカイブ + `SHA256SUMS.txt` を添付
-- **Rust SDK**（`adlaire-client`）：crates.io でソース配布（Rust エコシステムの慣習に従う。ビルドは利用者側）
-- **他言語 SDK**：GitHub Releases に言語別パッケージを添付。将来的に各言語パッケージマネージャへ公開
+- **GitHub Releases**：すべての配布物を一元管理する唯一の配布チャネル
+  - サーバーバイナリアーカイブ（プラットフォーム別）+ `SHA256SUMS.txt`
+  - Rust SDK（`adlaire-client`）ソースアーカイブ
+  - 他言語 SDK ソースアーカイブ
+- **crates.io / npm / pkg.go.dev 等の言語パッケージマネージャは使用しない**
 
 **検証手順（エンドユーザー向け）：**
 ```bash
