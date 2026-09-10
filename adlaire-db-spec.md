@@ -9,7 +9,7 @@
 ## 1. 概要
 
 ### 1.1 プロジェクト概要
-Rust で実装されるシングルバイナリ DB サーバー。**libSQL をフォークしてストレージバックエンドとして採用し**、その上に Adlaire 独自の改ざん証明監査層（append-only WAL + ハッシュチェーン）と多クライアント TCP サーバー機能を構築する。libSQL を選んだ理由はファイルベース（SQLite 互換）であること。フォークによってコードベースを直接保有し、以降のフェーズで libSQL の SQLite 内部実装（B+Tree・WAL エンジン・SQL パーサ）を自前実装に段階的に置き換えて外部依存ゼロを達成する（内製化ロードマップ）。
+Rust で実装されるシングルバイナリ DB サーバー。**libSQL をフォークしてストレージバックエンドとして採用し**、その上に Adlaire 独自の改ざん証明監査層（append-only WAL + ハッシュチェーン）と多クライアント TCP サーバー機能を構築する。libSQL をフォークし、libSQL が提供する SQL エンジン・ファイルベースストレージ・クラッシュリカバリなどの機能をそのまま採用する。フォークによってコードベースを直接保有し、以降のフェーズで libSQL の内部実装（B+Tree・WAL エンジン・SQL パーサ）を自前実装に段階的に置き換えて外部依存ゼロを達成する（内製化ロードマップ）。将来的には SQLite / libSQL との互換性を維持しない計画であり、Phase 5 完了後は Adlaire 独自の SQL・ストレージ形式として完全に独立する（I-14）。
 
 **ポジション：** 「libSQL フォーク上に構築した監査証明付きサーバーを、シングルバイナリで」。libSQL が提供する SQL + ファイルベースストレージを基盤に、append-only WAL + ハッシュチェーンによる改ざん検知、論理削除のみによる完全な変更履歴、多クライアント TCP サーバーを一つのバイナリで実現する。SQLite 内部実装の段階的内製化によって、長期的な自律性と監査可能性を確保する。
 
@@ -38,8 +38,8 @@ Rust で実装されるシングルバイナリ DB サーバー。**libSQL を�
 
 **共通制約（全フェーズ）：**
 - Rust / Linux / シングルバイナリ起動（`./adlaire-db --data ./mydb --port 9876`）
-- フォーク外の外部クレートは使用しない（SHA-256・CRC32・TCP は自前実装）
-- TCP のみ（ポート 9876）。REST は後回し
+- フォーク外の外部クレートは使用しない（SHA-256・CRC32・TCP・HTTP は自前実装）
+- Phase 2 は TCP のみ（ポート 9876）。HTTP/JSON（ポート 8080）は Phase 2 完了後に追加（§18.5）
 
 ### 1.3.1 後回し（Phase 2 スコープ外）
 
@@ -50,7 +50,7 @@ Rust で実装されるシングルバイナリ DB サーバー。**libSQL を�
 | 複数シャード | Phase 6 以降 |
 | レプリケーション | Adlaire WAL 正本設計確立が先決（Phase 6） |
 | 分散トランザクション | レプリケーション完成後（Phase 6） |
-| REST API | TCP プロトコル 1 本に絞る |
+| HTTP/JSON API | Phase 2 完了後に追加。SDK wire format として位置づける（§18.5） |
 | 保存時暗号化 | トランスポート暗号化を優先 |
 | JWT | Phase 2 は API キー認証 |
 | Prometheus / Grafana | 構造化ログで代替 |
@@ -64,9 +64,9 @@ Rust で実装されるシングルバイナリ DB サーバー。**libSQL を�
 | 並行制御 | シンプルロック | OCC + MVCC | **OCC + MVCC** |
 | 監査ログ | 完全対応 | なし | **append-only WAL + ハッシュチェーン** |
 | 外部検証 | 専用クライアント必要 | なし | **ファイル単体で検証可能** |
-| SQL | なし | なし（Layer） | **✓（libSQL が Phase 1 で提供）** |
+| SQL | なし | なし（Layer） | **Phase 1-2: libSQL をそのまま採用。Phase 5 以降: Adlaire SQL（将来的に非互換化計画・I-14）** |
 | 外部依存 | 多数 | 多数 | **Phase 1 は libSQL のみ。段階的内製化で最終的にゼロ** |
-| ストレージ | 独自形式 | 独自形式 | **Phase 1：libSQL（SQLite ファイル）→ 段階的に自前実装へ** |
+| ストレージ | 独自形式 | 独自形式 | **Phase 1-2: libSQL をそのまま採用（ファイルベース）→ Phase 3 以降: Adlaire 独自形式（将来的に非互換化計画・I-14）** |
 | デプロイ | サーバー + クライアント | 複数ロール（複雑） | **シングルバイナリ** |
 | 分散対応 | 限定的 | ✓（ネイティブ） | **Phase 2 以降** |
 
@@ -110,6 +110,12 @@ Phase 1 では libSQL クレートのみを許容する。それ以外の外部�
 **I-12：置き換え可能抽象レイヤー**  
 各コンポーネント（ストレージ・WAL エンジン・SQL エンジン）は Phase 2 で Rust trait として定義する。Phase 2 では libSQL を実装として使用し、Phase 3〜5 では同じ trait の自前実装に差し替える。サーバー層（Adlaire サーバー層・OCC・MVCC）は trait 経由でのみコンポーネントと通信し、具体型に依存しない。trait の変更なしに実装を交換できることを Phase 完了条件とする（詳細は §2.5）。
 
+**I-14：libSQL 機能をそのまま採用し、将来的に非互換化する計画**  
+Phase 1 では libSQL をフォークし、libSQL が提供するすべての機能（SQL エンジン・ストレージ・WAL・クラッシュリカバリ）をそのまま採用する。この段階では SQLite / libSQL との互換性が自然に生じるが、それは意図した互換性ではなくフォークの副産物である。Phase 3 以降の内製化によって SQLite ファイルフォーマットを Adlaire 独自形式に移行し、Phase 5 以降で SQL 方言も Adlaire SQL として独立させる計画である。将来的には libSQL / SQLite クライアントとの透過的な接続性は保証しない。
+
+**I-13：配布方針（サーバーはバイナリ・SDK はソースコード）**  
+サーバーバイナリ（`adlaire-db`）はコンパイル済みバイナリとして GitHub Releases で配布する。SDK（Rust / 他言語）はソースコードとして GitHub Releases で配布し、利用者側でビルドする。配布チャネルは GitHub Releases に一本化し、言語パッケージマネージャ（crates.io 等）は使用しない。Linux 向けサーバーバイナリは musl 静的リンク（`x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl`）によりランタイム依存ゼロを保証する。配布物には SHA-256 チェックサムを必ず添付する（詳細は §16.3）。
+
 ---
 
 ## 2. アーキテクチャ
@@ -139,7 +145,7 @@ Adlaire WAL（Write-Ahead Log）をすべての変更の唯一の監査記録と
    │  WAL コミット後に libSQL へ書き込み
    ▼
 ┌────────────────────────────────────┐
-│  libSQL（state.db）               │  SQLite 互換ファイルベースストレージ
+│  libSQL（state.db）               │  Phase 1-2 ストレージ（Phase 3 以降で自前形式へ移行・I-14）
 │  ・SQL エンジン                   │  SQL クエリ・スキーマ管理
 │  ・SQLite B+Tree                  │  ← 派生物（Adlaire WAL から再構築可能）
 │  ・SQLite WAL                     │  Phase 2 以降で段階的に内製化（I-11）
@@ -769,7 +775,7 @@ Phase 1 は悲観的ロックを使用しない。読み取りはロックなし
    → write_set: HashMap<Key, Value>
 
 2. get(key)
-   → state.bin から read_version 時点のバージョンを取得（MVCC）
+   → state.db から read_version 時点のバージョンを取得（MVCC）
    → read_set に (key, observed_version) を追加
 
 3. set(key, value) / delete(key)
@@ -779,7 +785,7 @@ Phase 1 は悲観的ロックを使用しない。読み取りはロックなし
    → read_set の各キーを検証：
      current_version(key) == observed_version  であれば OK
      current_version(key) >  observed_version  → 競合 → Abort
-   → 競合なし: write_set を WAL に書き込み → fsync → state.bin 更新
+   → 競合なし: write_set を WAL に書き込み → fsync → state.db 更新
    → global_version をインクリメント
 
 5. rollback() / Abort
@@ -1161,6 +1167,8 @@ static sqlite3_vfs adlaire_vfs = {
 - 自前 B+Tree + Adlaire VFS が Phase 2 の全テストを通過する
 - SQLite デフォルト VFS への依存がフォーク内で削除されている
 - `adlaire-db rebuild` が自前 B+Tree で動作する
+- `state.db`（SQLite ページフォーマット）を廃止し、Adlaire 独自ページファイルに移行済み（I-14 の最初のマイルストーン）
+- SQLite ページフォーマットへの依存がフォーク内に残っていないことを確認する
 
 ---
 
@@ -2055,6 +2063,64 @@ scrape_configs:
 
 ---
 
+### 16.3 バイナリ配布方針（I-13）
+
+**原則：エンドユーザーへはコンパイル済みバイナリのみを配布する。ソースコードは配布しない。**
+
+#### 16.3.1 配布物一覧
+
+| 配布物 | 形式 | 配布チャネル | 対象 |
+|---|---|---|---|
+| `adlaire-db` | 実行バイナリ（静的リンク） | GitHub Releases | サーバー運用者 |
+| `adlaire-client`（Rust SDK） | ソースコード（tar.gz） | GitHub Releases | Rust アプリ開発者 |
+| Go / TypeScript / 他言語 SDK | ソースコード（tar.gz） | GitHub Releases | 各言語アプリ開発者 |
+
+**方針：** サーバーバイナリのみコンパイル済みバイナリ配布。SDK はすべてソースコード配布（GitHub Releases）。利用者側でビルドする。
+
+#### 16.3.2 ターゲットプラットフォーム
+
+| プラットフォーム | ターゲットトリプル | リンク方式 |
+|---|---|---|
+| Linux x86_64 | `x86_64-unknown-linux-musl` | musl 静的リンク・glibc 依存なし |
+| Linux aarch64 | `aarch64-unknown-linux-musl` | musl 静的リンク・glibc 依存なし |
+| macOS x86_64 | `x86_64-apple-darwin` | 静的リンク最大化（system libs のみ） |
+| macOS aarch64 | `aarch64-apple-darwin` | 静的リンク最大化（system libs のみ） |
+
+#### 16.3.3 ビルド・配布手順
+
+```bash
+# Linux 向け musl 静的リンクビルド
+cargo build --release --target x86_64-unknown-linux-musl
+cargo build --release --target aarch64-unknown-linux-musl
+
+# macOS 向けビルド（CI: GitHub Actions の macOS runner）
+cargo build --release --target x86_64-apple-darwin
+cargo build --release --target aarch64-apple-darwin
+
+# パッケージ化（ターゲットごと）
+tar -czf adlaire-db-v{VERSION}-x86_64-linux.tar.gz \
+    -C target/x86_64-unknown-linux-musl/release adlaire-db
+
+# SHA-256 チェックサム生成（I-13）
+sha256sum adlaire-db-v{VERSION}-*.tar.gz > SHA256SUMS.txt
+```
+
+#### 16.3.4 配布チャネル
+
+- **GitHub Releases**：すべての配布物を一元管理する唯一の配布チャネル
+  - サーバーバイナリアーカイブ（プラットフォーム別）+ `SHA256SUMS.txt`
+  - Rust SDK（`adlaire-client`）ソースアーカイブ
+  - 他言語 SDK ソースアーカイブ
+- **crates.io / npm / pkg.go.dev 等の言語パッケージマネージャは使用しない**
+
+**検証手順（エンドユーザー向け）：**
+```bash
+# ダウンロード後にチェックサム検証
+sha256sum -c SHA256SUMS.txt
+```
+
+---
+
 ## 17. まとめ
 
 このプロトタイプ版DBエンジンは、**データ整合性・保全・可用性を同率で重視** し、**KV + イベント型アーキテクチャ** で実現する。
@@ -2073,7 +2139,7 @@ scrape_configs:
 
 ## 18. ネットワークインターフェース
 
-**Phase 2 では TCP カスタムプロトコル 1 本のみ。** REST は後回し（§1.3.1 参照）。
+**Phase 2 は TCP カスタムプロトコル 1 本のみ。** HTTP/JSON は Phase 2 完了後に追加（§18.5 参照）。
 
 ### 18.1 TCP（ポート 9876）：Adlaire バイナリプロトコル
 
@@ -2154,10 +2220,10 @@ Status バイト:
 
 ---
 
-### 18.2 REST API（ポート 8080）
+### 18.2 HTTP/JSON API（ポート 8080）
 
-> **後回し（Phase 1 スコープ外）**  
-> Phase 1 はカスタム TCP プロトコル（§18.1）のみ。REST と TCP の同時提供は後回し（§1.3.1 参照）。本セクションは将来の参考仕様として保持する。
+> **Phase 2 完了後に実装。SDK の wire format として位置づける（§18.5 参照）。**  
+> Phase 2 は TCP（§18.1）のみ。HTTP/JSON は Phase 2 完了後に追加し、他言語 SDK および curl・Web クライアントの接続先とする。外部クレートなしで `std::net` + 自前 HTTP/1.1 パーサで実装する。
 
 **用途** ：標準インターフェース、ウェブアプリケーション、ロードバランサー対応
 
@@ -2444,27 +2510,27 @@ console.log(history);
 
 ### 18.4 サーバ実装（Rust）概要
 
+外部クレートなし（I-11）。`std::net` のスレッドモデルで実装する（非同期ランタイム不使用）。
+
 ```rust
-// 擬似コード
+// 擬似コード（std::net のみ・外部クレートなし）
 
-use tokio::net::TcpListener;
-use axum::Router;
+use std::net::TcpListener;
+use std::thread;
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    let db = Arc::new(Mutex::new(Database::new(/* ... */)));
+
     // TCP サーバ（ポート 9876）
-    let tcp_listener = TcpListener::bind("127.0.0.1:9876").await.unwrap();
-    tokio::spawn(async move {
-        handle_tcp_connections(tcp_listener).await;
-    });
-    
-    // REST API サーバ（ポート 8080）← 後回し（Phase 1 スコープ外・§18.2 参照）
-    // Phase 1 は TCP のみ。以下は将来 Phase 2+ で実装予定のスタブ。
-    // let app = Router::new()
-    //     .route("/api/v1/kv/:key", axum::routing::get(get_kv).put(set_kv).delete(delete_kv))
-    //     .route("/api/v1/events/:key", axum::routing::post(append_event).get(get_history));
-    // axum::Server::bind(&"127.0.0.1:8080".parse().unwrap())
-    //     .serve(app.into_make_service()).await.unwrap();
+    let tcp_listener = TcpListener::bind("127.0.0.1:9876").unwrap();
+    for stream in tcp_listener.incoming() {
+        let db = Arc::clone(&db);
+        thread::spawn(move || handle_adlr_connection(stream.unwrap(), db));
+    }
+
+    // HTTP/JSON サーバ（ポート 8080）← Phase 2 完了後に追加（§18.2・§18.5 参照）
+    // let http_listener = TcpListener::bind("127.0.0.1:8080").unwrap();
+    // thread::spawn(move || { for stream in http_listener.incoming() { ... } });
 }
 ```
 
@@ -2474,7 +2540,7 @@ async fn main() {
 1. サーバー起動時
    ├─ .lock ファイル取得（I-5）
    ├─ wal.bin の末尾スキャン（COMMITTED / PENDING / PARTIAL 判定・I-8）
-   ├─ state.bin の存在確認（なければ --rebuild で WAL から再構築）
+   ├─ state.db の存在確認（なければ --rebuild で WAL から再構築）
    └─ ハッシュチェーン検証（CRC32 / チェーン断絶 → exit 2・I-3）
 
 2. トランザクション実行前
@@ -2483,16 +2549,77 @@ async fn main() {
 
 3. トランザクション完了後（コミット時）
    ├─ WAL COMMIT エントリ書き込み + fsync（I-1）
-   ├─ state.bin へ反映（B+Tree 更新）
+   ├─ state.db へ反映（libSQL 経由）
    └─ クライアントへ成功応答
 
 4. 定期チェックポイント
    ├─ WAL CHECKPOINT エントリ書き込み
-   ├─ state.bin のインテグリティ確認（adlaire-db verify）
-   └─ 古い WAL エントリの圧縮（state.bin が最新なら安全）
+   ├─ state.db のインテグリティ確認（adlaire-db verify）
+   └─ 古い WAL エントリの圧縮（state.db が最新なら安全）
 ```
 
 > **注：** 旧アーキテクチャの `metadata.dat`（バイナリ）・`data.kv`・`txlog.dat` ファイル仕様は v2.1 で廃止。現行のファイル仕様は §2.2 を参照。分散フェーズ（Phase 2-4）のストレージ設計は §20 を参照。
+
+---
+
+### 18.5 クライアント接続アーキテクチャ（SDK 必須・TCP / HTTP/JSON はワイヤ形式）
+
+**アプリケーションは必ず SDK 経由で接続する。** TCP と HTTP/JSON はサーバー側のワイヤ形式であり、アプリケーションが直接扱うものではない。curl・スクリプトなど SDK を使わない場合のみ HTTP/JSON に直接アクセスする。
+
+#### 18.5.1 全体像
+
+```
+アプリケーション
+    ├─ Rust SDK ──────────────┐
+    ├─ Go SDK ────────────────┤ SDK API（言語ネイティブ）
+    ├─ TypeScript SDK ────────┤  ・OCC リトライ
+    └─ その他言語 SDK ────────┘  ・RAII トランザクション
+             │                   ・論理削除透過
+             │                   ・エラーマッピング
+             │
+             ├─ TCP/ADLR/ADLA → :9876（Rust SDK が使用・高性能）
+             └─ HTTP/JSON     → :8080（その他 SDK が使用・汎用）
+                                  ↑ curl / Web / スクリプトも直接ここへ
+    ┌─────────────────────────────────────────┐
+    │   Adlaire サーバー                      │
+    │   :9876  TCP リスナー（std::net）       │
+    │   :8080  HTTP/1.1 リスナー（std::net）  │
+    └──────────────┬──────────────────────────┘
+                   │ 共通処理（OCC・WAL・libSQL）
+                   ▼
+              Database { StorageBackend, WalEngine, SqlEngine }（§2.5）
+```
+
+#### 18.5.2 SDK の役割
+
+SDK がワイヤ形式の差異とプロトコル詳細を吸収する。アプリケーションはワイヤ形式を意識しない。
+
+| SDK 機能 | 内容 |
+|---|---|
+| OCC WriteConflict 自動リトライ | `WRITE_CONFLICT` 受信時に指数バックオフでリトライ。上限はコンフィグ可 |
+| トランザクション管理 | BEGIN / COMMIT / ROLLBACK を RAII で包む（Rust: `Drop` でロールバック） |
+| 接続管理 | TCP: コネクションリース。HTTP: Keep-Alive。切断時は自動再接続 |
+| 論理削除透過 | アプリの DELETE 呼び出しを `0x02 DELETE`（TCP）または DELETE エンドポイント（HTTP）に変換 |
+| エラーマッピング | ステータスバイト / HTTP ステータスコードを言語ネイティブなエラー型へ変換 |
+| ワイヤ形式隠蔽 | アプリは TCP か HTTP かを意識しない。SDK 初期化時に決定される |
+
+#### 18.5.3 SDK 別ワイヤ形式
+
+| SDK | ワイヤ形式 | 理由 |
+|---|---|---|
+| `adlaire-client`（Rust） | TCP/ADLR/ADLA（§18.1） | 外部 HTTP クライアント不要・最低レイテンシ |
+| Go / TypeScript / Python SDK | HTTP/JSON（§18.2） | 各言語の標準 HTTP クライアントで実装可 |
+| curl・CI スクリプト・Web | HTTP/JSON（§18.2）直接 | SDK なし・ツール直接アクセス |
+
+#### 18.5.4 Phase 別実装計画
+
+| Phase | 追加内容 |
+|---|---|
+| Phase 2 | TCP/ADLR/ADLA（:9876）+ `adlaire-client`（Rust SDK 基本） |
+| Phase 2+ | HTTP/JSON（:8080）+ Go / TypeScript SDK 雛形 |
+| Phase 3〜 | 全 SDK の OCC リトライ・接続プール強化 |
+
+**制約：** HTTP/JSON 実装も外部クレートなし（`std::net` + 自前 HTTP/1.1 パーサ）。`tokio` / `axum` / `hyper` は使用しない（I-11）。
 
 ---
 
@@ -3335,8 +3462,8 @@ for seed in 0..1000 { test_crash_during_commit(seed); }
 
 ```
 【TCP（ポート 9876）】
-  実装：tokio-tls でラッピング
-  プロトコル：TLS 1.3 のみ（TLS 1.2以下は非対応）
+  実装：自前 TLS 1.3 ハンドシェイク実装（外部クレートなし・I-11）
+  プロトコル：TLS 1.3 のみ（TLS 1.2 以下は非対応）
   
   設定ファイル：
   {
@@ -3348,8 +3475,8 @@ for seed in 0..1000 { test_crash_during_commit(seed); }
     }
   }
 
-【REST API（ポート 8080 → ポート 443）】
-  実装：Axum + tokio-tls で HTTPS 対応
+【HTTP/JSON（ポート 8080 → ポート 443）】
+  実装：自前 HTTP/1.1 パーサ + 自前 TLS 1.3（外部クレートなし・I-11）
   
   リダイレクト設定：
     HTTP ポート 8080 でリッスン
@@ -3846,8 +3973,10 @@ Body:
 }
 ```
 
-**Rust 実装例：**
+**Rust 実装例（HTTP/JSON を直接使う場合。Rust SDK は TCP/ADLR/ADLA を使用・§18.5）：**
 ```rust
+// 注：Rust SDK（adlaire-client）は TCP/ADLR/ADLA で接続する。
+// 以下は HTTP/JSON エンドポイントをテスト目的で直接叩く例（reqwest は SDK 内部では使わない）。
 use reqwest::Client;
 use serde_json::json;
 
@@ -4029,8 +4158,10 @@ func main() {
 GET /api/v1/join/:left_key/:right_table?on=field
 ```
 
-**Rust 実装例：**
+**Rust 実装例（HTTP/JSON を直接使う場合。Rust SDK は TCP/ADLR/ADLA を使用・§18.5）：**
 ```rust
+// 注：Rust SDK（adlaire-client）は TCP/ADLR/ADLA で接続する。
+// 以下は HTTP/JSON エンドポイントをテスト目的で直接叩く例。
 use reqwest::Client;
 
 #[tokio::main]
