@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.17  
+**バージョン：** 0.18  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-10  
 
@@ -144,11 +144,19 @@ libSQL クライアント SDK / curl / WebSocket クライアント
 ├── databases/
 │   ├── {db-name}/
 │   │   ├── data.db               # SQLite 互換 DB（libSQL 管理）
-│   │   └── data.db-wal           # WAL（libSQL 管理）
+│   │   ├── data.db-wal           # WAL（libSQL 管理）
+│   │   └── wal-archive/          # PITR 用 WAL アーカイブ（Phase 5a, wal_retention_days > 0 時）
+│   │       ├── snapshot-000000042.db
+│   │       ├── frame-000000043.bin
+│   │       └── manifest.json
+│   ├── {db-name}___{branch-name}/  # ブランチ DB（Phase 5b）
+│   │   ├── data.db
+│   │   └── data.db-wal
 │   └── ...
 └── meta/
     ├── databases.json            # DB メタデータ（名前・作成日時・状態）
-    └── tokens.json               # 発行済みトークン一覧（失効管理用）
+    ├── tokens.json               # 発行済みトークン一覧（失効管理用）
+    └── branches.json             # ブランチメタデータ（Phase 5b）
 ```
 
 ### 3.3 libSQL フォークとの統合方式
@@ -343,7 +351,7 @@ sqld の hrana HTTP ハンドラ関数（axum router 等）は使わない。JSO
 | **独自変更の記録** | `ADLAIRE_PATCHES.md` を fork リポジトリに置き、変更の理由と対象コミットを記録する |
 | **upstream との diff 管理** | `git diff upstream/main..HEAD -- sqld/` を CI で常時確認し、意図しない乖離を検出する |
 
-#### 3.5.3 内製化ロードマップ（Phase 5 以降）
+#### 3.5.3 内製化ロードマップ（Phase 5c 以降）
 
 内製化の優先順位は「Adlaire の差別化に直結するか」と「upstream との依存切り離し効果が大きいか」で決める。
 
@@ -353,7 +361,7 @@ sqld の hrana HTTP ハンドラ関数（axum router 等）は使わない。JSO
 | 2 | WAL チェックポイント制御 | レプリケーション（Phase 4）に直結。sqld の WAL コードは比較的分離されている |
 | 3 | hrana-http/ws プロトコル変換 | 変換レイヤーを自前化すれば sqld の型依存を完全に排除できる |
 | 4 | クエリエグゼキューター | SQLite との境界。libsql-sys（C バインディング）を直接呼ぶ形に移行 |
-| 5 | SQL パーサ | 最もリスクが高い。Phase 5 後半以降に検討 |
+| 5 | SQL パーサ | 最もリスクが高い。Phase 5c 後半以降に検討 |
 
 内製化は I-5（段階的・計画的）に従い、**各フェーズで動作するテストスイートが通ることを確認してから**次のコンポーネントに進む。
 
@@ -420,7 +428,7 @@ ERROR {"msg":"database integrity check failed","db":"mydb","detail":"..."}
 
 #### 3.6.3 WAL フレームチェックサム
 
-レプリケーション（Phase 4）で転送する WAL フレームには CRC32 チェックサムを付与する（§6 Phase 4 レプリケーション API の `checksum` フィールド）。レプリカ側でフレーム受信後にチェックサムを検証し、不一致の場合はそのフレームを破棄してプライマリへ再送要求する。
+レプリケーション（Phase 4）で転送する WAL フレームには CRC32 チェックサムを付与する（§6.4 レプリケーション API の `checksum` フィールド）。レプリカ側でフレーム受信後にチェックサムを検証し、不一致の場合はそのフレームを破棄してプライマリへ再送要求する。
 
 Phase 1〜3 ではチェックサム検証はローカル DB への SQLite 書き込みで行われる（WAL の組み込みチェックサム機構を使用）。
 
@@ -481,6 +489,9 @@ OPTIONS:
   --auth-jwt-secret-file <FILE>
                          秘密鍵をファイルから読み込む
   --log-level <LEVEL>    ログレベル: error / warn / info / debug（デフォルト: info）
+  --skip-integrity-check 起動時の PRAGMA integrity_check をスキップ（非推奨。WARN ログ出力）
+  --replication-write-mode <MODE>
+                         レプリケーション書き込みモード: async / sync（デフォルト: async）
 
 SUBCOMMANDS:
   adlaire-db token create --secret <SECRET> [--db <NAME>] [--expiry <DURATION>]
@@ -506,10 +517,16 @@ auth_token = ""            # 管理 API 認証トークン（空 = 認証無効�
 
 [storage]
 # data-dir は CLI フラグで指定（config.toml に書かない）
-busy_timeout_ms      = 5000     # WAL ロック待機タイムアウト（ミリ秒）
-wal_checkpoint_pages = 1000     # 自動チェックポイントのページ閾値
-wal_checkpoint_mode  = "PASSIVE"  # PASSIVE / FULL / RESTART
-synchronous          = "NORMAL"   # OFF は非サポート
+busy_timeout_ms               = 5000     # WAL ロック待機タイムアウト（ミリ秒）
+wal_checkpoint_pages          = 1000     # 自動チェックポイントのページ閾値
+wal_checkpoint_mode           = "PASSIVE"  # PASSIVE / FULL / RESTART
+synchronous                   = "NORMAL"   # OFF は非サポート（I-4 違反）
+wal_retention_days            = 0        # PITR 用 WAL アーカイブ保持日数（0 = 無効）
+integrity_check_interval_hours = 0       # 定期整合性チェック間隔（0 = 無効）
+
+[replication]
+write_mode      = "async"  # async / sync
+sync_timeout_ms = 5000     # sync モード時のタイムアウト（ミリ秒）
 ```
 
 優先順位：CLI フラグ > 設定ファイル > デフォルト値。
@@ -1423,6 +1440,8 @@ Step 5: メタデータ読み込み（Phase 1 はシングル DB のためスキ
        なければ空のリスト `{"databases":[]}` として初期化し書き出す
   5-2. {data-dir}/meta/tokens.json が存在すれば読み込みメモリに展開
        なければ空のリスト `{"tokens":[]}` として初期化し書き出す
+  5-3. {data-dir}/meta/branches.json が存在すれば読み込みメモリに展開（Phase 5b〜）
+       なければ空のリスト `{"branches":[]}` として初期化し書き出す
 
 Step 6: DB オープン（Phase 1 はシングル DB）
   6-1. {data-dir}/databases/ 以下の各 DB ディレクトリを列挙
@@ -1581,7 +1600,7 @@ T-3: データディレクトリ初期化
   [ ] .lock ファイルによる排他ロック（flock）
   [ ] databases/ meta/ サブディレクトリ作成
   [ ] ディレクトリパーミッション警告（700 未満で WARN）
-  参照: §3.2, §8.1 Step 3〜4, §9.3
+  参照: §3.2, §8.1 Step 3〜4, §10.3
 
 T-4: sqld 統合・DB オープン
   [ ] sqld::Database::open() でシングル DB を開く
@@ -1589,7 +1608,7 @@ T-4: sqld 統合・DB オープン
   [ ] busy_timeout を設定
   [ ] PRAGMA synchronous = NORMAL を設定
   [ ] サーバーシャットダウン時に drop（WAL flush + close）
-  参照: §3.3.2, §11, §8.1 Step 6, §8.2 Step 3
+  参照: §3.3.2, §13, §8.1 Step 6, §8.2 Step 3
   検証: TC-5（データ永続性）
 
 T-5: HTTP サーバー骨格（axum）
@@ -2328,7 +2347,7 @@ Phase 5a・5b 完了後に計画する。候補（優先度未確定）：
 
 ## 10. セキュリティ考慮事項
 
-### 9.1 JWT シークレット管理
+### 10.1 JWT シークレット管理
 
 **優先順位：** `--auth-jwt-secret-file` > `--auth-jwt-secret` > 環境変数 `ADLAIRE_JWT_SECRET` > 設定ファイル `[auth] jwt_secret`
 
@@ -2350,7 +2369,7 @@ secret が未設定の場合は認証を完全に無効化する（起動時に 
 - ローテーション手順: 新 secret で新トークン発行 → クライアント切り替え → 旧 secret 廃止
 - ゼロダウンタイムローテーション（複数 secret の同時受理）は Phase 1 対象外
 
-### 9.2 管理ポート（8081）のアクセス制御
+### 10.2 管理ポート（8081）のアクセス制御
 
 **デフォルト動作：**
 
@@ -2367,7 +2386,7 @@ Internet → Reverse Proxy (TLS) → :8080 (API)
                                 → :8081 (Admin) ← VPN / internal network only
 ```
 
-### 9.3 データディレクトリのファイルパーミッション
+### 10.3 データディレクトリのファイルパーミッション
 
 起動時に `--data` で指定したディレクトリのパーミッションを検証・適用する。
 
@@ -2384,7 +2403,7 @@ Internet → Reverse Proxy (TLS) → :8080 (API)
 - 起動時に `data-dir` が `700` 未満の場合は `WARN` ログを出力する（強制変更はしない）
 - 新規作成するファイル・ディレクトリは上記パーミッションで作成する
 
-### 9.4 TLS
+### 10.4 TLS
 
 Phase 1〜2 では TLS をネイティブ実装しない。リバースプロキシ（Nginx・Caddy 等）による TLS ターミネーションを推奨する。
 
@@ -2394,13 +2413,13 @@ Client → [TLS] → Nginx/Caddy → [plain HTTP] → adlaire-db :8080
 
 TLS ネイティブ対応は Phase 5 以降の検討事項とする。
 
-### 9.5 トークン情報の漏洩防止
+### 10.5 トークン情報の漏洩防止
 
 - `GET /admin/v1/tokens` および `GET /admin/v1/tokens/{id}` は JWT 文字列（`token` フィールド）を返さない（§6.4 参照）
 - JWT 文字列は `POST /admin/v1/tokens` の発行時レスポンスでのみ返す（以降は再取得不可）
 - `tokens.json` に JWT 文字列は保存しない（`id` と `access` と有効期限のみ保存）
 
-### 9.6 パストラバーサル対策
+### 10.6 パストラバーサル対策
 
 DB 名・ファイルパス生成時に以下を必ず適用する：
 
@@ -2422,7 +2441,7 @@ DB 名・ファイルパス生成時に以下を必ず適用する：
 
 ## 12. ログ仕様
 
-### 10.1 フォーマット
+### 12.1 フォーマット
 
 構造化 JSON Lines（1 行 1 イベント）。
 
@@ -2442,7 +2461,7 @@ DB 名・ファイルパス生成時に以下を必ず適用する：
 | `db` | string \| null | マルチ DB 時 | 対象 DB 名（Phase 2〜） |
 | `error` | string \| null | エラー時 | エラーコードまたはメッセージ |
 
-### 10.2 ログレベル
+### 12.2 ログレベル
 
 | レベル | 用途 |
 |---|---|
@@ -2454,13 +2473,13 @@ DB 名・ファイルパス生成時に以下を必ず適用する：
 
 デフォルトレベル：`INFO`。`--log-level` フラグまたは環境変数 `ADLAIRE_LOG_LEVEL` で変更可。
 
-### 10.3 出力先
+### 12.3 出力先
 
 - デフォルト：stdout（コンテナ・systemd との親和性）
 - `--log-file <PATH>` 指定時：ファイルへ書き出し（ローテーションは外部ツール任せ）
 - stdout とファイルの同時出力は非サポート（Phase 1 時点）
 
-### 10.4 起動・停止ログ例
+### 12.4 起動・停止ログ例
 
 ```
 {"ts":"...","level":"INFO","msg":"Adlaire DB starting","version":"0.1.0","data_dir":"/var/lib/adlaire","port":8080}
@@ -2473,7 +2492,7 @@ DB 名・ファイルパス生成時に以下を必ず適用する：
 
 ## 13. WAL 設定
 
-### 11.1 WAL モード
+### 13.1 WAL モード
 
 すべての SQLite DB は起動時に WAL モードを有効化する。
 
@@ -2484,7 +2503,7 @@ PRAGMA journal_mode = WAL;
 - WAL により複数の同時読み取りと 1 書き込みが並行可能
 - クラッシュ後の自動リカバリは SQLite が保証
 
-### 11.2 設定パラメータ
+### 13.2 設定パラメータ
 
 | パラメータ | デフォルト | CLI フラグ | config.toml キー | 説明 |
 |---|---|---|---|---|
@@ -2493,13 +2512,13 @@ PRAGMA journal_mode = WAL;
 | WAL checkpoint mode | `PASSIVE` | — | `[storage] wal_checkpoint_mode` | `PASSIVE` / `FULL` / `RESTART` |
 | synchronous | `NORMAL` | — | `[storage] synchronous` | `OFF` は非サポート（I-4 違反） |
 
-### 11.3 チェックポイント挙動
+### 13.3 チェックポイント挙動
 
 - SQLite のデフォルト自動チェックポイント（1000 pages）をそのまま使用（Phase 1）
 - Phase 1 では手動チェックポイントの API は提供しない
 - Phase 4（レプリケーション）時に WAL チェックポイント制御を再設計する
 
-### 11.4 busy timeout エラー
+### 13.4 busy timeout エラー
 
 WAL ロック待機が `busy_timeout_ms` を超えた場合：
 
