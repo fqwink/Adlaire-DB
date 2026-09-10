@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.3  
+**バージョン：** 0.4  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-10  
 
@@ -138,17 +138,67 @@ libSQL クライアント SDK / curl / WebSocket クライアント
     └── tokens.json               # 発行済みトークン一覧（失効管理用）
 ```
 
-### 3.3 libSQL フォークの変更範囲
+### 3.3 libSQL フォークとの統合方式
 
-Phase 1 では sqld への変更を最小限に抑え、サーバー層の構築に集中する。
+sqld（libSQL のサーバーコンポーネント）を **Rust ライブラリとして組み込む**。sqld をサブプロセスとして起動してプロキシする方式は採らない。
 
-| コンポーネント | Phase 1 での扱い |
-|---|---|
-| SQL パーサ | 変更なし（libSQL そのまま）|
-| クエリエグゼキューター | 変更なし |
-| WAL 管理 | 変更なし |
-| ページストレージ | 変更なし |
-| HTTP API サーバー（sqld 内蔵）| Adlaire サーバー層に置き換え |
+```
+adlaire-db バイナリ（Rust）
+├── Adlaire サーバー層（自前実装）
+│   ├── HTTP ルーティング・認証・管理 API
+│   └── マルチDB ルーター
+└── sqld コア（libSQL フォークとして静的リンク）
+    ├── SQL パーサ・クエリエグゼキューター
+    ├── WAL 管理
+    └── ページストレージ
+```
+
+**Phase 1 での sqld 改変範囲：**
+
+| sqld の機能 | Adlaire での扱い |
+|-------------|-----------------|
+| SQL パーサ・クエリ実行 | そのまま使用 |
+| WAL・ページストレージ | そのまま使用 |
+| sqld 内蔵 HTTP サーバー | 無効化。Adlaire サーバー層が代替 |
+| sqld 内蔵認証 | 無効化。Adlaire の JWT 認証が代替 |
+| sqld 内蔵管理 API | 無効化。Adlaire 管理 API が代替 |
+| hrana-http プロトコル実装 | sqld のものを再利用するか Adlaire で再実装するかは実装時に判断 |
+
+**改変の基本方針：**
+- Phase 1 では sqld への変更を最小限に留める
+- sqld の `Connection` / `Database` 型を直接呼び出す形で統合する
+- sqld の HTTP サーバーループは起動しない（Adlaire サーバーが HTTP を受け付ける）
+
+### 3.4 マルチDB のデータ分離（Phase 2）
+
+**ファイル分離：**
+
+各 DB は独立した SQLite ファイルを持ち、他の DB のファイルとは完全に分離される。
+
+**接続管理：**
+
+| 項目 | Phase 2 実装方針 |
+|------|----------------|
+| DB ごとの接続数 | 接続 1 本（シンプルな実装から始める）|
+| 同一 DB への並行アクセス | SQLite の WAL モードで複数リーダー・シングルライターを実現 |
+| 異なる DB への並行アクセス | DB ごとに独立した接続のため干渉なし |
+| 接続プール | Phase 2 は単一接続。Phase 3 以降でプール化を検討 |
+
+**DB 作成フロー：**
+
+1. `POST /admin/v1/databases` を受信
+2. `databases/{name}/` ディレクトリを作成（既存なら `DB_ALREADY_EXISTS` エラー）
+3. sqld で `data.db` を初期化（空の SQLite DB）
+4. `meta/databases.json` にメタデータを追記
+5. 成功レスポンスを返す
+
+**DB 削除フロー：**
+
+1. `DELETE /admin/v1/databases/{name}` を受信
+2. 対象 DB への既存接続を閉じる
+3. `databases/{name}/` ディレクトリを丸ごと削除
+4. `meta/databases.json` からエントリを削除
+5. 成功レスポンスを返す
 
 ---
 
@@ -231,10 +281,66 @@ DB 単位のスコープは Phase 2 で追加する。
 ### 5.4 トークン生成
 
 ```bash
-# CLI でトークンを生成
+# CLI でトークンを生成（Phase 1 では CLI のみ。Phase 2 で管理 API からも発行可能）
 adlaire-db token create --secret "my-secret" --expiry 30d
 # → eyJ...（標準出力）
+
+# 読み取り専用トークン
+adlaire-db token create --secret "my-secret" --access ro
 ```
+
+### 5.5 トークン失効管理
+
+**tokens.json の構造：**
+
+```json
+{
+  "tokens": [
+    {
+      "id":         "tok_abc123",
+      "access":     "rw",
+      "created_at": "2026-09-10T12:00:00Z",
+      "expires_at": "2026-10-10T12:00:00Z",
+      "revoked":    false,
+      "revoked_at": null
+    },
+    {
+      "id":         "tok_def456",
+      "access":     "ro",
+      "created_at": "2026-09-01T00:00:00Z",
+      "expires_at": null,
+      "revoked":    true,
+      "revoked_at": "2026-09-10T08:00:00Z"
+    }
+  ]
+}
+```
+
+**JWT 検証フロー（リクエストごと）：**
+
+```
+1. Authorization: Bearer <JWT> ヘッダを取得
+   → なし → 401 AUTH_REQUIRED
+
+2. JWT 署名を HS256 で検証
+   → 失敗 → 401 AUTH_INVALID
+
+3. exp クレームを確認
+   → 期限切れ → 401 AUTH_EXPIRED
+
+4. sub クレーム（token_id）を tokens.json と照合
+   → revoked=true → 401 AUTH_INVALID
+
+5. a クレームと要求権限を照合
+   → ro トークンで書き込み → 403 PERMISSION_DENIED
+
+6. 検証通過 → リクエスト処理へ
+```
+
+**パフォーマンス：**
+- サーバー起動時に `tokens.json` をメモリへロードする
+- `DELETE /admin/v1/tokens/{id}` 受信時にメモリ上の失効リストを更新し `tokens.json` を書き直す
+- メモリロード後は `tokens.json` の再読み込みは行わない（サーバー再起動で反映）
 
 ---
 
@@ -492,10 +598,53 @@ GET    /admin/v1/tokens          発行済みトークン一覧
 - CLI: `--data` `--port` `--auth-jwt-secret`
 - シングルバイナリ起動
 
-**完了条件：**
-- libSQL TypeScript SDK / Rust SDK / Go SDK を Turso Cloud から Adlaire DB に URL だけ変えて接続できる
-- CREATE TABLE / INSERT / SELECT / UPDATE / DELETE が動作する
-- 認証あり・なしの両モードで動作する
+**完了条件（検証可能な具体的テストケース）：**
+
+```
+TC-1: 認証なしモードで SQL 実行
+  $ ./adlaire-db serve --data ./testdb --port 8080
+  $ curl -s -X POST http://localhost:8080/v2/pipeline \
+      -H "Content-Type: application/json" \
+      -d '{"baton":null,"requests":[
+            {"type":"execute","stmt":{"sql":"CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, v TEXT)","args":[],"want_rows":false}},
+            {"type":"execute","stmt":{"sql":"INSERT INTO t VALUES (1, \"hello\")","args":[],"want_rows":false}},
+            {"type":"execute","stmt":{"sql":"SELECT * FROM t","args":[],"want_rows":true}},
+            {"type":"close"}
+          ]}'
+  期待: results に rows=[[[integer,"1"],[text,"hello"]]] が含まれる
+
+TC-2: ヘルスチェック
+  $ curl -s http://localhost:8080/v2/health
+  期待: {"status":"ok"}
+
+TC-3: JWT 認証ありモード
+  $ SECRET="test-secret"
+  $ TOKEN=$(./adlaire-db token create --secret "$SECRET")
+  $ ./adlaire-db serve --data ./testdb --port 8080 --auth-jwt-secret "$SECRET"
+  （a）有効なトークンで SQL 実行 → 200 OK
+  （b）Authorization ヘッダなし → 401 AUTH_REQUIRED
+  （c）不正なトークン → 401 AUTH_INVALID
+
+TC-4: TypeScript SDK 互換性
+  const client = createClient({
+    url: "http://localhost:8080",
+    authToken: "<JWT>",          // 認証なしモードなら省略可
+  });
+  await client.execute("CREATE TABLE IF NOT EXISTS users (id INT, name TEXT)");
+  await client.execute("INSERT INTO users VALUES (1, 'Alice')");
+  const result = await client.execute("SELECT * FROM users");
+  期待: result.rows[0] = { id: 1, name: "Alice" }
+
+TC-5: データ永続性（I-4 検証）
+  （a）INSERT 後にサーバーを Ctrl+C で停止
+  （b）同じ --data で再起動
+  （c）SELECT で挿入したデータが返ること
+
+TC-6: 起動・停止
+  （a）./adlaire-db serve で起動 → "Adlaire DB listening on ..." ログ
+  （b）Ctrl+C でクリーンシャットダウン → .lock ファイルが解放される
+  （c）再起動できる（.lock がゾンビ残留しない）
+```
 
 **対象外（Phase 2 以降）：**
 - マルチ DB・管理 API・WebSocket・レプリケーション
