@@ -1,125 +1,114 @@
-# Adlaire DB 仕様書（プロトタイプ版）
+# Adlaire DB 仕様書
 
-**バージョン：** 2.1  
+**バージョン：** 3.1  
 **ステータス：** 設計レビュー中  
-**最終更新：** 2026-09-09  
+**最終更新：** 2026-09-10  
 
 ---
 
 ## 1. 概要
 
 ### 1.1 プロジェクト概要
-Rust で実装される統合DBエンジン。データ整合性・保全・可用性を同率で重視し、KV + イベント型アーキテクチャで堅牢性を実現。
+Rust で実装されるシングルバイナリ DB サーバー。**libSQL をフォークしてストレージバックエンドとして採用し**、その上に Adlaire 独自の改ざん証明監査層（append-only WAL + ハッシュチェーン）と多クライアント TCP サーバー機能を構築する。libSQL を選んだ理由はファイルベース（SQLite 互換）であること。フォークによってコードベースを直接保有し、以降のフェーズで libSQL の SQLite 内部実装（B+Tree・WAL エンジン・SQL パーサ）を自前実装に段階的に置き換えて外部依存ゼロを達成する（内製化ロードマップ）。
 
-**ポジション：** 「SQLite の隣人として置ける、次の選択肢」。シングルバイナリで起動でき、すべての変更が改ざん検知可能な証拠として残る。immudb のように削除を禁止せず、FoundationDB のような分散インフラも不要。小チームの本番サービスから始めて、監査・コンプライアンス要件が来たとき追加実装ゼロで対応できる DB。
+**ポジション：** 「libSQL フォーク上に構築した監査証明付きサーバーを、シングルバイナリで」。libSQL が提供する SQL + ファイルベースストレージを基盤に、append-only WAL + ハッシュチェーンによる改ざん検知、論理削除のみによる完全な変更履歴、多クライアント TCP サーバーを一つのバイナリで実現する。SQLite 内部実装の段階的内製化によって、長期的な自律性と監査可能性を確保する。
 
 ### 1.2 設計目標
-- **データ整合性** ：改ざん検知、トランザクション完全性
-- **データ保全** ：完全な履歴追跡、復旧可能性
-- **可用性** ：ブロッキング最小化、非同期対応
-- **移行容易性** ：SQLite からの移行パスを標準提供（スキーマ・型・制約込みの自動移行）
+- **libSQL ファーストで即戦力** ：Phase 1 は libSQL をバックエンドとして使い、SQL・ファイル永続化・クラッシュリカバリを即座に利用する
+- **改ざん証明** ：append-only WAL + SHA-256 ハッシュチェーン。変更の事実を証明可能にする
+- **データ保全** ：論理削除のみ。すべての変更が WAL に永続化され、削除も証明可能
+- **段階的内製化** ：B+Tree・WAL エンジン・SQL パーサを自前実装に段階的に置き換え、長期的に外部依存をゼロへ近づける
+- **OCC + MVCC** ：楽観的並行制御。読み取りはロックしない。コミット時に競合を検出してリトライ
 - **外部検証可能性** ：専用クライアント不要でファイルから直接ハッシュチェーンを検証できる
-- **デプロイ簡易性** ：シングルバイナリ起動を第一級市民とする（Docker は選択肢の一つ）
+- **libSQL サーバー機能特化** ：多クライアント TCP サーバー・監査 WAL・論理削除強制を libSQL の上位層として実装
+- **デプロイ簡易性** ：シングルバイナリ起動を第一級市民とする
 
-### 1.3 Phase 1 スコープ（含める）
+### 1.3 開発フェーズ概要
 
-**プラットフォーム：**
+開発はフェーズ単位で進める。**Phase 1 は libSQL のフォークから始まる**。フォークした libSQL のコードベース上に Adlaire サーバー層を構築し、以降のフェーズで libSQL の内部実装（B+Tree・WAL エンジン・SQL パーサ）を順番に自前実装に置き換えていく。
+
+| フェーズ | 名称 | 概要 |
+|----------|------|------|
+| **Phase 1** | libSQL フォーク | libSQL をフォークしてプロジェクト基盤を確立 |
+| **Phase 2** | Adlaire サーバー層 | 監査 WAL・OCC・MVCC・TCP サーバーを構築 |
+| **Phase 3** | B+Tree 内製化 | libSQL の SQLite B+Tree を自前実装に置き換え |
+| **Phase 4** | WAL エンジン内製化 | libSQL の SQLite WAL を自前実装に置き換え |
+| **Phase 5** | SQL パーサ内製化 | libSQL の SQL パーサを自前実装に置き換え（外部依存ゼロ達成） |
+| **Phase 6** | 分散対応 | レプリケーション・シャーディング・分散 TX |
+
+**共通制約（全フェーズ）：**
 - Rust / Linux / シングルバイナリ起動（`./adlaire-db --data ./mydb --port 9876`）
-- シングルノード・単一 Writer（同時書き込みプロセスは 1 つ、ファイルロックで強制）
+- フォーク外の外部クレートは使用しない（SHA-256・CRC32・TCP は自前実装）
+- TCP のみ（ポート 9876）。REST は後回し
 
-**プロトコル：TCP のみ（ポート 9876）**  
-REST と独自 TCP の同時提供は後回し。Phase 1 では TCP カスタムプロトコル 1 本に絞る（SQL 文のテキスト送信もこのプロトコル上で行う）。
-
-**ストレージ：**
-- 順序付き KV（キーは辞書順ソートを保持）
-- append-only WAL（変更の唯一の監査記録。現在状態は WAL から再構築できる）
-- クラッシュリカバリ（再起動時に WAL から state.db を再構築）
-- スナップショット（WAL 肥大化を防ぐための定期圧縮 CHECKPOINT エントリ）
-- **SQLite ストレージバックエンド**（`state.db`：現在状態・インデックス・スキーマを SQLite ファイルとして保持。snapshot.bin / index.bin は廃止）
-
-**スキーマ・SQL：**
-- スキーマ定義（テーブル・型付き列・NOT NULL / UNIQUE / CHECK 制約）
-- SQL クエリ（SELECT / WHERE / ORDER BY / GROUP BY / LIMIT）
-- SQL 書き込み（INSERT / UPDATE / DELETE）は Adlaire TX マネージャー経由で WAL に先行記録
-- DELETE は論理削除のみに変換（物理削除は不可、I-4 参照）
-- `state.db` は有効な SQLite 3 ファイル。外部ツール（DB Browser, sqlite3 CLI）で読み取り専用アクセス可能
-
-**データ操作：**
-- CRUD（作成・読取・更新・論理削除）
-- 複数キー ACID トランザクション
-- イベント履歴（すべての変更がハッシュチェーンとして永続化）
-- 論理削除のみ（物理削除 API は提供しない → 3.1.3 参照）
-
-**整合性・保全：**
-- レコード単位チェックサム（ペイロードを含めたハッシュ → 1.5 参照）
-- 署名済み外部チェックポイント（第三者が WAL なしで一時点の整合性を検証できる）
-- 保全異常時の全体ロック（チェックサム不一致・チェーン断絶を検知したら自動上書きせず DB をロック）
-- バックアップと復元検証（バックアップからの復元後にハッシュチェーン整合性を検証）
-
-**移行：**
-- SQLite 移行のための型付きエクスポート／インポート（型情報・制約・検証込み）
-
-### 1.3.1 後回し（Phase 1 スコープ外）
-
-以下は Phase 1 には含めない。仕様書内の対応セクションには「後回し」の明示がある。
+### 1.3.1 後回し（Phase 2 スコープ外）
 
 | 項目 | 理由 |
 |------|------|
-| JOIN | 複数キー結合はアプリ層で代替可能。コア実装を複雑にしない |
-| 複数シャード | シングルノードで十分な規模を対象とする |
-| レプリケーション | WAL の正本設計確立が先決 |
-| 分散トランザクション | レプリケーション完成後 |
-| 永続 B+Tree の独自実装 | SQLite の B+Tree を利用する（独自実装は不要）|
-| REST と独自 TCP の同時提供 | プロトコルは 1 本に絞る |
-| 保存時暗号化 | TLS でのトランスポート暗号化を優先 |
-| JWT | Phase 1 は API キー認証 |
-| Prometheus / Grafana 統合 | 構造化ログで代替。メトリクス収集は後回し |
-| 自動フェイルオーバー | シングルノードなので不要 |
-| ~~SQL Layer~~ | **Phase 1 に繰り上げ**（SQLite バックエンド採用により実装コスト大幅減）|
+| 自前 B+Tree | Phase 3 の内製化ステップ |
+| 自前 SQL パーサ | Phase 5 の内製化ステップ |
+| 複数シャード | Phase 6 以降 |
+| レプリケーション | Adlaire WAL 正本設計確立が先決（Phase 6） |
+| 分散トランザクション | レプリケーション完成後（Phase 6） |
+| REST API | TCP プロトコル 1 本に絞る |
+| 保存時暗号化 | トランスポート暗号化を優先 |
+| JWT | Phase 2 は API キー認証 |
+| Prometheus / Grafana | 構造化ログで代替 |
+| 自動フェイルオーバー | Phase 6 以降 |
 
 ### 1.4 競合との差別化
 
-| 項目 | SQLite | immudb | FoundationDB | **Adlaire DB** |
-|------|--------|--------|-------------|----------------|
-| 物理削除 | 可 | 不可（設計上禁止） | 可 | **論理削除のみ（削除事実は証明可能）** |
-| 主 DBMS として使用 | 可（組み込み） | 困難（補助 DB 推奨） | 可（分散環境） | **可（単体で完結）** |
-| デプロイ | ライブラリ（ネットワーク不可） | サーバー + クライアント | 複数ロール（複雑） | **シングルバイナリ・ネットワーク対応** |
-| SQL クエリ | 完全対応 | なし | なし | **SELECT / WHERE / ORDER BY 対応** |
-| スキーマ・型 | 完全対応 | なし | なし | **型付き列・制約対応** |
-| 監査ログ | なし | 完全対応 | なし | **append-only WAL + ハッシュチェーン** |
-| 外部検証 | なし | 専用クライアント必要 | なし | **ファイル単体で検証可能** |
-| SQLite ファイルアクセス | ネイティブ | なし | なし | **state.db を外部ツールで読み取り可** |
-| SQLite 移行 | — | なし | なし | **移行ツール標準搭載** |
-| 分散対応 | あり | ネイティブ | 将来 Phase 2–4 |
-| 対象規模 | 中〜大 | 大 | **小〜中（スケールアップ可能）** |
+| 項目 | immudb | FoundationDB | **Adlaire DB** |
+|------|--------|-------------|----------------|
+| 物理削除 | 不可（設計上禁止） | 可 | **論理削除のみ（削除事実は証明可能）** |
+| 並行制御 | シンプルロック | OCC + MVCC | **OCC + MVCC** |
+| 監査ログ | 完全対応 | なし | **append-only WAL + ハッシュチェーン** |
+| 外部検証 | 専用クライアント必要 | なし | **ファイル単体で検証可能** |
+| SQL | なし | なし（Layer） | **✓（libSQL が Phase 1 で提供）** |
+| 外部依存 | 多数 | 多数 | **Phase 1 は libSQL のみ。段階的内製化で最終的にゼロ** |
+| ストレージ | 独自形式 | 独自形式 | **Phase 1：libSQL（SQLite ファイル）→ 段階的に自前実装へ** |
+| デプロイ | サーバー + クライアント | 複数ロール（複雑） | **シングルバイナリ** |
+| 分散対応 | 限定的 | ✓（ネイティブ） | **Phase 2 以降** |
 
 ### 1.5 設計不変条件（Design Invariants）
 
-実装のあらゆる判断はこの不変条件を破らないことを最優先とする。これらは後から変更できない根本的な約束事であり、機能追加より常に優先される。
+実装のあらゆる判断はこの不変条件を破らないことを最優先とする。機能追加より常に優先される。
 
-**I-1：WAL はすべての変更の唯一の監査記録**  
-`wal.bin` へ fsync が完了するまでクライアントへ成功応答を返さない。`state.db`（SQLite）は WAL から再構築できる高速クエリ用の派生物であり、WAL を失った場合はデータ損失。`state.db` を失っても WAL から完全に再構築できる。
+**I-1：Adlaire WAL はすべての変更の唯一の監査記録**  
+`wal.bin` へ fsync が完了するまでクライアントへ成功応答を返さない。`state.db`（libSQL ファイル）は Adlaire WAL から再構築できる派生物。Adlaire WAL を失った場合は監査記録が失われる。`state.db` を失っても Adlaire WAL から完全再構築できる。libSQL 自身の WAL とは別物であり、Adlaire WAL が監査の正本となる。
 
 **I-2：ハッシュ対象にはペイロードを含める**  
-各 WAL エントリのハッシュは `hash = SHA-256(prev_hash || tx_id || timestamp || event_type || key || payload)` とする。ペイロードを除外したハッシュは改ざん検知として機能しない。
+各 WAL エントリのハッシュは `hash = SHA-256(prev_hash || seq || tx_id || ts || type || key || payload)` とする（自前 SHA-256 実装）。ペイロードを除外したハッシュは改ざん検知として機能しない。
 
 **I-3：保全異常時は自動上書きせず全体をロック**  
-起動時・トランザクション完了時にチェックサム検証・ハッシュチェーン検証を実施する。不一致を検出した場合、DB 全体を read-only ロックし、管理者の明示的な承認なしに自動修復・上書きを行わない。
+起動時・TX 完了時にチェックサム検証・ハッシュチェーン検証を実施する。不一致を検出した場合、DB 全体を read-only ロックし、管理者の明示的な承認なしに自動修復・上書きを行わない（`exit 2`）。
 
 **I-4：論理削除のみ提供**  
 物理削除 API は提供しない。Delete 操作は「削除済み」状態への遷移と Deleted イベントの WAL 記録のみ行う。
 
-**I-5：単一 Writer の強制**  
-`.lock` ファイルによるプロセスレベルの排他制御を起動時に確立する。ロック取得失敗は起動エラーとして扱う（サイレントに複数プロセスが共存しない）。
+**I-5：単一 Writer の強制（Phase 1）**  
+`.lock` ファイルによるプロセスレベルの排他制御を起動時に確立する。ロック取得失敗は起動エラーとして扱う。
 
 **I-6：state.db の検証可能性**  
-`state.db` が WAL から正しく再構築されることを検証する手段を提供する（`adlaire-db verify --data ./mydb` コマンド）。`state.db` を削除して `--rebuild` フラグで WAL から完全再構築できることを CI で定期確認する。
+`state.db` が Adlaire WAL から正しく再構築されることを検証する（`adlaire-db verify --data ./mydb` コマンド）。`state.db` を削除して `--rebuild` フラグで Adlaire WAL から完全再構築できることを CI で定期確認する。
 
 **I-7：外部チェックポイントの不変性**  
-署名済み外部チェックポイントは一度発行したら変更不可。チェックポイントは WAL の任意の地点での状態の「第三者検証可能な証明」として機能する。
+外部チェックポイントは一度発行したら変更不可。WAL シーケンス番号とハッシュのみで第三者が検証できる（署名なし）。
 
 **I-8：クラッシュ後の状態遷移を明示**  
-クラッシュ後の再起動では WAL の末尾を検査し、「コミット済み」「未コミット（ロールバック対象）」「部分書き込み（破損候補）」の 3 状態を判定する手順を実装する。
+クラッシュ後の再起動では WAL の末尾を検査し、「コミット済み（COMMITTED）」「未コミット（PENDING）」「部分書き込み（PARTIAL）」の 3 状態を判定する手順を実装する。
+
+**I-9：OCC によるコミット時競合検出**  
+トランザクション開始時に read-version を記録する。コミット時に read-set の各キーのバージョンが read-version 以降に変更されていないかを検証する。競合を検出した場合は Abort し、アプリケーション側でリトライする（自動リトライはしない）。
+
+**I-10：MVCC による読み取りのノンブロッキング保証**  
+読み取りトランザクションは書き込みトランザクションをブロックしない。各キーのバージョン履歴を保持し、read-version 時点の値を返す。古いバージョンは定期 GC で回収する（論理削除済みのものも含む）。
+
+**I-11：段階的内製化（長期目標：外部依存ゼロ）**  
+Phase 1 では libSQL クレートのみを許容する。それ以外の外部クレートは使用しない（SHA-256・CRC32・TCP サーバーは自前実装）。Phase 2 以降で libSQL の内部コンポーネント（B+Tree・WAL エンジン・SQL パーサ）を自前実装に段階的に置き換え、最終的に外部依存ゼロを達成する。「内製化が大変だから外部に頼り続ける」は理由として認めない。各 Phase の完了条件として内製化ステップを必ず含める。
+
+**I-12：置き換え可能抽象レイヤー**  
+各コンポーネント（ストレージ・WAL エンジン・SQL エンジン）は Phase 2 で Rust trait として定義する。Phase 2 では libSQL を実装として使用し、Phase 3〜5 では同じ trait の自前実装に差し替える。サーバー層（Adlaire サーバー層・OCC・MVCC）は trait 経由でのみコンポーネントと通信し、具体型に依存しない。trait の変更なしに実装を交換できることを Phase 完了条件とする（詳細は §2.5）。
 
 ---
 
@@ -127,68 +116,41 @@ REST と独自 TCP の同時提供は後回し。Phase 1 では TCP カスタム
 
 ### 2.1 全体構成
 
-WAL（Write-Ahead Log）を変更の唯一の監査記録とする。現在状態・スキーマ・インデックスはすべて WAL から再構築できる派生物（SQLite ファイルとして保持）。
+Adlaire WAL（Write-Ahead Log）をすべての変更の唯一の監査記録とする。現在状態・インデックスは libSQL が管理する `state.db`（SQLite ファイル）に保持し、Adlaire WAL から再構築できる派生物として扱う。SQL は libSQL が Phase 1 から提供する。
 
 ```
 クライアント（TCP）
         │
-        ├─ SQL テキスト（SELECT / INSERT / UPDATE / DELETE）
-        └─ KV コマンド（バイナリプロトコル）
+        └─ SQL コマンド / KV コマンド（バイナリプロトコル）
         │
         ▼
-┌────────────────────────┐
-│  SQL パーサー            │  SELECT → 直接 state.db へ（WAL 不要）
-│                        │  INSERT / UPDATE / DELETE → TX マネージャーへ
-└─────────┬──────────────┘
-          │（書き込みのみ）
+┌────────────────────────────────────┐
+│  Adlaire サーバー層               │  多クライアント TCP 接続管理
+│  ・OCC トランザクション管理        │  read-version 取得
+│  ・MVCC バージョン管理            │  コミット時 read-set 検証（I-9）
+│  ・論理削除強制（I-4）            │  DELETE → 論理削除 SQL に変換
+└─────────┬──────────────────────────┘
+          │ Adlaire WAL エントリ（fsync 完了が先）
           ▼
-┌────────────────────────┐
-│  トランザクション管理    │  複数キー ACID、単一 Writer、ファイルロック
-│  ・スキーマ検証         │  型・NOT NULL・UNIQUE・CHECK 制約チェック
-│  ・論理削除強制 (I-4)   │  DELETE → 論理削除に変換
-└─────────┬──────────────┘
-          │ WAL エントリ（fsync 完了が先）
-          ▼
-┌────────────────────────┐
-│  WAL 監査ログ（wal.bin）│  append-only、ハッシュチェーン
-│                        │  ← 変更の唯一の監査記録（I-1）
-└──┬─────────────────────┘
-   │  WAL コミット後に state.db へ反映
+┌────────────────────────────────────┐
+│  Adlaire 監査 WAL（wal.bin）       │  append-only、SHA-256 ハッシュチェーン
+│                                  │  ← 変更の唯一の監査記録（I-1）
+└──┬─────────────────────────────────┘
+   │  WAL コミット後に libSQL へ書き込み
    ▼
-┌────────────────────────┐
-│  state.db（SQLite）    │  現在状態・スキーマ・B+Tree インデックス
-│                        │  ← 派生物（WAL から再構築可能）
-│                        │  ← 外部ツールで読み取り専用アクセス可
-└──────────┬─────────────┘
+┌────────────────────────────────────┐
+│  libSQL（state.db）               │  SQLite 互換ファイルベースストレージ
+│  ・SQL エンジン                   │  SQL クエリ・スキーマ管理
+│  ・SQLite B+Tree                  │  ← 派生物（Adlaire WAL から再構築可能）
+│  ・SQLite WAL                     │  Phase 2 以降で段階的に内製化（I-11）
+└──────────┬─────────────────────────┘
            │
            ▼
-      署名済み外部チェックポイント（checkpoints/）
-      ← 発行後不変・専用クライアント不要で検証可（I-7）
+      外部チェックポイント（checkpoints/）
+      ← Adlaire WAL シーケンス + ハッシュのみで検証可（I-7、署名なし）
 ```
 
-**不変条件：** `state.db` が破損しても WAL から完全に再構築できる（`--rebuild`）。WAL を失った場合はデータ損失（I-1）。
-
-### 2.3 データモデル
-
-#### 2.3.1 WAL エントリ（永続表現）
-
-WAL エントリが変更の正本。§2.2.2 の WAL バイナリ形式を参照。
-
-#### 2.3.2 レコード（state.db 上の表現）
-
-`state.db` のユーザーテーブルに永続化される現在状態。`__key`, `__state`, `__version`, `__tx_id`, `__ts` の内部列と、ユーザー定義列で構成される（§2.2.1 の内部スキーマ参照）。
-
-#### 2.3.3 イベント型
-
-WAL の Entry Type（§2.2.2）として記録される：
-
-```
-WRITE エントリのペイロード例（JSON）：
-  Created  → {"name": "Alice", ...}
-  Updated  → {"name": "Bob", ...}
-  Deleted  → {"__state": "deleted", "deleted_at": <ts>}
-  Rollback → WAL の ABORT エントリ（ペイロードなし）
-```
+**不変条件：** `state.db` が破損しても Adlaire WAL から完全に再構築できる（`--rebuild`）。Adlaire WAL を失った場合は監査記録が失われる（I-1）。libSQL が SQLite の内部実装を担い、段階的に自前実装に置き換わる（I-11）。
 
 ### 2.2 ストレージ構成（Phase 1：シングルノード）
 
@@ -197,49 +159,29 @@ WRITE エントリのペイロード例（JSON）：
 ```
 adlaire_db/（データディレクトリ）
 ├── .lock                  # プロセスレベル排他ロック（起動時に取得、終了時に解放）
-├── wal.bin                # append-only WAL（変更の唯一の監査記録・I-1）
-├── state.db               # SQLite ファイル（現在状態・スキーマ・B+Tree インデックス・WAL から再構築可能）
+├── wal.bin                # Adlaire 監査 WAL（変更の唯一の監査記録・I-1）
+├── state.db               # libSQL（SQLite）ファイル（現在状態・派生物・WAL から再構築可能）
+├── state.db-wal           # libSQL が管理する SQLite WAL（自動管理・Adlaire が直接操作しない）
 ├── metadata.json          # DB メタデータ（WAL シーケンス番号、チェックポイント基点など）
 └── checkpoints/
-    ├── cp-00001.json      # 署名済み外部チェックポイント（不変・I-7）
-    ├── cp-00001.sig       # Ed25519 署名
-    └── ...
+    └── cp-00001.json      # 外部チェックポイント（Adlaire WAL シーケンス + root_hash、不変・I-7）
 ```
 
 **設計原則：**
-- `wal.bin` が失われたらデータ損失（I-1）
-- `state.db` が失われても WAL から完全再構築できる（`adlaire-db rebuild --data ./mydb`）
-- `state.db` は有効な SQLite 3 ファイルであり、外部ツールから読み取り専用で直接アクセスできる
+- `wal.bin`（Adlaire WAL）が失われたら監査記録が失われる（I-1）
+- `state.db` が失われても Adlaire WAL から完全再構築できる（`adlaire-db rebuild --data ./mydb`）
+- Phase 1 では libSQL クレートのみを使用。B+Tree・SQL は libSQL に委任（I-11）
+- Phase 2 以降で libSQL の内部コンポーネントを自前実装に段階的に置き換える（I-11）
 - 複数シャード・shard_map.json は後回し（→ 1.3.1 参照）
 
-**state.db の内部スキーマ（Adlaire DB が管理する）：**
+**state.db の管理：**
 
-```sql
--- ユーザー定義テーブル（adlaire-db schema create で作成）
-CREATE TABLE users (
-    __key        TEXT PRIMARY KEY,   -- Adlaire DB の KV キー
-    __state      TEXT NOT NULL DEFAULT 'active',  -- 'active' | 'deleted'
-    __version    INTEGER NOT NULL,
-    __tx_id      INTEGER NOT NULL,
-    __ts         INTEGER NOT NULL,   -- Unix ナノ秒
-    -- ユーザー定義列（スキーマ定義に従う）
-    name         TEXT NOT NULL,
-    email        TEXT UNIQUE,
-    age          INTEGER CHECK(age >= 0)
-);
-
--- 内部管理テーブル
-CREATE TABLE __adlaire_schemas (
-    table_name   TEXT PRIMARY KEY,
-    schema_json  TEXT NOT NULL,
-    created_at   INTEGER NOT NULL,
-    wal_seq_at   INTEGER NOT NULL    -- スキーマ作成時の WAL シーケンス
-);
-
-CREATE TABLE __adlaire_meta (
-    key          TEXT PRIMARY KEY,
-    value        TEXT NOT NULL
-);
+```
+state.db（libSQL が管理する SQLite ファイル）
+├── テーブル: records（key, version, tx_id, ts, state, value）
+├── テーブル: record_versions（key, version, tx_id, ts, state, value）  ← MVCC 履歴
+├── テーブル: metadata（global_version, last_wal_seq など）
+└── インデックス: records(key), record_versions(key, version)
 ```
 
 #### 2.2.2 WAL バイナリ形式
@@ -320,10 +262,10 @@ fn recover_on_startup(wal: &mut WalReader) -> Result<RecoverySummary> {
 
 #### 2.2.4 保全異常時の全体ロック（I-3 参照）
 
-WAL 整合性チェック（起動時・コミット完了後）で以下のいずれかを検知した場合：
+Adlaire WAL 整合性チェック（起動時・コミット完了後）で以下のいずれかを検知した場合：
 - CRC32 エラー（ディスクビット腐敗）
 - ハッシュチェーン断絶（`hash` が前エントリの値と連鎖しない）
-- `state.db` と WAL の乖離（`adlaire-db verify` による不一致検出）
+- `state.db` と Adlaire WAL の乖離（`adlaire-db verify` による不一致検出）
 
 DB を **read-only ロック**（新規書き込みを拒否）し、エラーログと終了コード `2` で終了する。自動修復・上書きは行わない。
 
@@ -335,31 +277,151 @@ fn lock_db_on_integrity_failure(reason: IntegrityAnomaly) -> ! {
 }
 ```
 
-#### 2.2.5 署名済み外部チェックポイント
+#### 2.2.5 外部チェックポイント（ハッシュのみ・署名なし）
 
-WAL の任意の地点での状態を第三者が検証できる証明を発行する。
+Adlaire WAL の任意の地点での状態を第三者が検証できる証明を発行する。Ed25519 署名は使用しない（SHA-256 は自前実装・外部クレートなし）。ハッシュチェーンそのものが改ざん証明として機能する。
 
 ```json
 // checkpoints/cp-00001.json
 {
   "checkpoint_seq": 1,
   "wal_sequence_at": 100042,
-  "issued_at": "2026-09-09T12:00:00Z",
+  "issued_at": "2026-09-10T12:00:00Z",
   "key_count": 9823,
-  "root_hash": "SHA-256 of ordered (key, hash) pairs at this WAL sequence",
-  "issuer": "adlaire-db-v2.1",
-  "signature_algorithm": "Ed25519"
+  "root_hash": "SHA-256 of ordered (key, latest_hash) pairs at this WAL sequence",
+  "issuer": "adlaire-db-v3.1"
 }
-// checkpoints/cp-00001.sig  ← Ed25519 署名バイト（hex）
 ```
 
 **検証手順（専用クライアント不要）：**
-1. `cp-NNNNN.json` と `cp-NNNNN.sig` を取得
-2. 公開鍵で `sig` を検証
-3. WAL エクスポート JSONL（`adlaire-db export-audit` 出力）を順に読み、`root_hash` を自分で計算
-4. 計算値と `root_hash` が一致すればチェックポイント時点の整合性が証明される
+1. `cp-NNNNN.json` を取得
+2. WAL エクスポート JSONL（`adlaire-db export-audit` 出力）を順に読み、`root_hash` を自分で計算
+3. 計算値と `root_hash` が一致すればチェックポイント時点の整合性が証明される
+
+### 2.3 データモデル
+
+#### 2.3.1 WAL エントリ（永続表現）
+
+WAL エントリが変更の正本。§2.2.2 の WAL バイナリ形式を参照。
+
+#### 2.3.2 レコード（state.db 上の表現）
+
+`state.db`（libSQL）のテーブルに格納される現在状態。各キーに対してバージョンリストを保持（MVCC・I-10）。
+
+```
+キー "user:123" のバージョンリスト例:
+  v=1, tx=1001, ts=1234567890, state=Active,   value={...}
+  v=2, tx=1045, ts=1234599999, state=Active,   value={...}  ← 最新
+  v=3, tx=1102, ts=1234611111, state=Deleted,  value={__state:deleted,...}
+```
+
+#### 2.3.3 イベント型
+
+WAL の Entry Type（§2.2.2）として記録される：
+
+```
+WRITE エントリのペイロード例：
+  Created  → バイト列（値の生データ）
+  Updated  → バイト列（新しい値）
+  Deleted  → {"__state": "deleted", "deleted_at": <ts>}（論理削除・I-4）
+  Rollback → WAL の ABORT エントリ（ペイロードなし）
+```
 
 **発行タイミング：** `adlaire-db checkpoint --sign <keyfile>` コマンドで手動発行（Phase 1）。
+
+---
+
+### 2.5 抽象レイヤー Trait 定義（I-12）
+
+Phase 2 でサーバー層とコンポーネントの境界を Rust trait として確立する。Phase 3〜5 はこの trait の実装を差し替えるだけでよく、サーバー層・OCC・MVCC のコードは変更しない。
+
+#### 2.5.1 StorageBackend
+
+```rust
+/// B+Tree ストレージへのアクセスを抽象化する。
+/// Phase 2: libSQL（SQLite）実装 → Phase 3: 自前 B+Tree 実装に差し替え。
+pub trait StorageBackend: Send + Sync {
+    /// 指定バージョン時点のキーの値を返す（MVCC 読み取り）。
+    fn get(&self, key: &str, version: u64) -> Result<Option<VersionedValue>>;
+
+    /// 指定バージョン時点の範囲スキャン。
+    fn scan(
+        &self,
+        from: &str,
+        to: &str,
+        version: u64,
+    ) -> Result<Vec<(String, VersionedValue)>>;
+
+    /// コミット済み WriteSet をストレージに反映する（Adlaire WAL への書き込み後に呼ぶ）。
+    fn apply_write_set(&mut self, write_set: &WriteSet, version: u64) -> Result<()>;
+
+    /// Adlaire WAL からストレージを完全再構築する（`--rebuild`）。
+    fn rebuild_from_wal(&mut self, wal: &dyn WalEngine) -> Result<()>;
+}
+```
+
+#### 2.5.2 WalEngine
+
+```rust
+/// Adlaire 監査 WAL の I/O を抽象化する。
+/// Phase 2: wal.bin への直書き実装 → Phase 4: 自前 WAL エンジン実装に差し替え。
+pub trait WalEngine: Send + Sync {
+    /// WAL エントリを追記し fsync する（I-1、ハッシュチェーンは実装側が更新する）。
+    fn append_and_fsync(&mut self, entry: &WalEntry) -> Result<()>;
+
+    /// 最後のチェックポイント以降のエントリをイテレートする（クラッシュリカバリ・検証）。
+    fn scan_from_last_checkpoint(
+        &self,
+    ) -> Result<Box<dyn Iterator<Item = Result<WalEntry>> + '_>>;
+
+    /// チェックポイントを記録する（シーケンス番号と root_hash を永続化）。
+    fn write_checkpoint(&mut self, seq: u64, root_hash: [u8; 32]) -> Result<()>;
+}
+```
+
+#### 2.5.3 SqlEngine
+
+```rust
+/// SQL 解析・実行を抽象化する。
+/// Phase 2: libSQL 実装 → Phase 5: 自前パーサ＋自前エグゼキューター実装に差し替え。
+pub trait SqlEngine: Send + Sync {
+    /// SQL 文を実行し結果を返す。TxContext は OCC の read-version などを含む。
+    fn execute(&mut self, sql: &str, ctx: &TxContext) -> Result<QueryResult>;
+
+    /// SQL 文をパースして PreparedStatement を返す。
+    fn prepare(&self, sql: &str) -> Result<PreparedStatement>;
+}
+```
+
+#### 2.5.4 Database 構造体
+
+サーバー層は `Database` を通じてのみ各コンポーネントと通信する。Phase 3〜5 では `new()` に渡す実装を差し替えるだけでよい。
+
+```rust
+pub struct Database {
+    pub storage: Box<dyn StorageBackend>,
+    pub wal: Box<dyn WalEngine>,
+    pub sql: Box<dyn SqlEngine>,
+}
+
+impl Database {
+    pub fn new(
+        storage: Box<dyn StorageBackend>,
+        wal: Box<dyn WalEngine>,
+        sql: Box<dyn SqlEngine>,
+    ) -> Self {
+        Database { storage, wal, sql }
+    }
+}
+```
+
+**Phase 別の実装マッピング：**
+
+| コンポーネント | Phase 2（初期実装） | Phase 3〜5（差し替え実装） |
+|---|---|---|
+| `StorageBackend` | `LibSqlStorage`（libSQL 経由） | `AdlaireStorage`（自前 B+Tree） |
+| `WalEngine` | `AdlaireWalFile`（wal.bin 直書き） | `AdlaireWalEngine`（自前 WAL エンジン） |
+| `SqlEngine` | `LibSqlEngine`（libSQL） | `AdlaireParser` + `AdlaireExecutor` |
 
 ---
 
@@ -413,148 +475,17 @@ pub fn scan(&self, prefix: Option<&str>) -> Result<Vec<String>>
 
 ---
 
-### 3.2 スキーマ定義 API
+### 3.2 スキーマ定義 API（後回し）
 
-テーブル（= キー名前空間）に型・制約を定義する。スキーマは `state.db` の `__adlaire_schemas` テーブルに保存され、スキーマ変更イベントとして WAL にも記録される。
-
-#### 3.2.1 スキーマ定義ファイル形式（TOML）
-
-```toml
-# schema/users.toml
-[table]
-name = "users"
-
-[[columns]]
-name = "name"
-type = "TEXT"
-nullable = false
-
-[[columns]]
-name = "email"
-type = "TEXT"
-unique = true
-
-[[columns]]
-name = "age"
-type = "INTEGER"
-check = "age >= 0"
-
-[[columns]]
-name = "created_at"
-type = "DATETIME"
-nullable = false
-```
-
-#### 3.2.2 スキーマ管理 CLI
-
-```bash
-# スキーマ作成（DDL として WAL に記録）
-adlaire-db schema create --data ./mydb --file ./schema/users.toml
-
-# スキーマ一覧
-adlaire-db schema list --data ./mydb
-
-# スキーマ確認
-adlaire-db schema show --data ./mydb --table users
-
-# スキーマ変更（ALTER 相当）
-adlaire-db schema alter --data ./mydb --file ./schema/users_v2.toml
-```
-
-#### 3.2.3 Rust API（内部）
-
-```rust
-pub fn create_schema(&mut self, schema: TableSchema) -> Result<()>;
-pub fn get_schema(&self, table: &str) -> Result<Option<TableSchema>>;
-
-pub struct TableSchema {
-    pub name: String,
-    pub columns: Vec<ColumnDef>,
-}
-
-pub struct ColumnDef {
-    pub name: String,
-    pub col_type: ColType,
-    pub nullable: bool,
-    pub unique: bool,
-    pub check: Option<String>,
-}
-
-pub enum ColType { Text, Integer, Real, Boolean, Datetime, Blob }
-```
-
-**スキーマ制約違反時の挙動：**
-- 型不一致 → `SchemaError::TypeMismatch` を返す（WAL 書き込みなし）
-- `NOT NULL` 違反 → `SchemaError::NullViolation`
-- `UNIQUE` 違反 → `SchemaError::UniqueViolation`
-- `CHECK` 違反 → `SchemaError::CheckViolation`
+> **後回し（§1.3.1 参照）**  
+> スキーマ・型・制約は SQL Layer の責務。Phase 1 のコア KV エンジンには含まない。将来の SQL Layer 実装時に定義する。
 
 ---
 
-### 3.3 SQL クエリ API
+### 3.3 SQL クエリ API（後回し）
 
-SQL テキストを TCP 経由で送信し、state.db（SQLite）を直接クエリする。書き込み操作は TX マネージャーを経由して WAL に先行記録する。
-
-#### 3.3.1 対応 SQL 文
-
-| 文 | 経路 | WAL 記録 |
-|----|------|----------|
-| `SELECT` | state.db 直接 | なし |
-| `INSERT INTO` | TX マネージャー → WAL → state.db | あり |
-| `UPDATE` | TX マネージャー → WAL → state.db | あり |
-| `DELETE` | TX マネージャー → WAL → state.db | あり（論理削除に変換・I-4）|
-| `BEGIN` / `COMMIT` / `ROLLBACK` | TX マネージャー | あり |
-
-**非対応（Phase 1 外）：**
-`DROP TABLE`, `ALTER TABLE`（スキーマ変更は `adlaire-db schema alter` CLI で行う）、`JOIN`（§5 参照・後回し）
-
-#### 3.3.2 SQL クエリ例
-
-```sql
--- 読み取り（state.db に直接クエリ）
-SELECT name, email FROM users WHERE age > 20 ORDER BY name LIMIT 10;
-
--- 書き込み（WAL → state.db の順）
-INSERT INTO users (name, email, age) VALUES ('Alice', 'alice@example.com', 30);
-UPDATE users SET email = 'alice2@example.com' WHERE name = 'Alice';
-
--- 論理削除（DELETE は __state = 'deleted' に変換、物理削除は不可）
-DELETE FROM users WHERE name = 'Alice';
--- → 内部的に: UPDATE users SET __state = 'deleted' WHERE name = 'Alice'
-
--- 削除済みレコードは通常のSELECTで除外（デフォルト）
-SELECT * FROM users;               -- __state = 'active' のみ返す
-SELECT * FROM users_including_deleted;  -- 削除済みも含む（ビュー）
-
--- トランザクション
-BEGIN;
-INSERT INTO users (name, email) VALUES ('Bob', 'bob@example.com');
-UPDATE products SET stock = stock - 1 WHERE id = 42;
-COMMIT;
-```
-
-#### 3.3.3 論理削除ビュー
-
-`state.db` には各テーブルに対応する 2 つのビューを自動生成する：
-
-```sql
--- 通常ビュー（削除済みを除外・SELECT のデフォルト対象）
-CREATE VIEW users AS
-  SELECT * FROM __users_raw WHERE __state = 'active';
-
--- 全履歴ビュー（削除済みを含む・監査用）
-CREATE VIEW users_including_deleted AS
-  SELECT * FROM __users_raw;
-```
-
-#### 3.3.4 TCP プロトコルでの SQL 送信
-
-```
-[Command Type: 1B]  0x10 = SQL_QUERY（読み取り）
-                    0x11 = SQL_EXEC（書き込み）
-[SQL Length: 4B]
-[SQL Text: N bytes] # UTF-8 SQL 文
-```
+> **後回し（§1.3.1 参照）**  
+> SQL（SELECT / INSERT / UPDATE / DELETE）は将来の SQL Layer として実装する。Phase 1 は純粋な KV API のみ提供する。SQL Layer は Adlaire DB の Layer API（§3.1 の `layer()` / Range スキャン）の上に構築される。
 
 ---
 
@@ -637,10 +568,9 @@ adlaire-db export-audit --data ./mydb --out ./audit-2026-09-09.tar.gz
 
 ```
 audit-2026-09-09/
-├── wal-export.jsonl        # WAL エントリをすべて JSONL 形式で出力（人間可読）
+├── wal-export.jsonl        # Adlaire WAL エントリをすべて JSONL 形式で出力（人間可読）
 ├── checkpoints/
-│   ├── cp-00001.json       # 署名済みチェックポイント（不変）
-│   └── cp-00001.sig        # Ed25519 署名
+│   └── cp-00001.json       # 外部チェックポイント（不変・署名なし）
 └── VERIFY.md               # 検証手順書（ハッシュ計算式を人間語で説明）
 ```
 
@@ -690,11 +620,11 @@ def verify_chain(wal_jsonl_path):
 
 #### 4.3.4 署名済みチェックポイントによる時点検証
 
-チェックポイントは WAL シーケンス時点のルートハッシュを Ed25519 で署名したもの（I-7：一度発行したら不変）。第三者は WAL なしでも一時点の整合性を検証できる。
+チェックポイントは Adlaire WAL シーケンス時点の root_hash を含む JSON（I-7：一度発行したら不変）。第三者は WAL エクスポートで root_hash を再計算して整合性を検証できる（署名なし・SHA-256 は自前実装）。
 
 ```bash
 # 署名検証（標準ツールで実行可能）
-openssl dgst -verify pubkey.pem -signature cp-00001.sig cp-00001.json
+# root_hash を自前で計算して cp-NNNNN.json の値と比較する（openssl 不要）
 ```
 
 #### 4.3.5 削除の証明
@@ -826,33 +756,86 @@ struct TransactionView {
   2. イベントログファイルに即座に書き込み（Write-Ahead Logging相当）
   3. コミット完了
 
-### 6.2 ロック機構
+### 6.2 OCC + MVCC 並行制御（I-9・I-10）
 
-#### 6.2.1 行レベルロック
+Phase 1 は悲観的ロックを使用しない。読み取りはロックなし、コミット時に競合を検出する楽観的並行制御（OCC）を採用する。
+
+#### 6.2.1 OCC トランザクションフロー
+
+```
+1. begin_transaction()
+   → 現在の global_version を read_version として記録
+   → read_set: HashMap<Key, u64>  // 読んだキーとそのバージョン
+   → write_set: HashMap<Key, Value>
+
+2. get(key)
+   → state.bin から read_version 時点のバージョンを取得（MVCC）
+   → read_set に (key, observed_version) を追加
+
+3. set(key, value) / delete(key)
+   → write_set に記録（まだ WAL に書かない）
+
+4. commit()
+   → read_set の各キーを検証：
+     current_version(key) == observed_version  であれば OK
+     current_version(key) >  observed_version  → 競合 → Abort
+   → 競合なし: write_set を WAL に書き込み → fsync → state.bin 更新
+   → global_version をインクリメント
+
+5. rollback() / Abort
+   → write_set を破棄。WAL に ABORT エントリを記録
+```
+
 ```rust
-pub fn lock_row(&mut self, key: &str, lock_type: LockType) -> Result<()>
+struct Transaction {
+    tx_id: u64,
+    read_version: u64,
+    read_set: HashMap<String, u64>,   // key → observed version
+    write_set: HashMap<String, WriteOp>,
+}
 
-enum LockType {
-    Shared,      // 読取ロック（複数トランザクションが同時保持可能）
-    Exclusive,   // 書込ロック（1つのトランザクションのみ保持）
+enum WriteOp {
+    Set(Vec<u8>),
+    LogicalDelete,
+}
+
+fn commit(tx: Transaction, store: &mut Store) -> Result<()> {
+    // OCC 検証フェーズ
+    for (key, observed_ver) in &tx.read_set {
+        let current_ver = store.current_version(key)?;
+        if current_ver > *observed_ver {
+            return Err(Error::WriteConflict { key: key.clone() });
+        }
+    }
+    // Adlaire WAL 書き込みフェーズ（fsync 後にクライアント応答・I-1）
+    store.adlaire_wal.append_and_fsync(&tx)?;
+    // libSQL（state.db）への書き込み（WAL コミット後）
+    store.apply_to_libsql(&tx)?;
+    store.global_version.fetch_add(1, Ordering::SeqCst);
+    Ok(())
 }
 ```
 
-- **デッドロック対策** ：タイムアウト機構（デフォルト5秒）
+#### 6.2.2 MVCC バージョン管理
 
-#### 6.2.2 ロック管理
 ```rust
-struct LockManager {
-    locks: HashMap<String, LockInfo>,
+struct VersionedValue {
+    version:  u64,
+    tx_id:    u64,
+    ts:       i64,        // Unix ナノ秒
+    state:    RecordState,// Active | Deleted
+    value:    Vec<u8>,
 }
 
-struct LockInfo {
-    key: String,
-    transaction_id: u64,
-    lock_type: LockType,
-    acquired_at: i64,
+// state.db（libSQL）の record_versions テーブルでバージョンリストを保持
+// get(key, read_version) → read_version 以下の最新バージョンを返す
+fn get_at_version(key: &str, read_version: u64) -> Option<VersionedValue> {
+    versions.iter().rev()
+        .find(|v| v.version <= read_version && v.state == RecordState::Active)
 }
 ```
+
+**GC：** 古いバージョンは定期的に回収する。ただし WAL には全バージョンの履歴が残るため、監査目的での復元は常に可能（I-4）。
 
 ---
 
@@ -864,10 +847,11 @@ struct LockInfo {
 
 | ファイル | 種別 | 役割 |
 |----------|------|------|
-| `wal.bin` | **唯一の監査記録（I-1）** | append-only WAL。すべての変更はここに先行記録（fsync 後にクライアント応答）|
-| `state.db` | 派生物（再構築可能） | SQLite ファイル。現在状態・スキーマ・B+Tree インデックスを保持。外部ツールで読み取り可 |
-| `metadata.json` | 管理データ | WAL シーケンス番号、チェックポイント基点、統計 |
-| `checkpoints/*.json+sig` | 不変の証明（I-7） | 署名済み外部チェックポイント（発行後変更不可）|
+| `wal.bin` | **唯一の監査記録（I-1）** | Adlaire append-only WAL。すべての変更はここに先行記録（fsync 後にクライアント応答）|
+| `state.db` | 派生物（再構築可能） | libSQL（SQLite）ファイル。現在状態・MVCC バージョン履歴・インデックスを保持。Phase 2 以降で段階的に内製化（I-11）|
+| `state.db-wal` | libSQL 管理 | libSQL が自動管理する SQLite WAL。Adlaire が直接操作しない |
+| `metadata.json` | 管理データ | Adlaire WAL シーケンス番号、チェックポイント基点、global_version など |
+| `checkpoints/*.json` | 不変の証明（I-7） | 外部チェックポイント（Adlaire WAL シーケンス + root_hash、ハッシュのみで検証可）|
 
 ### 7.2 外部エクスポート形式（外部検証・監査用）
 
@@ -1080,195 +1064,286 @@ fn test_recovery_from_event_log() {
 
 ## 11. 実装フェーズ・スケジュール
 
-> **注：** Phase 1 スコープは §1.3 に確定。JOIN・レプリケーション・分散 TX などは後回し（§1.3.1）。分散実装の詳細は §20 を参照。
+> **注：** 開発はフェーズ単位で進める。Phase 1 は libSQL のフォークから始まる。各フェーズは独立したマイルストーンとして完了条件を定義する。
 
-### 11.1 Phase 1：シングルノード完全実装（6-8週）
+### 11.1 Phase 1：libSQL フォーク
 
-**目標** ：§1.3 の含める項目をすべて動かす。WAL が唯一の正本として確立した状態でリリースできること。
+**目標** ：libSQL をフォークし、Adlaire DB のプロジェクト基盤を確立する。フォーク後のコードベース上で開発を進めるための環境を整える。
 
-| ステップ | 期間 | 内容 |
-|----------|------|------|
-| **Step 1** | Week 1-2 | プロジェクト骨格・WAL 書き込みエンジン<br>・`wal.bin` append-only 書き込み（Magic, CRC32, Entry 構造）<br>・fsync 境界の実装（COMMIT 後に fsync → クライアント応答）<br>・`.lock` によるシングル Writer 強制 |
-| **Step 2** | Week 2-3 | SQLite バックエンド統合・スキーマ定義<br>・`state.db` の初期化（`__adlaire_schemas`, `__adlaire_meta` テーブル）<br>・スキーマ定義 TOML 読み込み・DDL イベントの WAL 記録<br>・ユーザーテーブルと論理削除ビューの自動生成 |
-| **Step 3** | Week 3-4 | クラッシュリカバリ・state.db 再構築<br>・起動時 WAL スキャン（COMMITTED / PENDING / PARTIAL 判定）<br>・WAL から `state.db` を完全再構築（`--rebuild` フラグ）<br>・`adlaire-db verify` CLI コマンド（I-6） |
-| **Step 4** | Week 4-5 | ACID トランザクション・KV API・SQL 書き込み<br>・Begin / Write / Commit / Abort WAL エントリ<br>・複数キー ACID TX<br>・論理削除強制（I-4）<br>・INSERT / UPDATE / DELETE → WAL → state.db の書き込みパス |
-| **Step 5** | Week 5-6 | SQL クエリ・スキーマ制約<br>・SQL パーサー統合（SELECT / WHERE / ORDER BY / GROUP BY / LIMIT）<br>・SELECT → state.db 直接クエリパス<br>・型・NOT NULL・UNIQUE・CHECK 制約の検証（SchemaError 種別）|
-| **Step 6** | Week 6-7 | ハッシュチェーン・外部チェックポイント<br>・レコード単位 SHA-256（I-2 の計算式）<br>・CRC32 不一致・チェーン断絶 → グローバルロック・exit 2（I-3）<br>・Ed25519 署名付き外部チェックポイント生成（I-7）<br>・外部検証 JSONL エクスポート CLI（§4.3） |
-| **Step 7** | Week 7-8 | TCP プロトコル・バックアップ<br>・TCP カスタムプロトコル（KV コマンド + SQL テキスト送信・§18.1）<br>・バックアップ取得・復元後ハッシュチェーン検証 |
-| **Step 8** | Week 8-9 | SQLite 移行・統合テスト<br>・`adlaire-db migrate-sqlite` コマンド（§12）<br>・型付きエクスポート・インポート・検証<br>・DST（`turmoil`、1000 seeds）・統合テスト一式 |
+**作業内容：**
+- libSQL（Turso 公式リポジトリ）を GitHub 上でフォーク
+- Adlaire DB 用の Cargo ワークスペース構成を設定
+  - `adlaire-db/`：Adlaire サーバー層（新規実装）
+  - `libsql/`：フォークした libSQL（サブモジュールまたはワークスペースメンバ）
+- フォークした libSQL がビルド・テスト通過することを確認
+- 開発環境・CI（GitHub Actions）の整備
+- libSQL のコードベースのうち Adlaire が改変する対象コンポーネントを特定・文書化
+  - `sqlite3/`：B+Tree ストレージ層（Phase 3 の改変対象）
+  - `libsql-sys/`：WAL エンジン（Phase 4 の改変対象）
+  - `libsql-parser/`：SQL パーサ（Phase 5 の改変対象）
 
-**Phase 1 完了の定義：**
-- §1.5 の設計不変条件（I-1〜I-8）がすべてテストで証明できる
-- 1000 シード DST が全通過
+**完了条件：**
+- フォークした libSQL が `cargo build` / `cargo test` で通過する
+- Adlaire ワークスペース構成が確立されている
+- 改変対象コンポーネントのマッピング文書が完成している
+- CI が green である
+
+---
+
+### 11.2 Phase 2：Adlaire サーバー層の構築
+
+**目標** ：フォークした libSQL の上に Adlaire 独自の監査・並行制御・ネットワーク層を構築し、動作するサーバーをリリースする。
+
+**作業内容：**
+
+| 項目 | 内容 |
+|------|------|
+| **抽象 trait 定義（先行）** | `StorageBackend` / `WalEngine` / `SqlEngine` trait を §2.5 の通り定義する。libSQL 実装を作る前にまずこれを完成させる（I-12） |
+| `Database` 構造体 | `Box<dyn StorageBackend>` / `Box<dyn WalEngine>` / `Box<dyn SqlEngine>` を保持。サーバー層はここ経由のみ |
+| libSQL 初期実装 | `LibSqlStorage` / `AdlaireWalFile` / `LibSqlEngine` を各 trait の実装として作成 |
+| Adlaire 監査 WAL | `wal.bin` の append-only 実装。SHA-256（自前）+ CRC32（自前）。fsync 境界（I-1） |
+| ハッシュチェーン | WAL エントリ単位の SHA-256（I-2）。CRC32 不一致・チェーン断絶 → グローバルロック・exit 2（I-3） |
+| OCC トランザクション | read-version / read-set / write-set。コミット時 read-set 検証 → WriteConflict Abort（I-9） |
+| MVCC | libSQL の record_versions テーブルを使ったバージョン管理。非ブロッキング読み取り（I-10） |
+| 論理削除強制 | DELETE → 論理削除 SQL 変換（I-4） |
+| クラッシュリカバリ | 起動時 Adlaire WAL スキャン（COMMITTED / PENDING / PARTIAL 判定・I-8）。WAL から state.db 再構築（I-6） |
+| 外部チェックポイント | Adlaire WAL seq + root_hash（I-7）。`adlaire-db verify` CLI |
+| 多クライアント TCP サーバー | `std::net`（外部クレートなし）。SQL コマンドのパススルー |
+| バックアップ | state.db + wal.bin のバックアップ・復元後チェーン検証 |
+| CLI | `export-audit` / `import` / `rebuild` / `verify` |
+
+**完了条件：**
+- `StorageBackend` / `WalEngine` / `SqlEngine` trait が §2.5 の通り定義され、libSQL 実装が通過する
+- サーバー層（OCC・MVCC・TCP）が trait 経由のみでコンポーネントにアクセスし、具体型を参照しない
+- §1.5 の設計不変条件（I-1〜I-12）がすべてテストで証明できる
 - `adlaire-db verify` が正常・改ざんケースで正確に判定する
-- `adlaire-db rebuild` で state.db を WAL から完全再構築できる
-- SQL SELECT / INSERT / UPDATE / DELETE が動く（論理削除強制含む）
-- スキーマ制約（型・NOT NULL・UNIQUE・CHECK）が書き込み時に検証される
-- SQLite DB を型情報付きで Adlaire DB に移行できる
-- state.db を sqlite3 CLI / DB Browser で読み取り専用アクセスできる
+- `adlaire-db rebuild` で `state.db` を Adlaire WAL から完全再構築できる
+- SQL CRUD・論理削除・OCC・MVCC が動作する
+- 外部チェックポイントの `root_hash` を手動で検証できる
 - バックアップ → 復元 → チェーン検証の一連フローが完結する
+- フォーク外の外部クレートがゼロであることを `cargo tree` で確認
+- trait 実装の差し替え（`LibSqlStorage` → ダミースタブ）がサーバー層のコード変更なしに動作することを確認（Phase 3 への準備検証）
 
 ---
 
-### 11.2 Phase 2：レプリケーション（後回し）
+### 11.3 Phase 3：B+Tree 内製化
 
-> **後回し（§1.3.1・§20 参照）**  
-> WAL 正本設計が Phase 1 で確立した後に着手する。詳細設計は §20.5。
+**目標** ：libSQL（SQLite）の B+Tree ストレージ層を自前 Rust 実装に置き換える。
 
----
+**差し込みポイント：`sqlite3_vfs`（SQLite の Virtual File System インターフェース）**
 
-### 11.3 Phase 3：シャーディング（後回し）
+SQLite はすべてのファイル I/O を `sqlite3_vfs` 構造体のポインタ経由で行う。Adlaire VFS を実装し `sqlite3_vfs_register()` で登録すると、SQLite のページャ・B+Tree は Adlaire VFS に委譲される。フォーク内の C コード（`os_unix.c` など）を削除せずに、まず VFS の差し替えだけで動作確認できる。
 
-> **後回し（§1.3.1・§20 参照）**  
-> 詳細設計は §20.6。
-
----
-
-### 11.4 Phase 4：分散トランザクション（後回し）
-
-> **後回し（§1.3.1・§20 参照）**  
-> 詳細設計は §20.7。OCC ベース（2PC は使わない）。
-
----
-
-### 11.5 全体スケジュール
-
-```
-Phase 1 (シングルノード完全実装)：Week 1-9
-  ├─ Step 1：WAL 書き込みエンジン（W1-2）
-  ├─ Step 2：SQLite バックエンド統合・スキーマ定義（W2-3）
-  ├─ Step 3：クラッシュリカバリ・state.db 再構築（W3-4）
-  ├─ Step 4：ACID TX・KV API・SQL 書き込み（W4-5）
-  ├─ Step 5：SQL クエリ・スキーマ制約（W5-6）
-  ├─ Step 6：ハッシュチェーン・外部チェックポイント（W6-7）
-  ├─ Step 7：TCP プロトコル・バックアップ（W7-8）
-  └─ Step 8：SQLite 移行・統合テスト（W8-9）
-
-Phase 2 (レプリケーション)：後回し
-Phase 3 (シャーディング)：後回し
-Phase 4 (分散 TX)：後回し
+```c
+// SQLite VFS の差し込み構造（フォーク内で定義済み）
+static sqlite3_vfs adlaire_vfs = {
+    .iVersion = 3,
+    .szOsFile  = sizeof(AdlaireFile),
+    .mxPathname = 512,
+    .zName     = "adlaire",
+    .xOpen     = adlaire_vfs_open,   // → Rust の自前 B+Tree へ委譲
+    .xRead     = adlaire_vfs_read,
+    .xWrite    = adlaire_vfs_write,
+    .xSync     = adlaire_vfs_sync,   // → Adlaire WAL の fsync 境界に合わせる
+    // ...
+};
 ```
 
+**作業内容：**
+- 自前 B+Tree の実装（ページ管理・挿入・検索・Range スキャン・削除）
+- MVCC バージョンリストの B+Tree リーフノードへの統合
+- `sqlite3_vfs` を実装し Rust 自前 B+Tree へのブリッジを構築（FFI）
+- `sqlite3_vfs_register("adlaire", &adlaire_vfs, 1)` で登録して既存 SQLite パーサ・エグゼキューターはそのまま利用
+- Phase 3 完了後に SQLite デフォルト VFS（`os_unix.c`）をフォークから削除
+- `state.db`（SQLite ページフォーマット）→ 自前ページ管理ファイルへの移行ツール
+
+**完了条件：**
+- 自前 B+Tree + Adlaire VFS が Phase 2 の全テストを通過する
+- SQLite デフォルト VFS への依存がフォーク内で削除されている
+- `adlaire-db rebuild` が自前 B+Tree で動作する
+
 ---
 
-## 12. SQLite 移行・データインポート仕様
+### 11.4 Phase 4：WAL エンジン内製化
 
-Phase 1 の必須機能。Adlaire DB は SQLite をストレージバックエンドとして使用するため、SQLite からの移行は構造的に最もシンプルなパスになる。スキーマ・型・制約は自動的に引き継がれる。
+**目標** ：libSQL（SQLite）の WAL エンジンを自前 Rust 実装に置き換える。`state.db-wal` を廃止し、Adlaire WAL のみでクラッシュリカバリを完結させる（I-1 の完全実現）。
+
+**差し込みポイント：libSQL の `WAL_METHODS` 構造体**
+
+libSQL はすでに WAL を差し替え可能な設計を持つ（`bottomless` レプリケーション WAL の実装例がフォーク内に存在する）。`WAL_METHODS` の各フック関数を実装することで、`xFrame`（WAL エントリ書き込み）と `xCheckpoint`（WAL チェックポイント）を Adlaire WAL に委譲できる。
+
+```rust
+// libSQL WAL_METHODS の Adlaire 実装（フォーク内 Rust コード）
+impl WalMethods for AdlaireWal {
+    // WAL フレームの書き込み → Adlaire wal.bin に fsync（I-1）
+    fn xFrame(&mut self, pages: &[WalPage], commit: bool) -> Result<()> {
+        self.adlaire_wal.append_and_fsync(pages, commit)
+    }
+    // チェックポイント → Adlaire WAL の CHECKPOINT エントリ生成（I-7）
+    fn xCheckpoint(&mut self) -> Result<()> {
+        self.adlaire_wal.write_checkpoint()
+    }
+    // WAL 読み取り → Adlaire WAL から再生（クラッシュリカバリ・I-8）
+    fn xFindFrame(&self, pgno: u32) -> Option<u32> {
+        self.adlaire_wal.find_frame(pgno)
+    }
+}
+```
+
+**作業内容：**
+- `WAL_METHODS` の Adlaire 実装を Rust で記述（フォーク内）
+- `xFrame` フックで Adlaire WAL への先行書き込み + fsync を実現
+- `state.db-wal`（SQLite WAL ファイル）の生成を停止
+- Adlaire WAL のみでクラッシュリカバリが完結することを確認（I-8）
+- フォーク内の SQLite WAL C コード（`wal.c`）を段階的に削除
+
+**完了条件：**
+- `state.db-wal` が生成されなくなる
+- クラッシュリカバリが Adlaire WAL のみで完結する（I-1 の完全実現）
+- Phase 2 の全テストが通過する
 
 ---
 
-### 12.1 移行コマンド仕様
+### 11.5 Phase 5：SQL パーサ内製化（外部依存ゼロ達成）
+
+**目標** ：libSQL の SQL パーサ・エグゼキューターを自前 Rust 実装に置き換え、外部依存ゼロを達成する（I-11 の最終目標）。
+
+**差し込みポイント：`libsql-parser` クレートの入出力境界（AST）**
+
+libSQL はすでに SQLite の C パーサを `libsql-parser`（Rust 製）に置き換えている。この Rust クレートが出力する AST（抽象構文木）の型が差し替え境界となる。自前パーサが同じ AST 型を出力すれば、その下のエグゼキューターをそのまま使いながら段階的に移行できる。エグゼキューターも同様に AST 入力の境界で差し替える。
+
+```
+SQL テキスト
+    │
+    ├─ [Phase 5 前] libsql-parser → AST → libSQL エグゼキューター → 自前 B+Tree
+    │
+    └─ [Phase 5 後] 自前パーサ    → AST → 自前エグゼキューター   → 自前 B+Tree
+                     （同一 AST 型を出力することで段階的に移行可能）
+```
+
+**作業内容：**
+- 自前 SQL パーサの実装（Adlaire が必要とする SQL サブセット：SELECT / INSERT / UPDATE / DELETE / BEGIN / COMMIT / ROLLBACK）
+- `libsql-parser` と同一 AST 型を出力して差し替えを検証
+- 自前クエリエグゼキューターの実装（自前 B+Tree + Adlaire WAL 上で動作）
+- `libsql-parser` クレートをフォークから削除
+- `cargo tree` で外部クレートがゼロになることを確認
+
+**完了条件：**
+- `cargo tree` で外部クレートがゼロ（Rust std のみ）
+- Phase 2 の全テストが通過する
+- SQL CRUD・OCC・MVCC・監査 WAL がすべて自前実装で動作する
+
+---
+
+### 11.6 Phase 6：分散対応（後回し）
+
+> **後回し（§1.3.1 参照）**  
+> Phase 5 完了（外部依存ゼロ達成）後に着手する。レプリケーション → シャーディング → 分散 TX の順。
+
+---
+
+### 11.7 全体スケジュール
+
+```
+Phase 1：libSQL フォーク
+  └─ フォーク・ワークスペース構成・CI 整備・改変対象コンポーネント特定
+
+Phase 2：Adlaire サーバー層の構築
+  ├─ Adlaire 監査 WAL（SHA-256 / CRC32 自前実装）
+  ├─ OCC + MVCC
+  ├─ 論理削除強制・クラッシュリカバリ
+  ├─ ハッシュチェーン・外部チェックポイント
+  ├─ 多クライアント TCP サーバー（Adlaire バイナリプロトコル・§18.1）
+  └─ バックアップ・CLI・統合テスト
+
+Phase 3：B+Tree 内製化
+  ├─ 差し込みポイント：sqlite3_vfs（VFS インターフェース）
+  └─ 自前 Rust B+Tree → adlaire_vfs として登録 → SQLite デフォルト VFS 削除
+
+Phase 4：WAL エンジン内製化
+  ├─ 差し込みポイント：WAL_METHODS（libSQL WAL フック構造体）
+  └─ xFrame / xCheckpoint を Adlaire WAL に委譲 → state.db-wal 廃止
+
+Phase 5：SQL パーサ内製化（外部依存ゼロ達成）
+  ├─ 差し込みポイント：libsql-parser の AST 出力境界
+  └─ 自前パーサ → 同一 AST → 自前エグゼキューター → cargo tree がゼロ
+
+Phase 6：分散対応（Phase 5 完了後）
+  └─ レプリケーション → シャーディング → 分散 TX
+```
+
+---
+
+## 12. データエクスポート・インポート仕様
+
+Adlaire DB のデータを JSONL 形式でエクスポート・インポートする。外部 DB からの移行はアプリケーション側で JSONL に変換してインポートする。
+
+---
+
+### 12.1 コマンド仕様
 
 ```bash
-# 基本移行（SQLite → Adlaire DB）
-# スキーマ（型・制約）を自動抽出して Adlaire DB に適用
-adlaire-db migrate-sqlite \
-  --src ./legacy.db \
-  --data ./mydb \
-  --dry-run         # 実際には書き込まず検証のみ
-
-# 特定テーブルのみ移行
-adlaire-db migrate-sqlite \
-  --src ./legacy.db \
-  --data ./mydb \
-  --tables users,products
-
-# エクスポートのみ（Adlaire DB から型付き JSONL を生成）
+# エクスポート（Adlaire DB → JSONL）
 adlaire-db export \
   --data ./mydb \
-  --format jsonl \
   --out ./export.jsonl
 
-# インポート（型付き JSONL から Adlaire DB へ）
+# インポート（JSONL → Adlaire DB）
 adlaire-db import \
   --data ./mydb \
   --in ./export.jsonl \
   --verify           # インポート後にハッシュチェーン検証を実施
+
+# 監査エクスポート（WAL 全体を検証用 JSONL に変換）
+adlaire-db export-audit \
+  --data ./mydb \
+  --out ./audit.tar.gz
 ```
 
-### 12.2 型付き JSONL フォーマット（エクスポート・インポート共通）
+### 12.2 JSONL フォーマット
 
-各行が 1 レコード。型情報・制約・ハッシュを含む。
+各行が 1 レコード。キーと値のバイト列を含む。
 
 ```json
-{"key":"users:1","schema":{"name":"TEXT NOT NULL","email":"TEXT UNIQUE","age":"INTEGER CHECK(age>=0)","created_at":"DATETIME"},"value":{"name":"Alice","email":"alice@example.com","age":30,"created_at":"2026-01-15T10:00:00Z"},"source_table":"users","source_rowid":1}
-{"key":"users:2","schema":{"name":"TEXT NOT NULL","email":"TEXT UNIQUE","age":"INTEGER CHECK(age>=0)","created_at":"DATETIME"},"value":{"name":"Bob","email":"bob@example.com","age":25,"created_at":"2026-02-01T09:30:00Z"},"source_table":"users","source_rowid":2}
+{"key":"users:1","value_b64":"eyJuYW1lIjoiQWxpY2UiLCAiYWdlIjozMH0=","version":3,"tx_id":1045,"ts":1234599999,"state":"active"}
+{"key":"users:2","value_b64":"eyJuYW1lIjoiQm9iIiwgImFnZSI6MjV9","version":1,"tx_id":1001,"ts":1234567890,"state":"deleted"}
 ```
-
-フィールド定義：
 
 | フィールド | 型 | 説明 |
 |-----------|-----|------|
-| `key` | string | Adlaire DB のキー（`<prefix>:<rowid>` 形式） |
-| `schema` | object | SQLite の列名 → 型定義（`NOT NULL`, `UNIQUE`, `CHECK` 含む） |
-| `value` | object | レコードの実データ |
-| `source_table` | string | 元 SQLite テーブル名 |
-| `source_rowid` | integer | 元 SQLite rowid（検証用） |
+| `key` | string | Adlaire DB のキー |
+| `value_b64` | string | 値のバイト列（base64）|
+| `version` | u64 | MVCC バージョン番号 |
+| `tx_id` | u64 | 書き込んだ TX ID |
+| `ts` | i64 | Unix ナノ秒タイムスタンプ |
+| `state` | string | `active` \| `deleted`（論理削除・I-4）|
 
-### 12.3 型マッピング（SQLite → Adlaire DB）
-
-| SQLite 型 | JSON 型 | 検証ルール |
-|-----------|---------|-----------|
-| `INTEGER` | number (integer) | 整数値であること |
-| `REAL` | number (float) | 浮動小数点値であること |
-| `TEXT` | string | UTF-8 文字列であること |
-| `BLOB` | string (base64) | base64 エンコード |
-| `DATETIME` | string (ISO8601) | `YYYY-MM-DDTHH:MM:SSZ` 形式 |
-| `BOOLEAN` | boolean | `0`/`1` → `false`/`true` 変換 |
-| `NULL` | null | `NOT NULL` 制約違反は移行エラー |
-
-### 12.4 移行処理フロー
+### 12.3 インポート処理フロー
 
 ```
-SQLite DB
+JSONL ファイル
   │
-  ├─ 1. スキーマ読み取り（CREATE TABLE 定義）
-  │       └─ 列名・型・制約（NOT NULL, UNIQUE, CHECK）を抽出
+  ├─ 1. 行ごとにパース（key / value_b64 / state）
   │
-  ├─ 2. レコード全件スキャン（SELECT * FROM <table>）
-  │       ├─ 型変換（§12.3 のマッピングに従う）
-  │       ├─ 制約検証（NOT NULL, CHECK 違反 → エラー停止）
-  │       └─ JSONL 行を生成（§12.2 フォーマット）
+  ├─ 2. Adlaire DB への書き込み
+  │       ├─ ACID TX（バッチ単位）
+  │       ├─ state=deleted のレコードは論理削除として記録（I-4）
+  │       └─ WAL にすべてのレコードを先行記録（I-1）
   │
-  ├─ 3. Adlaire DB への書き込み（--dry-run 時はスキップ）
-  │       ├─ ACID トランザクション（テーブル単位でまとめて TX）
-  │       ├─ 論理削除なし（移行は新規 WRITE のみ）
-  │       └─ WAL にすべてのレコードを記録
-  │
-  └─ 4. 検証（--verify 時）
-          ├─ ハッシュチェーン整合性チェック（全 WAL スキャン）
+  └─ 3. 検証（--verify 時）
+          ├─ ハッシュチェーン整合性チェック
           ├─ レコード件数の一致確認
           └─ サマリーレポート出力
 ```
 
-### 12.5 移行サマリーレポート
-
-```
-=== Adlaire DB Migration Report ===
-Source:  ./legacy.db
-Target:  ./mydb
-Tables:  users (1000 rows), products (450 rows), orders (3200 rows)
-
-Migrated: 4650 records
-Errors:   0
-Warnings: 2 (NULL values coerced in products.description)
-
-Hash chain: VALID (seq 1..4650)
-Duration:   3.2s
-
-Status: SUCCESS
-```
-
-### 12.6 エラーケースと挙動
+### 12.4 エラーケースと挙動
 
 | エラー | 挙動 |
 |--------|------|
-| `NOT NULL` 制約違反 | 移行を即時停止。レコード番号とカラム名を報告 |
-| `CHECK` 制約違反 | 移行を即時停止。違反値を報告 |
-| `UNIQUE` 制約違反（テーブル内） | 移行を即時停止（同一テーブル内重複） |
-| 型変換不能値 | 移行を即時停止。値と期待型を報告 |
+| JSON パースエラー | インポートを即時停止。行番号を報告 |
+| base64 デコードエラー | インポートを即時停止 |
 | WAL 書き込み失敗 | ロールバック（ACID TX） |
-| `--dry-run` 時の検証エラー | 書き込みなし、エラーレポートのみ出力 |
+| `--verify` 時チェーン不一致 | 警告ログ出力。インポートは完了扱い |
 
 ---
 
@@ -1278,33 +1353,29 @@ Status: SUCCESS
 
 ```rust
 pub struct Database {
-    // コア操作
-    pub fn get(&self, key: &str) -> Result<Option<JSON>>;
-    pub fn set(&mut self, key: &str, value: JSON) -> Result<()>;
-    pub fn delete(&mut self, key: &str) -> Result<()>;
-    pub fn scan(&self, prefix: Option<&str>) -> Result<Vec<String>>;
-    
-    // イベント操作
+    // コア KV 操作
+    pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
+    pub fn set(&mut self, key: &str, value: &[u8]) -> Result<()>;
+    pub fn delete(&mut self, key: &str) -> Result<()>;   // 論理削除のみ（I-4）
+    pub fn scan(&self, from: &str, to: &str) -> Result<Vec<(String, Vec<u8>)>>;
+    pub fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>>;
+
+    // MVCC: バージョン指定読み取り
+    pub fn get_at_version(&self, key: &str, version: u64) -> Result<Option<Vec<u8>>>;
+
+    // イベント履歴
     pub fn get_history(&self, key: &str) -> Result<Vec<Event>>;
     pub fn follow_chain(&self) -> Result<bool>;
     pub fn get_events_since(&self, timestamp: i64) -> Result<Vec<Event>>;
-    
-    // JOIN
-    pub fn join(&self, primary_key: &str, specs: Vec<JoinSpec>) -> Result<JSON>;
-    pub fn scalar_join(&self, key: &str, joins: Vec<(&str, &str)>) -> Result<JSON>;
-    
-    // トランザクション
-    pub fn begin_transaction(&mut self) -> TransactionHandle;
-    pub fn commit(&mut self, handle: TransactionHandle) -> Result<()>;
-    pub fn rollback(&mut self, handle: TransactionHandle) -> Result<()>;
-    
-    // ロック
-    pub fn lock_row(&mut self, key: &str, lock_type: LockType) -> Result<()>;
-    pub fn unlock_row(&mut self, key: &str) -> Result<()>;
-    
-    // 永続化
-    pub fn save(&self, path: &str) -> Result<()>;
-    pub fn load(path: &str) -> Result<Self>;
+
+    // OCC トランザクション（I-9）
+    pub fn begin_transaction(&mut self) -> Transaction;
+    pub fn commit(&mut self, tx: Transaction) -> Result<(), TxError>;
+    // TxError::WriteConflict → アプリケーション側でリトライ
+    pub fn rollback(&mut self, tx: Transaction) -> Result<()>;
+
+    // Layer API（キー空間プレフィックス分離）
+    pub fn layer(&self, prefix: &str) -> LayerHandle;
 }
 ```
 
@@ -1652,10 +1723,11 @@ registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"
 │   └── adlaire-db          # バイナリ実行ファイル
 ├── data/
 │   ├── .lock                # プロセス排他ロック
-│   ├── wal.bin              # append-only 監査 WAL（唯一の正本）
-│   ├── state.db             # SQLite 現在状態（WAL から再構築可能）
+│   ├── wal.bin              # Adlaire append-only 監査 WAL（唯一の正本）
+│   ├── state.db             # libSQL（SQLite）ファイル（現在状態・Adlaire WAL から再構築可能）
+│   ├── state.db-wal         # libSQL が自動管理する SQLite WAL
 │   ├── metadata.json        # メタデータ
-│   └── checkpoints/         # 署名済み外部チェックポイント
+│   └── checkpoints/         # 外部チェックポイント（ハッシュのみ）
 ├── logs/
 │   ├── access.log           # アクセスログ
 │   ├── error.log            # エラーログ
@@ -2001,152 +2073,84 @@ scrape_configs:
 
 ## 18. ネットワークインターフェース
 
-**Phase 1 では TCP カスタムプロトコル 1 本のみ。** REST と独自 TCP の同時提供は後回し（→ 1.3.1 参照）。将来的に HTTP REST を追加する場合は別フェーズで検討する。
+**Phase 2 では TCP カスタムプロトコル 1 本のみ。** REST は後回し（§1.3.1 参照）。
 
-Adlaire DB は以下のプロトコルをサポートします：
+### 18.1 TCP（ポート 9876）：Adlaire バイナリプロトコル
 
-### 18.1 TCP（ポート 9876）：カスタムバイナリプロトコル
+外部クレートを一切使わない自前バイナリプロトコル。`std::net::TcpListener` のみで実装する。JSON・MessagePack などの外部ライブラリには依存しない。ペイロードは UTF-8 の SQL テキストで渡す（SQL は libSQL が Phase 2 で提供）。
 
-**用途** ：高パフォーマンス、低レイテンシ通信
-
-#### 18.1.1 プロトコル仕様
+#### 18.1.1 リクエスト形式
 
 ```
-【パケット構造】
-
-┌──────────────────┬─────────────┬──────────────────┐
-│ 4 Bytes (Length) │ 1 Byte (Seq)│   Payload        │
-└──────────────────┴─────────────┴──────────────────┘
-
-- Length: パケット長（ペイロードのみ）
-- Seq: シーケンス番号（リクエスト/レスポンス対応）
-- Payload: JSON または MessagePack形式
+[Magic:   4B] 0x41 0x44 0x4C 0x52  ("ADLR")
+[Version: 1B] 0x01
+[Command: 1B] コマンドバイト（下表）
+[Seq:     4B] リクエストシーケンス番号（u32 big-endian）
+[Length:  4B] ペイロード長（u32 big-endian、0 の場合あり）
+[Payload: NB] SQL テキスト（UTF-8）または空
+[CRC32:   4B] Magic から Payload 末尾までの CRC32（big-endian）
 ```
 
-#### 18.1.2 対応クライアント言語
-
-- Rust
-- Python
-- Node.js / JavaScript
-- Go
-- Java
-- その他（カスタムクライアント実装）
-
-#### 18.1.3 クライアント実装例（Python）
-
-```python
-import socket
-import json
-import struct
-
-class AdlaireDBClient:
-    def __init__(self, host='localhost', port=9876):
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.connect((host, port))
-        self.seq = 0
-    
-    def _send_request(self, command, **kwargs):
-        """リクエスト送信"""
-        self.seq += 1
-        payload = json.dumps({
-            'command': command,
-            'seq': self.seq,
-            **kwargs
-        }).encode('utf-8')
-        
-        # パケット化
-        length = len(payload)
-        packet = struct.pack('!I', length) + struct.pack('!B', self.seq) + payload
-        self.socket.sendall(packet)
-    
-    def _recv_response(self):
-        """レスポンス受信"""
-        # 長さ取得
-        length_data = self.socket.recv(4)
-        length = struct.unpack('!I', length_data)[0]
-        
-        # シーケンス取得
-        seq_data = self.socket.recv(1)
-        
-        # ペイロード取得
-        payload = self.socket.recv(length)
-        return json.loads(payload.decode('utf-8'))
-    
-    def get(self, key):
-        """KV Get"""
-        self._send_request('GET', key=key)
-        return self._recv_response()
-    
-    def set(self, key, value):
-        """KV Set"""
-        self._send_request('SET', key=key, value=value)
-        return self._recv_response()
-    
-    def close(self):
-        self.socket.close()
-
-# 使用例
-client = AdlaireDBClient()
-result = client.get('user:1')
-print(result)
-client.close()
+```
+Command バイト:
+  0x01 = SQL     SQL テキストをそのまま実行（SELECT / INSERT / UPDATE）
+  0x02 = DELETE  SQL DELETE → 論理削除に変換して実行（I-4）
+  0x10 = BEGIN   トランザクション開始
+  0x11 = COMMIT  コミット（Adlaire WAL fsync 完了後に応答・I-1）
+  0x12 = ROLLBACK アボート
+  0x20 = PING    死活確認（Payload なし）
 ```
 
-#### 18.1.4 コマンド仕様
+#### 18.1.2 レスポンス形式
 
-**KV Get**
-```json
-{
-  "command": "GET",
-  "key": "user:1"
-}
+```
+[Magic:   4B] 0x41 0x44 0x4C 0x41  ("ADLA")
+[Version: 1B] 0x01
+[Status:  1B] ステータスバイト（下表）
+[Seq:     4B] 対応するリクエストのシーケンス番号（u32 big-endian）
+[Length:  4B] ペイロード長（u32 big-endian）
+[Payload: NB] 結果 JSONL（行ごとに改行区切り）またはエラーメッセージ（UTF-8）
+[CRC32:   4B] Magic から Payload 末尾までの CRC32（big-endian）
 ```
 
-**KV Set**
-```json
-{
-  "command": "SET",
-  "key": "user:1",
-  "value": {"name": "John", "email": "john@example.com"}
-}
+```
+Status バイト:
+  0x00 = OK              正常完了
+  0x01 = ERROR           サーバーエラー（Payload にメッセージ）
+  0x02 = WRITE_CONFLICT  OCC 競合（アプリ側でリトライ・I-9）
+  0x03 = INTEGRITY_LOCK  保全異常によるロック（I-3、再試行不可）
+  0x04 = PONG            PING への応答
 ```
 
-**KV Delete**
-```json
-{
-  "command": "DELETE",
-  "key": "user:1"
-}
+#### 18.1.3 セッションフロー
+
+```
+クライアント                            サーバー
+    │                                      │
+    ├─ BEGIN（seq=1）─────────────────────►│  TX 開始・read-version 取得（I-9）
+    │◄── OK（seq=1）──────────────────────┤
+    │                                      │
+    ├─ SQL SELECT ...（seq=2）────────────►│  MVCC 読み取り（I-10）
+    │◄── OK + JSONL 結果（seq=2）─────────┤
+    │                                      │
+    ├─ SQL INSERT ...（seq=3）────────────►│  write-set に追加（まだ WAL 書かない）
+    │◄── OK（seq=3）──────────────────────┤
+    │                                      │
+    ├─ COMMIT（seq=4）────────────────────►│  1. read-set 検証（I-9）
+    │                                      │  2. Adlaire WAL append + fsync（I-1）
+    │                                      │  3. libSQL（state.db）更新
+    │◄── OK（seq=4）──────────────────────┤  ← fsync 完了後に応答
+    │                                      │
+    ├─ COMMIT（seq=N）────────────────────►│  ← 競合発生時
+    │◄── WRITE_CONFLICT（seq=N）──────────┤  ← アプリ側でリトライ（I-9）
 ```
 
-**Event Log Append**
-```json
-{
-  "command": "APPEND_EVENT",
-  "key": "order:1",
-  "event": {"action": "created", "timestamp": "2026-09-09T12:00:00Z"}
-}
-```
+#### 18.1.4 実装上の制約
 
-**Event Log Query**
-```json
-{
-  "command": "GET_HISTORY",
-  "key": "order:1",
-  "from": 0,
-  "limit": 100
-}
-```
-
-**JOIN**
-```json
-{
-  "command": "JOIN",
-  "left_key": "user:1",
-  "right_table": "dept",
-  "on": "dept_id"
-}
-```
+- Magic・Version が一致しない接続は即時切断する
+- CRC32 不一致のパケットは即時切断する（再送不可・クライアント側でリトライ）
+- 1 コネクション = 1 TX コンテキスト。コネクション切断時は ROLLBACK 扱い
+- `std::net` のみ使用。非同期ランタイム（tokio 等）は使用しない
 
 ---
 
@@ -2470,7 +2474,7 @@ async fn main() {
 1. サーバー起動時
    ├─ .lock ファイル取得（I-5）
    ├─ wal.bin の末尾スキャン（COMMITTED / PENDING / PARTIAL 判定・I-8）
-   ├─ state.db の存在確認（なければ --rebuild で WAL から再構築）
+   ├─ state.bin の存在確認（なければ --rebuild で WAL から再構築）
    └─ ハッシュチェーン検証（CRC32 / チェーン断絶 → exit 2・I-3）
 
 2. トランザクション実行前
@@ -2479,13 +2483,13 @@ async fn main() {
 
 3. トランザクション完了後（コミット時）
    ├─ WAL COMMIT エントリ書き込み + fsync（I-1）
-   ├─ state.db へ反映（SQLite COMMIT）
+   ├─ state.bin へ反映（B+Tree 更新）
    └─ クライアントへ成功応答
 
 4. 定期チェックポイント
    ├─ WAL CHECKPOINT エントリ書き込み
-   ├─ state.db のインテグリティ確認（adlaire-db verify）
-   └─ 古い WAL エントリの圧縮（state.db が最新なら安全）
+   ├─ state.bin のインテグリティ確認（adlaire-db verify）
+   └─ 古い WAL エントリの圧縮（state.bin が最新なら安全）
 ```
 
 > **注：** 旧アーキテクチャの `metadata.dat`（バイナリ）・`data.kv`・`txlog.dat` ファイル仕様は v2.1 で廃止。現行のファイル仕様は §2.2 を参照。分散フェーズ（Phase 2-4）のストレージ設計は §20 を参照。
@@ -2534,7 +2538,7 @@ async fn main() {
 
 **Phase 1（SQLite B+Tree）：**
 ```
-state.db（SQLite）の B+Tree インデックスを使用
+state.bin（自前 B+Tree）のインデックスを使用
 - メモリ効率：SQLite の page cache 設定に従う（デフォルト 2MB）
 - 対応データサイズ：SQLite の上限（< 281 TB）まで対応
 - 独自インデックス実装は不要（§1.3.1 参照）
@@ -3036,7 +3040,7 @@ FATAL   : サービス停止（起動失敗、致命的障害）
 **テストシナリオ：**
 ```
 1. ファイル破損
-   - state.db を一部上書き
+   - state.bin を一部上書き
    - 起動時の整合性チェック検証
 
 2. ネットワーク遅延
@@ -3095,49 +3099,41 @@ FATAL   : サービス停止（起動失敗、致命的障害）
 
 ### 22.6 決定論的シミュレーションテスト（DST）
 
-FoundationDB は Flow 言語と決定論的シミュレーターにより約 1 兆 CPU 時間分のテストを実施し、Jepsen が「既知の全障害パターンに耐性がある」と評価した。Adlaire-DB の分散フェーズ（Phase 2+）では Rust の `turmoil` クレートを使用して同等のテスト戦略を実装する。
+FoundationDB は Flow 言語と決定論的シミュレーターにより約 1 兆 CPU 時間分のテストを実施し、Jepsen が「既知の全障害パターンに耐性がある」と評価した。Adlaire DB は **自前の決定論的シミュレーター**（外部クレートなし・I-11）を使用して同等のテスト戦略を実装する。
 
 **基本原則：**
-- すべての非決定論的要素（ネットワーク、ディスク I/O、時刻、乱数）をシミュレータが制御する
+- すべての非決定論的要素（ディスク I/O、時刻、乱数）をシミュレータが制御する
 - シード値を固定すると同じ実行シーケンスが再現される（バグの再現が容易）
 - シード値を変えると異なる障害シナリオを網羅できる
 
-**Rust 実装方針（`turmoil` クレート）：**
+**Rust 自前実装方針（外部クレートなし）：**
 ```rust
-// turmoil を使った DST の例（擬似コード）
-#[tokio::test]
-async fn test_distributed_commit_with_network_fault() {
-    let mut sim = turmoil::Builder::new()
-        .simulation_duration(Duration::from_secs(60))
-        .build();
-
-    sim.host("primary", || async {
-        AdlaireNode::new_primary().await.run().await
-    });
-
-    sim.host("replica-a", || async {
-        AdlaireNode::new_replica("primary").await.run().await
-    });
-
-    sim.client("client", async {
-        // ネットワーク分断を注入
-        turmoil::partition("primary", "replica-a");
-
-        // この状態でのコミット動作を検証
-        let result = client.set("key", "value").await;
-        assert!(result.is_ok()); // Primary への書き込みは成功
-
-        // 分断解消
-        turmoil::repair("primary", "replica-a");
-
-        // Replica が追いついたことを確認
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        let replica_val = replica_client.get("key").await;
-        assert_eq!(replica_val, Some("value"));
-    });
-
-    sim.run().unwrap();
+// 自前決定論的シミュレーターの例（擬似コード）
+struct DstSimulator {
+    seed: u64,
+    rng: XorShift64,      // 自前の決定論的 PRNG
+    clock: SimClock,       // 仮想時計（自前）
+    disk: FaultDisk,       // クラッシュ注入可能な自前ディスク抽象
 }
+
+fn test_crash_during_commit(seed: u64) {
+    let mut sim = DstSimulator::new(seed);
+
+    // COMMIT エントリの書き込み中にクラッシュを注入
+    sim.disk.inject_crash_at(CrashPoint::AfterWalWrite);
+
+    let mut db = Database::open_with_disk(sim.disk.clone());
+    let tx = db.begin_transaction();
+    tx.set("key", b"value");
+    let _ = db.commit(tx); // クラッシュにより失敗
+
+    // 再起動後にクラッシュリカバリ（I-8）
+    let db2 = Database::open_with_disk(sim.disk.clone());
+    assert_eq!(db2.get("key"), Ok(None)); // PENDING → ロールバック済み
+}
+
+// CI で 1000 シードを実行
+for seed in 0..1000 { test_crash_during_commit(seed); }
 ```
 
 **テストシナリオ網羅（シード値で制御）：**
@@ -3196,7 +3192,7 @@ async fn test_distributed_commit_with_network_fault() {
 **バックアップポリシー：**
 ```
 日次フルバックアップ：毎日 深夜 2時
-  ├─ 対象：全シャード（metadata.json, state.db, wal.bin）
+  ├─ 対象：全ファイル（metadata.json, state.bin, wal.bin）
   ├─ 保持：7日分
   └─ 検証：チェックサム確認
 
@@ -3220,7 +3216,7 @@ async fn test_distributed_commit_with_network_fault() {
 ```
 1. サーバー起動
 2. ファイル整合性チェック失敗
-3. 自動で前バージョン（shard_0_v1）から復旧
+3. 自動で前バージョン（adlaire_db_backup）から復旧
 4. 操作ログ再実行（wal.bin）
 5. 正常起動
 ```
@@ -3452,7 +3448,7 @@ fn check_permission(api_key: &str, operation: Operation) -> Result<()> {
     └─ data/                    # データディレクトリ（§2.2 参照）
 
 【ファイルレベル権限】
-  metadata.json, state.db, wal.bin
+  metadata.json, state.bin, wal.bin
     ├─ Owner: adlaire-db:adlaire-db
     ├─ Permission: 600 (rw-------)
     └─ 他ユーザー・グループアクセス禁止
@@ -3688,7 +3684,7 @@ IV（初期化ベクトル）：96 ビット（推奨）
 
 【Key Rotation】
   新 Master Key に移行する際：
-    1. 全 state.db を新 Key で復号化
+    1. 全 state.bin を新 Key で復号化
     2. 新 Master Key で再暗号化
     3. メタデータ更新
     4. 旧 Key は 90日間保持後削除
@@ -3698,7 +3694,7 @@ IV（初期化ベクトル）：96 ビット（推奨）
 
 **暗号化対象：**
 ```
-✅ state.db（SQLite 現在状態・スキーマ・インデックス）
+✅ state.bin（自前 B+Tree 現在状態・インデックス）
 ✅ wal.bin（監査 WAL・ハッシュチェーン）
 ⚠️ metadata.json（平文。鍵情報は格納しない設計を推奨）
 ```
@@ -3732,7 +3728,7 @@ fn decrypt_data(ciphertext: &[u8], key: &Key<Aes256Gcm>, iv: &[u8]) -> Result<Ve
 【後回し：データ保存時暗号化実装】
 Phase 1 完了後（Week 10 以降）に着手予定。
 
-  1. state.db の暗号化（SQLCipher または AES-256-GCM でファイル全体を暗号化）
+  1. state.bin の暗号化（AES-256-GCM でファイル全体を暗号化）
   2. wal.bin の暗号化（エントリ単位または全体）
   3. 鍵管理機構実装
   4. Key Rotation 機能
@@ -4152,9 +4148,9 @@ curl http://localhost:9090/api/v1/query?query=memory_usage_percent
 1. サーバーメモリをアップグレード
    現在：4GB → 推奨：8-16GB
 
-2. state.db の SQLite page cache 設定を調整
+2. state.bin の B+Tree ページキャッシュ 設定を調整
    → PRAGMA cache_size = -65536 で 64MB キャッシュ確保
-   → メモリ使用量を抑制（インデックスはディスク上の state.db が保持）
+   → メモリ使用量を抑制（インデックスはディスク上の state.bin が保持）
 
 3. データサイズを分割
    → シャード数を増やす
@@ -4212,7 +4208,7 @@ ls -lh /var/log/adlaire-db/
 # ハッシュチェーン・整合性検証
 adlaire-db verify --data /var/lib/adlaire-db/data
 
-# state.db と WAL の乖離を確認（exit code 2 → 整合性異常）
+# state.bin と WAL の乖離を確認（exit code 2 → 整合性異常）
 adlaire-db verify --data /var/lib/adlaire-db/data --check-state-db
 
 # ファイルシステムチェック
@@ -4221,8 +4217,8 @@ fsck /dev/sda1  # デバイス名は環境に応じて変更
 
 **対応方法：**
 ```
-【Phase 1：state.db 再構築】
-1. state.db を WAL から再構築（破損しても WAL が正本・I-1）
+【Phase 1：state.bin 再構築】
+1. state.bin を WAL から再構築（破損しても WAL が正本・I-1）
    adlaire-db rebuild --data /var/lib/adlaire-db/data
    systemctl restart adlaire-db
 
@@ -4325,79 +4321,134 @@ jq 'select(.duration_ms > 50)' /var/log/adlaire-db/*.json
 
 ## 28. 実装リスク・対策
 
-### 28.1 リスク 1：インデックス永続化（解決済み）
-
-> **v2.1 で解決済み**  
-> SQLite をストレージバックエンドとして採用（`state.db`）したことで、インデックス永続化は SQLite の B+Tree が担う。独自のインデックス永続化実装は不要になった。
-
-**旧懸念（参考）：**
-```
-├─ 1GB 以上のデータでメモリ不足の可能性（→ SQLite がディスク上で管理するため解消）
-├─ カスタム B+Tree 実装コスト（→ SQLite の実績ある実装を利用）
-└─ インデックスと WAL の同期（→ WAL コミット後に state.db へ反映する設計で整合）
-```
-
-**現在のリスク（残存）：**
-```
-├─ SQLite の書き込みロック（WAL モード設定が必要）
-│  → state.db は WAL モード（PRAGMA journal_mode=WAL）で初期化する
-│  → Adlaire DB 自身の WAL（wal.bin）と SQLite の WAL（state.db-wal）が共存する
-│
-└─ state.db の破損リスク
-   → wal.bin から --rebuild で完全再構築できるため影響は限定的（I-1）
-```
-
----
-
-### 28.2 リスク 2：2-Phase Commit 複雑性（Phase 2-4）
+### 28.1 リスク 1：libSQL フォークの乖離管理
 
 **懸念：**
 ```
-├─ Phase 2-4 の 2-Phase Commit は実装難度が高い
-├─ ネットワーク分断時の動作確認が困難
-├─ Quorum 管理でバグが増える可能性
-└─ Phase 4 に到達するまで 6ヶ月以上要する予想
+├─ libSQL 上流がセキュリティパッチ・バグ修正を出した場合に追従が困難になる
+├─ フォーク独自の改変が上流の変更と競合し、マージコストが増大する
+└─ 内製化フェーズが進むほどフォークが独自化し、上流との差分が拡大する
 ```
 
 **対策：**
 ```
-├─ Phase 2-3 で充分なテスト期間確保
-│  ├─ Phase 2（レプリケーション）：3-4週間
-│  │  └─ Master-Replica 間の整合性テスト
-│  │
-│  └─ Phase 3（シャーディング）：3-4週間
-│     └─ 複数ノード間のルーティング検証
-│
-├─ Chaos Engineering で分散環境を徹底テスト
-│  ├─ ネットワーク遅延注入
-│  ├─ ノードクラッシュシミュレーション
-│  ├─ パケットロス注入
-│  └─ 分断検知・復旧テスト
-│
-└─ 分散対応は慎重に段階的実施
-   ├─ Phase 2：単純レプリケーション
-   ├─ Phase 3：読み取り分散（Read-only Replica）
-   └─ Phase 4：書き込み分散（2-Phase Commit）
-      → 各フェーズで 1ヶ月以上のテスト期間
+├─ フォーク開始時点の libSQL バージョンを固定し CHANGELOG に明記
+├─ 上流のセキュリティ CVE は差分を精査してバックポートを判断
+│  → Phase 3 以降で置き換え対象になったコンポーネントは上流追従不要
+├─ 改変箇所を `// ADLAIRE: <理由>` コメントで明示してフォーク差分を管理
+└─ 内製化完了フェーズの対象コンポーネントは上流追従を打ち切ることを
+   設計方針として明記（内製化 = 上流依存の終了）
 ```
 
-**テスト計画：**
+---
+
+### 28.2 リスク 2：VFS / WAL_METHODS の FFI 境界の安全性
+
+**懸念：**
 ```
-【Phase 2 テスト（レプリケーション）】
-- 同期レプリケーション：RPO < 1秒
-- ノード故障時の Failover
-- データ整合性検証
+├─ sqlite3_vfs と WAL_METHODS は C の関数ポインタ構造体。Rust から FFI で
+│  実装する際の unsafe ブロックが増加し、バグがメモリ安全性違反になりうる
+├─ libSQL の C コードと Rust 実装の間の所有権・ライフタイムの境界が曖昧
+└─ VFS/WAL フックのシグネチャがフォーク改変で変わった場合に検知が遅れる
+```
 
-【Phase 3 テスト（シャーディング）】
-- キー分散確認
-- ルーティング動作
-- ホットスポット検査
+**対策：**
+```
+├─ unsafe ブロックを薄いラッパー関数に閉じ込め、安全な Rust API を内側に持つ
+│  → 例: adlaire_vfs_write(file, buf, amt, offset) は unsafe だが、
+│     内部で呼ぶ BTree::write_page(&self, ...) は safe Rust
+├─ cbindgen または手書き bindgen で型チェックを CI に組み込む
+├─ Miri（Rust の UB 検出器）を FFI 境界テストに適用
+└─ VFS/WAL フックのシグネチャを変更したら CI が壊れる形でテストを書く
+```
 
-【Phase 4 テスト（分散トランザクション）】
-- 2-Phase Commit のタイムアウト処理
-- ネットワーク分断検知
-- Quorum ベースの判定
-- リカバリテスト
+---
+
+### 28.3 リスク 3：自前 B+Tree の実装品質（Phase 3）
+
+**懸念：**
+```
+├─ B+Tree のページ管理・分割・マージのバグはデータ破損に直結する
+├─ MVCC バージョンリストとの整合性（Adlaire WAL コミット後に state.db へ反映）
+├─ 大規模データでのページ断片化・パフォーマンス劣化
+└─ クラッシュ時のページ書き込み中断（部分書き込み）
+```
+
+**対策：**
+```
+├─ Adlaire WAL 先行書き込み（state.db の変更前に必ず WAL に記録・I-1）
+│  → state.db が破損しても Adlaire WAL から --rebuild で完全再構築できる
+│
+├─ ページ単位 CRC32（state.db 読み込み時に検証）
+│  → ページ破損を検知したら I-3 のグローバルロックへ
+│
+├─ プロパティベーステスト
+│  → B+Tree の挿入・検索・Range スキャン・削除を大量ランダムデータで検証
+│  → Phase 2（libSQL B+Tree）と Phase 3（自前 B+Tree）の出力を差分テストで比較
+│
+└─ クラッシュ中断シナリオで state.db 破損 → --rebuild が正しく動作することを確認
+```
+
+---
+
+### 28.4 リスク 4：OCC の競合率（高書き込み負荷）
+
+**懸念：**
+```
+├─ 同一キーへの高頻度書き込みで WriteConflict が多発し、リトライが繰り返される
+├─ アプリケーション側のリトライロジックが複雑になる
+└─ 最悪ケース：リトライの無限ループ（活性デッドロック）
+```
+
+**対策：**
+```
+├─ Phase 2 はシングル Writer（I-5）なので WriteConflict は発生しない
+│  → 複数クライアントからの同時 TX はキューイングされる
+│
+├─ Phase 6 以降（マルチ Writer）で競合率モニタリングを追加
+│  → 競合率が高いキーを検出してアプリ層でシャーディングを促す
+│
+└─ リトライ上限を API で明示（デフォルト: 3回、設定可能）
+   → 上限超過は TxError::RetryExhausted として返す
+```
+
+---
+
+### 28.5 リスク 5：段階的内製化のスケジュール滑り
+
+**懸念：**
+```
+├─ SHA-256 / B+Tree / WAL / SQL パーサのすべてを自前実装するのは数年規模
+├─ 内製化フェーズが長引いて Phase 2（サーバー層）の機能が古くなる
+└─ 「外部クレートの方が楽」という誘惑で I-11 が形骸化する
+```
+
+**対策：**
+```
+├─ SHA-256 は RFC 6234 テストベクタ全件を CI で検証（Phase 2 から実施）
+├─ 各内製化フェーズに完了条件を設け、条件を満たすまで次フェーズに進まない
+├─ I-11 を AGENTS.md / CONTRIBUTING.md に明記
+│  → Phase 5 完了後: cargo tree で外部クレートがゼロであることを CI で検証
+└─ 依存追加は設計不変条件の変更扱い（I-11 の改訂が必要）
+```
+
+---
+
+### 28.6 リスク 6：分散設計（Phase 6）
+
+**懸念：**
+```
+├─ OCC の read-set 検証を分散環境で正しく実装するのは困難
+├─ ネットワーク分断時のコミット可否判定
+└─ Phase 6 に到達するまで数年要する予想
+```
+
+**対策：**
+```
+├─ Phase 1 で OCC の単体実装を完全に安定させてから分散化
+├─ Phase 2-4 は FoundationDB の論文・実装を詳細に研究して着手
+│  → §20 の分散実装詳細仕様を Phase 1 完了後に更新
+└─ 各フェーズで 1ヶ月以上の DST + Chaos Engineering テスト期間
 ```
 
 ---
