@@ -1025,47 +1025,104 @@ fn test_recovery_from_event_log() {
 
 ### 11.3 Phase 3：B+Tree 内製化
 
-**目標** ：libSQL（SQLite）の B+Tree ストレージ層を自前 Rust 実装に置き換える。`state.db` のファイル形式を SQLite から自前ページ管理形式へ移行する。
+**目標** ：libSQL（SQLite）の B+Tree ストレージ層を自前 Rust 実装に置き換える。
+
+**差し込みポイント：`sqlite3_vfs`（SQLite の Virtual File System インターフェース）**
+
+SQLite はすべてのファイル I/O を `sqlite3_vfs` 構造体のポインタ経由で行う。Adlaire VFS を実装し `sqlite3_vfs_register()` で登録すると、SQLite のページャ・B+Tree は Adlaire VFS に委譲される。フォーク内の C コード（`os_unix.c` など）を削除せずに、まず VFS の差し替えだけで動作確認できる。
+
+```c
+// SQLite VFS の差し込み構造（フォーク内で定義済み）
+static sqlite3_vfs adlaire_vfs = {
+    .iVersion = 3,
+    .szOsFile  = sizeof(AdlaireFile),
+    .mxPathname = 512,
+    .zName     = "adlaire",
+    .xOpen     = adlaire_vfs_open,   // → Rust の自前 B+Tree へ委譲
+    .xRead     = adlaire_vfs_read,
+    .xWrite    = adlaire_vfs_write,
+    .xSync     = adlaire_vfs_sync,   // → Adlaire WAL の fsync 境界に合わせる
+    // ...
+};
+```
 
 **作業内容：**
 - 自前 B+Tree の実装（ページ管理・挿入・検索・Range スキャン・削除）
 - MVCC バージョンリストの B+Tree リーフノードへの統合
-- libSQL のストレージバックエンドとして自前 B+Tree を接続（libSQL のストレージ抽象化レイヤーに差し込む）
-- `state.db`（SQLite フォーマット）→ 自前ページ管理ファイルへの移行ツール
-- フォーク内の SQLite C コードのうち B+Tree 部分を段階的に削除
+- `sqlite3_vfs` を実装し Rust 自前 B+Tree へのブリッジを構築（FFI）
+- `sqlite3_vfs_register("adlaire", &adlaire_vfs, 1)` で登録して既存 SQLite パーサ・エグゼキューターはそのまま利用
+- Phase 3 完了後に SQLite デフォルト VFS（`os_unix.c`）をフォークから削除
+- `state.db`（SQLite ページフォーマット）→ 自前ページ管理ファイルへの移行ツール
 
 **完了条件：**
-- 自前 B+Tree が Phase 2 の全テストを通過する
-- SQLite B+Tree への依存がフォーク内で削除されている
+- 自前 B+Tree + Adlaire VFS が Phase 2 の全テストを通過する
+- SQLite デフォルト VFS への依存がフォーク内で削除されている
 - `adlaire-db rebuild` が自前 B+Tree で動作する
 
 ---
 
 ### 11.4 Phase 4：WAL エンジン内製化
 
-**目標** ：libSQL（SQLite）の WAL エンジンを自前 Rust 実装に置き換える。`state.db-wal`（SQLite WAL）を廃止し、Adlaire WAL のみでクラッシュリカバリを完結させる。
+**目標** ：libSQL（SQLite）の WAL エンジンを自前 Rust 実装に置き換える。`state.db-wal` を廃止し、Adlaire WAL のみでクラッシュリカバリを完結させる（I-1 の完全実現）。
+
+**差し込みポイント：libSQL の `WAL_METHODS` 構造体**
+
+libSQL はすでに WAL を差し替え可能な設計を持つ（`bottomless` レプリケーション WAL の実装例がフォーク内に存在する）。`WAL_METHODS` の各フック関数を実装することで、`xFrame`（WAL エントリ書き込み）と `xCheckpoint`（WAL チェックポイント）を Adlaire WAL に委譲できる。
+
+```rust
+// libSQL WAL_METHODS の Adlaire 実装（フォーク内 Rust コード）
+impl WalMethods for AdlaireWal {
+    // WAL フレームの書き込み → Adlaire wal.bin に fsync（I-1）
+    fn xFrame(&mut self, pages: &[WalPage], commit: bool) -> Result<()> {
+        self.adlaire_wal.append_and_fsync(pages, commit)
+    }
+    // チェックポイント → Adlaire WAL の CHECKPOINT エントリ生成（I-7）
+    fn xCheckpoint(&mut self) -> Result<()> {
+        self.adlaire_wal.write_checkpoint()
+    }
+    // WAL 読み取り → Adlaire WAL から再生（クラッシュリカバリ・I-8）
+    fn xFindFrame(&self, pgno: u32) -> Option<u32> {
+        self.adlaire_wal.find_frame(pgno)
+    }
+}
+```
 
 **作業内容：**
-- 自前 WAL エンジンの実装（SQLite WAL フォーマット互換は不要。Adlaire WAL 形式に統合）
-- libSQL の WAL 抽象化レイヤーに自前 WAL エンジンを接続
-- `state.db-wal` を廃止。Adlaire WAL が唯一の WAL として機能する（I-1 の完全実現）
-- フォーク内の SQLite WAL C コードを段階的に削除
+- `WAL_METHODS` の Adlaire 実装を Rust で記述（フォーク内）
+- `xFrame` フックで Adlaire WAL への先行書き込み + fsync を実現
+- `state.db-wal`（SQLite WAL ファイル）の生成を停止
+- Adlaire WAL のみでクラッシュリカバリが完結することを確認（I-8）
+- フォーク内の SQLite WAL C コード（`wal.c`）を段階的に削除
 
 **完了条件：**
 - `state.db-wal` が生成されなくなる
-- クラッシュリカバリが Adlaire WAL のみで完結する
+- クラッシュリカバリが Adlaire WAL のみで完結する（I-1 の完全実現）
 - Phase 2 の全テストが通過する
 
 ---
 
 ### 11.5 Phase 5：SQL パーサ内製化（外部依存ゼロ達成）
 
-**目標** ：libSQL の SQL パーサ・エグゼキューターを自前 Rust 実装に置き換える。フォーク内の libSQL 依存を完全に除去し、外部依存ゼロを達成する（I-11 の最終目標）。
+**目標** ：libSQL の SQL パーサ・エグゼキューターを自前 Rust 実装に置き換え、外部依存ゼロを達成する（I-11 の最終目標）。
+
+**差し込みポイント：`libsql-parser` クレートの入出力境界（AST）**
+
+libSQL はすでに SQLite の C パーサを `libsql-parser`（Rust 製）に置き換えている。この Rust クレートが出力する AST（抽象構文木）の型が差し替え境界となる。自前パーサが同じ AST 型を出力すれば、その下のエグゼキューターをそのまま使いながら段階的に移行できる。エグゼキューターも同様に AST 入力の境界で差し替える。
+
+```
+SQL テキスト
+    │
+    ├─ [Phase 5 前] libsql-parser → AST → libSQL エグゼキューター → 自前 B+Tree
+    │
+    └─ [Phase 5 後] 自前パーサ    → AST → 自前エグゼキューター   → 自前 B+Tree
+                     （同一 AST 型を出力することで段階的に移行可能）
+```
 
 **作業内容：**
-- 自前 SQL パーサの実装（Adlaire が必要とする SQL サブセット）
-- 自前クエリエグゼキューターの実装（自前 B+Tree 上で動作）
-- フォーク内の libSQL/SQLite SQL 処理コードを段階的に削除
+- 自前 SQL パーサの実装（Adlaire が必要とする SQL サブセット：SELECT / INSERT / UPDATE / DELETE / BEGIN / COMMIT / ROLLBACK）
+- `libsql-parser` と同一 AST 型を出力して差し替えを検証
+- 自前クエリエグゼキューターの実装（自前 B+Tree + Adlaire WAL 上で動作）
+- `libsql-parser` クレートをフォークから削除
 - `cargo tree` で外部クレートがゼロになることを確認
 
 **完了条件：**
@@ -1086,24 +1143,27 @@ fn test_recovery_from_event_log() {
 
 ```
 Phase 1：libSQL フォーク
-  └─ フォーク・ワークスペース構成・CI 整備・改変対象特定
+  └─ フォーク・ワークスペース構成・CI 整備・改変対象コンポーネント特定
 
 Phase 2：Adlaire サーバー層の構築
   ├─ Adlaire 監査 WAL（SHA-256 / CRC32 自前実装）
   ├─ OCC + MVCC
   ├─ 論理削除強制・クラッシュリカバリ
   ├─ ハッシュチェーン・外部チェックポイント
-  ├─ 多クライアント TCP サーバー
+  ├─ 多クライアント TCP サーバー（Adlaire バイナリプロトコル・§18.1）
   └─ バックアップ・CLI・統合テスト
 
 Phase 3：B+Tree 内製化
-  └─ libSQL の SQLite B+Tree → 自前 Rust B+Tree
+  ├─ 差し込みポイント：sqlite3_vfs（VFS インターフェース）
+  └─ 自前 Rust B+Tree → adlaire_vfs として登録 → SQLite デフォルト VFS 削除
 
 Phase 4：WAL エンジン内製化
-  └─ SQLite WAL → Adlaire WAL に統合（state.db-wal 廃止）
+  ├─ 差し込みポイント：WAL_METHODS（libSQL WAL フック構造体）
+  └─ xFrame / xCheckpoint を Adlaire WAL に委譲 → state.db-wal 廃止
 
 Phase 5：SQL パーサ内製化（外部依存ゼロ達成）
-  └─ libSQL SQL パーサ・エグゼキューター → 自前実装
+  ├─ 差し込みポイント：libsql-parser の AST 出力境界
+  └─ 自前パーサ → 同一 AST → 自前エグゼキューター → cargo tree がゼロ
 
 Phase 6：分散対応（Phase 5 完了後）
   └─ レプリケーション → シャーディング → 分散 TX
@@ -1910,152 +1970,84 @@ scrape_configs:
 
 ## 18. ネットワークインターフェース
 
-**Phase 1 では TCP カスタムプロトコル 1 本のみ。** REST と独自 TCP の同時提供は後回し（→ 1.3.1 参照）。将来的に HTTP REST を追加する場合は別フェーズで検討する。
+**Phase 2 では TCP カスタムプロトコル 1 本のみ。** REST は後回し（§1.3.1 参照）。
 
-Adlaire DB は以下のプロトコルをサポートします：
+### 18.1 TCP（ポート 9876）：Adlaire バイナリプロトコル
 
-### 18.1 TCP（ポート 9876）：カスタムバイナリプロトコル
+外部クレートを一切使わない自前バイナリプロトコル。`std::net::TcpListener` のみで実装する。JSON・MessagePack などの外部ライブラリには依存しない。ペイロードは UTF-8 の SQL テキストで渡す（SQL は libSQL が Phase 2 で提供）。
 
-**用途** ：高パフォーマンス、低レイテンシ通信
-
-#### 18.1.1 プロトコル仕様
+#### 18.1.1 リクエスト形式
 
 ```
-【パケット構造】
-
-┌──────────────────┬─────────────┬──────────────────┐
-│ 4 Bytes (Length) │ 1 Byte (Seq)│   Payload        │
-└──────────────────┴─────────────┴──────────────────┘
-
-- Length: パケット長（ペイロードのみ）
-- Seq: シーケンス番号（リクエスト/レスポンス対応）
-- Payload: JSON または MessagePack形式
+[Magic:   4B] 0x41 0x44 0x4C 0x52  ("ADLR")
+[Version: 1B] 0x01
+[Command: 1B] コマンドバイト（下表）
+[Seq:     4B] リクエストシーケンス番号（u32 big-endian）
+[Length:  4B] ペイロード長（u32 big-endian、0 の場合あり）
+[Payload: NB] SQL テキスト（UTF-8）または空
+[CRC32:   4B] Magic から Payload 末尾までの CRC32（big-endian）
 ```
 
-#### 18.1.2 対応クライアント言語
-
-- Rust
-- Python
-- Node.js / JavaScript
-- Go
-- Java
-- その他（カスタムクライアント実装）
-
-#### 18.1.3 クライアント実装例（Python）
-
-```python
-import socket
-import json
-import struct
-
-class AdlaireDBClient:
-    def __init__(self, host='localhost', port=9876):
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.socket.connect((host, port))
-        self.seq = 0
-    
-    def _send_request(self, command, **kwargs):
-        """リクエスト送信"""
-        self.seq += 1
-        payload = json.dumps({
-            'command': command,
-            'seq': self.seq,
-            **kwargs
-        }).encode('utf-8')
-        
-        # パケット化
-        length = len(payload)
-        packet = struct.pack('!I', length) + struct.pack('!B', self.seq) + payload
-        self.socket.sendall(packet)
-    
-    def _recv_response(self):
-        """レスポンス受信"""
-        # 長さ取得
-        length_data = self.socket.recv(4)
-        length = struct.unpack('!I', length_data)[0]
-        
-        # シーケンス取得
-        seq_data = self.socket.recv(1)
-        
-        # ペイロード取得
-        payload = self.socket.recv(length)
-        return json.loads(payload.decode('utf-8'))
-    
-    def get(self, key):
-        """KV Get"""
-        self._send_request('GET', key=key)
-        return self._recv_response()
-    
-    def set(self, key, value):
-        """KV Set"""
-        self._send_request('SET', key=key, value=value)
-        return self._recv_response()
-    
-    def close(self):
-        self.socket.close()
-
-# 使用例
-client = AdlaireDBClient()
-result = client.get('user:1')
-print(result)
-client.close()
+```
+Command バイト:
+  0x01 = SQL     SQL テキストをそのまま実行（SELECT / INSERT / UPDATE）
+  0x02 = DELETE  SQL DELETE → 論理削除に変換して実行（I-4）
+  0x10 = BEGIN   トランザクション開始
+  0x11 = COMMIT  コミット（Adlaire WAL fsync 完了後に応答・I-1）
+  0x12 = ROLLBACK アボート
+  0x20 = PING    死活確認（Payload なし）
 ```
 
-#### 18.1.4 コマンド仕様
+#### 18.1.2 レスポンス形式
 
-**KV Get**
-```json
-{
-  "command": "GET",
-  "key": "user:1"
-}
+```
+[Magic:   4B] 0x41 0x44 0x4C 0x41  ("ADLA")
+[Version: 1B] 0x01
+[Status:  1B] ステータスバイト（下表）
+[Seq:     4B] 対応するリクエストのシーケンス番号（u32 big-endian）
+[Length:  4B] ペイロード長（u32 big-endian）
+[Payload: NB] 結果 JSONL（行ごとに改行区切り）またはエラーメッセージ（UTF-8）
+[CRC32:   4B] Magic から Payload 末尾までの CRC32（big-endian）
 ```
 
-**KV Set**
-```json
-{
-  "command": "SET",
-  "key": "user:1",
-  "value": {"name": "John", "email": "john@example.com"}
-}
+```
+Status バイト:
+  0x00 = OK              正常完了
+  0x01 = ERROR           サーバーエラー（Payload にメッセージ）
+  0x02 = WRITE_CONFLICT  OCC 競合（アプリ側でリトライ・I-9）
+  0x03 = INTEGRITY_LOCK  保全異常によるロック（I-3、再試行不可）
+  0x04 = PONG            PING への応答
 ```
 
-**KV Delete**
-```json
-{
-  "command": "DELETE",
-  "key": "user:1"
-}
+#### 18.1.3 セッションフロー
+
+```
+クライアント                            サーバー
+    │                                      │
+    ├─ BEGIN（seq=1）─────────────────────►│  TX 開始・read-version 取得（I-9）
+    │◄── OK（seq=1）──────────────────────┤
+    │                                      │
+    ├─ SQL SELECT ...（seq=2）────────────►│  MVCC 読み取り（I-10）
+    │◄── OK + JSONL 結果（seq=2）─────────┤
+    │                                      │
+    ├─ SQL INSERT ...（seq=3）────────────►│  write-set に追加（まだ WAL 書かない）
+    │◄── OK（seq=3）──────────────────────┤
+    │                                      │
+    ├─ COMMIT（seq=4）────────────────────►│  1. read-set 検証（I-9）
+    │                                      │  2. Adlaire WAL append + fsync（I-1）
+    │                                      │  3. libSQL（state.db）更新
+    │◄── OK（seq=4）──────────────────────┤  ← fsync 完了後に応答
+    │                                      │
+    ├─ COMMIT（seq=N）────────────────────►│  ← 競合発生時
+    │◄── WRITE_CONFLICT（seq=N）──────────┤  ← アプリ側でリトライ（I-9）
 ```
 
-**Event Log Append**
-```json
-{
-  "command": "APPEND_EVENT",
-  "key": "order:1",
-  "event": {"action": "created", "timestamp": "2026-09-09T12:00:00Z"}
-}
-```
+#### 18.1.4 実装上の制約
 
-**Event Log Query**
-```json
-{
-  "command": "GET_HISTORY",
-  "key": "order:1",
-  "from": 0,
-  "limit": 100
-}
-```
-
-**JOIN**
-```json
-{
-  "command": "JOIN",
-  "left_key": "user:1",
-  "right_table": "dept",
-  "on": "dept_id"
-}
-```
+- Magic・Version が一致しない接続は即時切断する
+- CRC32 不一致のパケットは即時切断する（再送不可・クライアント側でリトライ）
+- 1 コネクション = 1 TX コンテキスト。コネクション切断時は ROLLBACK 扱い
+- `std::net` のみ使用。非同期ランタイム（tokio 等）は使用しない
 
 ---
 
@@ -4226,35 +4218,77 @@ jq 'select(.duration_ms > 50)' /var/log/adlaire-db/*.json
 
 ## 28. 実装リスク・対策
 
-### 28.1 リスク 1：自前 B+Tree の実装品質
+### 28.1 リスク 1：libSQL フォークの乖離管理
+
+**懸念：**
+```
+├─ libSQL 上流がセキュリティパッチ・バグ修正を出した場合に追従が困難になる
+├─ フォーク独自の改変が上流の変更と競合し、マージコストが増大する
+└─ 内製化フェーズが進むほどフォークが独自化し、上流との差分が拡大する
+```
+
+**対策：**
+```
+├─ フォーク開始時点の libSQL バージョンを固定し CHANGELOG に明記
+├─ 上流のセキュリティ CVE は差分を精査してバックポートを判断
+│  → Phase 3 以降で置き換え対象になったコンポーネントは上流追従不要
+├─ 改変箇所を `// ADLAIRE: <理由>` コメントで明示してフォーク差分を管理
+└─ 内製化完了フェーズの対象コンポーネントは上流追従を打ち切ることを
+   設計方針として明記（内製化 = 上流依存の終了）
+```
+
+---
+
+### 28.2 リスク 2：VFS / WAL_METHODS の FFI 境界の安全性
+
+**懸念：**
+```
+├─ sqlite3_vfs と WAL_METHODS は C の関数ポインタ構造体。Rust から FFI で
+│  実装する際の unsafe ブロックが増加し、バグがメモリ安全性違反になりうる
+├─ libSQL の C コードと Rust 実装の間の所有権・ライフタイムの境界が曖昧
+└─ VFS/WAL フックのシグネチャがフォーク改変で変わった場合に検知が遅れる
+```
+
+**対策：**
+```
+├─ unsafe ブロックを薄いラッパー関数に閉じ込め、安全な Rust API を内側に持つ
+│  → 例: adlaire_vfs_write(file, buf, amt, offset) は unsafe だが、
+│     内部で呼ぶ BTree::write_page(&self, ...) は safe Rust
+├─ cbindgen または手書き bindgen で型チェックを CI に組み込む
+├─ Miri（Rust の UB 検出器）を FFI 境界テストに適用
+└─ VFS/WAL フックのシグネチャを変更したら CI が壊れる形でテストを書く
+```
+
+---
+
+### 28.3 リスク 3：自前 B+Tree の実装品質（Phase 3）
 
 **懸念：**
 ```
 ├─ B+Tree のページ管理・分割・マージのバグはデータ破損に直結する
-├─ MVCC バージョンリストとの整合性（WAL コミット後に state.bin へ反映）
+├─ MVCC バージョンリストとの整合性（Adlaire WAL コミット後に state.db へ反映）
 ├─ 大規模データでのページ断片化・パフォーマンス劣化
 └─ クラッシュ時のページ書き込み中断（部分書き込み）
 ```
 
 **対策：**
 ```
-├─ WAL 先行書き込み（state.bin の変更前に必ず WAL に記録・I-1）
-│  → state.bin が破損しても WAL から --rebuild で完全再構築できる
+├─ Adlaire WAL 先行書き込み（state.db の変更前に必ず WAL に記録・I-1）
+│  → state.db が破損しても Adlaire WAL から --rebuild で完全再構築できる
 │
-├─ ページ単位 CRC32（state.bin 読み込み時に検証）
+├─ ページ単位 CRC32（state.db 読み込み時に検証）
 │  → ページ破損を検知したら I-3 のグローバルロックへ
 │
 ├─ プロパティベーステスト
 │  → B+Tree の挿入・検索・Range スキャン・削除を大量ランダムデータで検証
-│  → ソート順保証・キー不変性をすべてのオペレーション後に検証
+│  → Phase 2（libSQL B+Tree）と Phase 3（自前 B+Tree）の出力を差分テストで比較
 │
-└─ DST での耐障害性検証（§11.1 Step 7）
-   → クラッシュ中断シナリオで state.bin 破損 → --rebuild が正しく動作することを確認
+└─ クラッシュ中断シナリオで state.db 破損 → --rebuild が正しく動作することを確認
 ```
 
 ---
 
-### 28.2 リスク 2：OCC の競合率（高書き込み負荷）
+### 28.4 リスク 4：OCC の競合率（高書き込み負荷）
 
 **懸念：**
 ```
@@ -4265,10 +4299,10 @@ jq 'select(.duration_ms > 50)' /var/log/adlaire-db/*.json
 
 **対策：**
 ```
-├─ Phase 1 はシングル Writer（I-5）なので WriteConflict は発生しない
+├─ Phase 2 はシングル Writer（I-5）なので WriteConflict は発生しない
 │  → 複数クライアントからの同時 TX はキューイングされる
 │
-├─ Phase 2 以降（マルチ Writer）で競合率モニタリングを追加
+├─ Phase 6 以降（マルチ Writer）で競合率モニタリングを追加
 │  → 競合率が高いキーを検出してアプリ層でシャーディングを促す
 │
 └─ リトライ上限を API で明示（デフォルト: 3回、設定可能）
@@ -4277,33 +4311,33 @@ jq 'select(.duration_ms > 50)' /var/log/adlaire-db/*.json
 
 ---
 
-### 28.3 リスク 3：依存ゼロ制約の維持（I-11）
+### 28.5 リスク 5：段階的内製化のスケジュール滑り
 
 **懸念：**
 ```
-├─ SHA-256 自前実装のバグ → ハッシュチェーンが偽の整合性を示す
-├─ B+Tree 実装コストが予想を超えてスケジュールが滑る
-└─ 将来のメンテナーが「外部クレートの方が楽」と制約を崩す
+├─ SHA-256 / B+Tree / WAL / SQL パーサのすべてを自前実装するのは数年規模
+├─ 内製化フェーズが長引いて Phase 2（サーバー層）の機能が古くなる
+└─ 「外部クレートの方が楽」という誘惑で I-11 が形骸化する
 ```
 
 **対策：**
 ```
-├─ SHA-256 は RFC 6234 テストベクタ全件を CI で検証
-├─ B+Tree はプロパティベーステスト + DST で品質担保
+├─ SHA-256 は RFC 6234 テストベクタ全件を CI で検証（Phase 2 から実施）
+├─ 各内製化フェーズに完了条件を設け、条件を満たすまで次フェーズに進まない
 ├─ I-11 を AGENTS.md / CONTRIBUTING.md に明記
-│  → CI で cargo tree | grep -v "^adlaire-db" が空であることを検証
+│  → Phase 5 完了後: cargo tree で外部クレートがゼロであることを CI で検証
 └─ 依存追加は設計不変条件の変更扱い（I-11 の改訂が必要）
 ```
 
 ---
 
-### 28.4 リスク 4：分散設計（Phase 2-4）
+### 28.6 リスク 6：分散設計（Phase 6）
 
 **懸念：**
 ```
 ├─ OCC の read-set 検証を分散環境で正しく実装するのは困難
 ├─ ネットワーク分断時のコミット可否判定
-└─ Phase 4 に到達するまで 6ヶ月以上要する予想
+└─ Phase 6 に到達するまで数年要する予想
 ```
 
 **対策：**
