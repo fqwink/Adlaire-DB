@@ -229,19 +229,30 @@ SUBCOMMANDS:
 
 ```toml
 [server]
-port       = 8080
-admin_port = 8081
-log_level  = "info"
+port       = 8080          # HTTP API ポート
+admin_port = 8081          # 管理 API ポート
+log_level  = "info"        # trace / debug / info / warn / error
+log_file   = ""            # 空 = stdout。パス指定でファイル出力
 
 [auth]
 jwt_secret      = ""       # 空文字列 = 認証無効（開発用）
-jwt_secret_file = ""       # ファイルから読む場合はこちら
+jwt_secret_file = ""       # ファイルから読む場合はこちら（jwt_secret より優先）
+
+[admin]
+auth_token = ""            # 管理 API 認証トークン（空 = 認証無効）
+                           # 本番では必ず設定する
 
 [storage]
 # data-dir は CLI フラグで指定（config.toml に書かない）
+busy_timeout_ms      = 5000     # WAL ロック待機タイムアウト（ミリ秒）
+wal_checkpoint_pages = 1000     # 自動チェックポイントのページ閾値
+wal_checkpoint_mode  = "PASSIVE"  # PASSIVE / FULL / RESTART
+synchronous          = "NORMAL"   # OFF は非サポート
 ```
 
-CLI フラグは config.toml を上書きする（フラグ > 設定ファイル > デフォルト値）。
+優先順位：CLI フラグ > 設定ファイル > デフォルト値。
+
+`jwt_secret` と `jwt_secret_file` を両方指定した場合は `jwt_secret_file` を優先する。
 
 ---
 
@@ -484,13 +495,22 @@ hrana WebSocket プロトコルに準拠する。libSQL クライアント SDK �
 
 管理 API は独立したポート（デフォルト 8081）で提供する。外部に公開しないことを推奨する。
 
+#### 管理 API 認証
+
+管理ポートへのすべてのリクエストに `Authorization: Bearer <admin-token>` を要求する。
+
+- `admin-token` は config.toml の `[admin] auth_token` または `--admin-auth-token` フラグで設定する
+- 未設定時は認証を無効化する（開発・ローカル用。本番では必ず設定すること）
+- 認証失敗時: `401 {"error":"unauthorized","code":"AUTH_REQUIRED"}`
+- 管理トークンは JWT ではなく任意の文字列で良い（内部的には Bearer 文字列の完全一致で検証）
+
 #### DB 管理（Phase 2）
 
 ```
 GET    /admin/v1/databases               DB 一覧
 POST   /admin/v1/databases               DB 作成
-DELETE /admin/v1/databases/{name}        DB 削除
 GET    /admin/v1/databases/{name}        DB 情報取得
+DELETE /admin/v1/databases/{name}        DB 削除
 ```
 
 **POST /admin/v1/databases リクエスト：**
@@ -499,7 +519,16 @@ GET    /admin/v1/databases/{name}        DB 情報取得
 { "name": "my-db" }
 ```
 
-**GET /admin/v1/databases レスポンス：**
+**POST /admin/v1/databases レスポンス（201 Created）：**
+
+```json
+{
+  "name": "my-db",
+  "created_at": "2026-09-10T12:00:00Z"
+}
+```
+
+**GET /admin/v1/databases レスポンス（200 OK）：**
 
 ```json
 {
@@ -513,12 +542,31 @@ GET    /admin/v1/databases/{name}        DB 情報取得
 }
 ```
 
+**GET /admin/v1/databases/{name} レスポンス（200 OK）：**
+
+```json
+{
+  "name": "my-db",
+  "created_at": "2026-09-10T12:00:00Z",
+  "size_bytes": 4096
+}
+```
+
+**DELETE /admin/v1/databases/{name} レスポンス：** `204 No Content`（ボディなし）
+
+DB 名バリデーション規則：
+
+- 正規表現: `^[a-zA-Z0-9_-]{1,127}$`
+- パストラバーサル文字（`/` `.` `..`）は不可
+- 予約語：`meta`・`admin` は使用不可
+
 #### トークン管理（Phase 2）
 
 ```
 POST   /admin/v1/tokens          トークン発行
-DELETE /admin/v1/tokens/{id}     トークン失効
 GET    /admin/v1/tokens          発行済みトークン一覧
+GET    /admin/v1/tokens/{id}     トークン詳細
+DELETE /admin/v1/tokens/{id}     トークン失効（revoke）
 ```
 
 **POST /admin/v1/tokens リクエスト：**
@@ -526,19 +574,46 @@ GET    /admin/v1/tokens          発行済みトークン一覧
 ```json
 {
   "access": "rw",
-  "expiry_seconds": 2592000
+  "expiry": "30d"
 }
 ```
 
-**レスポンス：**
+`expiry` フォーマット: `<数値><単位>` 形式。単位は `s`（秒）・`m`（分）・`h`（時間）・`d`（日）。省略時は無期限（JWT に `exp` クレームを含めない）。
+
+**POST /admin/v1/tokens レスポンス（201 Created）：**
 
 ```json
 {
-  "token_id": "tok_abc123",
-  "jwt": "eyJ...",
+  "id": "tok_abc123",
+  "token": "eyJ...",
+  "access": "rw",
+  "created_at": "2026-09-10T12:00:00Z",
   "expires_at": "2026-10-10T12:00:00Z"
 }
 ```
+
+`token` フィールドはこのレスポンスでのみ返す。以降の GET では含まない。
+
+**GET /admin/v1/tokens レスポンス（200 OK）：**
+
+```json
+{
+  "tokens": [
+    {
+      "id": "tok_abc123",
+      "access": "rw",
+      "created_at": "2026-09-10T12:00:00Z",
+      "expires_at": "2026-10-10T12:00:00Z",
+      "revoked": false,
+      "revoked_at": null
+    }
+  ]
+}
+```
+
+**GET /admin/v1/tokens/{id} レスポンス（200 OK）：** 上記リスト要素と同形式（単一オブジェクト）。
+
+**DELETE /admin/v1/tokens/{id} レスポンス：** `204 No Content`（ボディなし）。`tokens.json` の `revoked` を `true` に更新し、`revoked_at` に失効日時を記録する。既に失効済みの場合も `204` を返す（冪等）。
 
 ---
 
