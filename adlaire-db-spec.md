@@ -1293,13 +1293,152 @@ TC-2-6: データディレクトリ永続化（マルチ DB）
 
 **目標**：Turso のインタラクティブトランザクション・埋め込みレプリカが動作する
 
-- WebSocket エンドポイント `/v3/baton`（hrana-ws プロトコル）
-- インタラクティブトランザクション（`BEGIN` / `COMMIT` / `ROLLBACK`）
-- 埋め込みレプリカ同期プロトコル対応
+#### hrana-ws v3 プロトコル概要
 
-**完了条件：**
-- libSQL TypeScript SDK の `db.transaction()` が動作する
-- embedded replica が Adlaire DB と同期できる
+hrana-ws は libSQL / Turso の WebSocket ワイヤプロトコル。HTTP の hrana-http v2 と異なり、ステートフルな接続上でインタラクティブトランザクションを実現する。
+
+参照仕様: [libSQL/sqld/docs/HRANA_3_SPEC.md](https://github.com/tursodatabase/libsql/blob/main/libsql-server/docs/HRANA_3_SPEC.md)
+
+#### エンドポイント
+
+```
+ws://host:8080/v3/baton      ← hrana-ws v3
+wss://host:8080/v3/baton     ← TLS 経由（リバースプロキシ）
+```
+
+#### 接続フロー
+
+```
+Client                          Server
+  |                               |
+  |── WebSocket Upgrade ─────────>|
+  |<─ 101 Switching Protocols ───|
+  |                               |
+  |── ClientMsg: hello ──────────>|  jwt: "<JWT>"
+  |<─ ServerMsg: hello ──────────|  OK or error
+  |                               |
+  |── ClientMsg: request ────────>|  request_id, stream_id, body
+  |<─ ServerMsg: response_ok ────|  request_id, result
+  |    or response_error          |
+  |                               |
+  |── ClientMsg: close_stream ──>|
+  |── WebSocket Close ───────────>|
+```
+
+#### メッセージ型
+
+**ClientMsg（クライアント→サーバー）：**
+
+| type | 説明 |
+|------|------|
+| `hello` | 接続開始。`jwt` フィールドで認証 |
+| `request` | stream_id と body を持つリクエスト |
+| `close_stream` | ストリームのクローズ |
+
+**request body の種類：**
+
+| type | 説明 |
+|------|------|
+| `open_stream` | 新規ストリームを開く |
+| `close_stream` | ストリームを閉じる |
+| `execute` | 単一 SQL 文を実行（hrana-http の execute と同形式）|
+| `batch` | 複数 SQL 文をバッチ実行 |
+| `sequence` | テキスト形式の複数 SQL 文を順序実行 |
+| `describe` | SQL 文のパラメータ・カラム情報を返す |
+| `store_sql` / `close_sql` | SQL テキストを ID でキャッシュ（再利用） |
+
+**ServerMsg（サーバー→クライアント）：**
+
+| type | 説明 |
+|------|------|
+| `hello_ok` | 認証成功 |
+| `hello_error` | 認証失敗 |
+| `response_ok` | リクエスト成功。request_id + result |
+| `response_error` | リクエスト失敗。request_id + error |
+
+#### インタラクティブトランザクション
+
+ストリーム上でトランザクション状態を保持する。
+
+```
+open_stream(stream_id=1)
+execute(stream_id=1, sql="BEGIN")
+execute(stream_id=1, sql="INSERT INTO t VALUES (1)")
+execute(stream_id=1, sql="INSERT INTO t VALUES (2)")
+execute(stream_id=1, sql="COMMIT")
+close_stream(stream_id=1)
+```
+
+複数の stream を同一 WebSocket 接続上で多重化できる（stream_id で識別）。
+
+#### sqld との統合（Phase 3）
+
+Phase 1〜2 と同様、sqld の WebSocket サーバーループは起動しない。sqld の WebSocket ハンドラを Rust ライブラリとして呼び出すか、hrana-ws プロトコル変換レイヤーを Adlaire で実装するかは Phase 3 着手時に判断する（sqld の hrana-ws 実装の再利用可否を確認）。
+
+#### 埋め込みレプリカ同期
+
+libSQL クライアント SDK の embedded replica 機能は、サーバー側で WAL フレームを HTTP ストリームで提供する同期 API を必要とする。
+
+```
+GET /v2/replication/log              WAL フレームのストリーム取得
+GET /v2/replication/snapshot         スナップショット取得
+POST /v2/replication/heartbeat       接続維持
+```
+
+詳細プロトコルは Phase 3 着手時に sqld の実装を参照して確定する。
+
+**完了条件（テストケース）：**
+
+```
+TC-3-1: インタラクティブトランザクション
+  TypeScript SDK:
+  const tx = await db.transaction("write");
+  await tx.execute("INSERT INTO t VALUES (1)");
+  await tx.execute("INSERT INTO t VALUES (2)");
+  await tx.commit();
+  const r = await db.execute("SELECT COUNT(*) FROM t");
+  期待: r.rows[0][0] = 2
+
+TC-3-2: トランザクションロールバック
+  const tx = await db.transaction("write");
+  await tx.execute("INSERT INTO t VALUES (99)");
+  await tx.rollback();
+  const r = await db.execute("SELECT * FROM t WHERE id = 99");
+  期待: r.rows.length = 0
+
+TC-3-3: 複数ストリームの多重化
+  stream_id=1 で BEGIN → INSERT (sleep)
+  stream_id=2 で SELECT（別トランザクション）→ 正常応答
+  stream_id=1 で COMMIT
+  期待: 2 ストリームが干渉しない
+
+TC-3-4: JWT 認証（WebSocket）
+  hello メッセージに有効 JWT → hello_ok
+  hello メッセージに不正 JWT → hello_error
+
+TC-3-5: 埋め込みレプリカ同期
+  TypeScript SDK:
+  const db = createClient({
+    url: "file:local.db",
+    syncUrl: "http://localhost:8080",
+    authToken: "<JWT>",
+  });
+  await db.sync();
+  const r = await db.execute("SELECT * FROM t");
+  期待: サーバー側のデータが local.db に同期される
+```
+
+**Phase 3 実装タスク（骨格）：**
+
+```
+T3-1: WebSocket サーバー追加（axum の WebSocket upgrade）
+T3-2: hrana-ws v3 hello ハンドシェイク + JWT 認証
+T3-3: ストリーム多重化レイヤー実装
+T3-4: execute / batch / sequence リクエスト処理（sqld 境界再利用）
+T3-5: インタラクティブトランザクション状態管理
+T3-6: 埋め込みレプリカ同期 API 実装
+T3-7: 統合テスト TC-3-1〜TC-3-5
+```
 
 ---
 
