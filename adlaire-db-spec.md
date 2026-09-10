@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.4  
+**バージョン：** 0.17  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-10  
 
@@ -69,7 +69,7 @@ libSQL 内部コンポーネントの内製化はフェーズ完了後に計画�
 | 埋め込みレプリカ同期 | 3 | クライアント側ローカルレプリカとの同期プロトコル |
 | ATTACH DATABASE（クロス DB クエリ） | 3 | 管理下 DB 間のみ許可。任意パス指定は禁止 |
 | メトリクス API | 3 | 接続数・クエリ数・ストレージ使用量の取得 |
-| SQLite 拡張機能ロード | 5+ | `.so` / Wasm 拡張（Vector Search 等）のロード |
+| SQLite 拡張機能ロード | 5c | `.so` / Wasm 拡張（Vector Search 等）のロード |
 
 ### 2.2 データベース管理
 
@@ -77,8 +77,9 @@ libSQL 内部コンポーネントの内製化はフェーズ完了後に計画�
 |------|-------|------|
 | DB 作成・削除・一覧 | 2 | 管理 API 経由での DB ライフサイクル管理 |
 | トークン発行・失効 | 2 | DB ごと・全体のトークン管理 |
-| ブランチ | 5+ | DB のブランチ作成（WAL スナップショットから派生） |
-| ポイントインタイムリストア | 5+ | 任意の時点への DB 復元 |
+| バックアップ・エクスポート | 5a | オンラインバックアップ取得・リストア |
+| ポイントインタイムリストア | 5a | WAL アーカイブから任意の時点への DB 復元 |
+| ブランチ | 5b | DB のブランチ作成（WAL スナップショットから派生） |
 
 ### 2.3 レプリケーション
 
@@ -384,6 +385,82 @@ jobs:
 - hrana-http v2 の JSON シリアライズ・デシリアライズはラウンドトリップテストを書く
 - TC-1〜TC-6 の統合テストは `cargo test --test integration` で自動実行する
 - TypeScript SDK E2E は Node.js 環境依存のため手動確認を基本とし、CI は任意とする
+
+### 3.6 データ整合性・保全方針
+
+#### 3.6.1 書き込み耐久性（Design Invariant I-4 の詳細）
+
+すべての書き込み操作はクライアントに成功を返す前に **fsync** を完了しなければならない。
+
+```
+クライアント POST /v2/pipeline INSERT
+  → sqld: WAL フレームをバッファに書く
+  → sqld: fsync（WAL ファイルをディスクに同期）
+  → Adlaire: 200 OK を返す
+```
+
+`PRAGMA synchronous = NORMAL` の場合、WAL ヘッダへの書き込みはチェックポイント時に fsync される。クラッシュ後は SQLite が自動ロールフォワードして整合性を回復する。`synchronous = OFF` は設定不可（I-4 違反）。
+
+#### 3.6.2 起動時整合性チェック
+
+起動シーケンス Step 6（DB オープン）で各 DB に対して以下を実行する：
+
+```sql
+PRAGMA integrity_check;
+```
+
+結果が `ok` 以外の場合：
+
+```
+ERROR {"msg":"database integrity check failed","db":"mydb","detail":"..."}
+→ 起動失敗。破損 DB はオープンしない
+```
+
+`--skip-integrity-check` フラグで無効化可（本番での使用は非推奨。ログに WARN を出す）。
+
+#### 3.6.3 WAL フレームチェックサム
+
+レプリケーション（Phase 4）で転送する WAL フレームには CRC32 チェックサムを付与する（§6 Phase 4 レプリケーション API の `checksum` フィールド）。レプリカ側でフレーム受信後にチェックサムを検証し、不一致の場合はそのフレームを破棄してプライマリへ再送要求する。
+
+Phase 1〜3 ではチェックサム検証はローカル DB への SQLite 書き込みで行われる（WAL の組み込みチェックサム機構を使用）。
+
+#### 3.6.4 レプリケーション書き込み確認モード（Phase 4）
+
+プライマリへの書き込み時に、レプリカへの同期完了を待つかどうかを `--replication-write-mode` で制御する。
+
+| モード | 挙動 | 整合性 | レイテンシ |
+|--------|------|--------|-----------|
+| `async`（デフォルト） | WAL 書き込み完了で即 200 返却。レプリカ同期はバックグラウンド | 結果整合性 | 低 |
+| `sync` | 1 台以上のレプリカが ACK した後に 200 返却 | 強い整合性 | 高 |
+
+```toml
+[replication]
+write_mode = "async"   # async / sync
+sync_timeout_ms = 5000 # sync モード時のタイムアウト。超過時 503 REPLICATION_TIMEOUT
+```
+
+sync モードでレプリカが 0 台の場合（スタンドアロンプライマリ）は async と同じ挙動にフォールバックし WARN ログを出す。
+
+#### 3.6.5 定期整合性チェック（オプション）
+
+```toml
+[storage]
+integrity_check_interval_hours = 0  # 0 = 無効（デフォルト）
+```
+
+設定時はバックグラウンドスレッドが指定間隔で各 DB に `PRAGMA integrity_check` を実行する。問題検出時は ERROR ログを出力し、`GET /admin/v1/metrics` の `integrity_errors` カウンターを増加させる。DB はオープンのまま（自動シャットダウンしない）。
+
+#### 3.6.6 WAL リテンションと PITR（Phase 5a）
+
+PITR のために WAL フレームを一定期間保持する。
+
+```toml
+[storage]
+wal_retention_days = 7   # 0 = 無効（デフォルト）
+                         # フレームは {data-dir}/databases/{name}/wal-archive/ に保存
+```
+
+WAL リテンションが有効な場合、チェックポイントで消去される前に WAL フレームをアーカイブへコピーする。詳細は Phase 5a 参照。
 
 ---
 
@@ -1012,6 +1089,159 @@ DELETE /admin/v1/tokens/{id}     トークン失効（revoke）
 
 **DELETE /admin/v1/tokens/{id} レスポンス：** `204 No Content`（ボディなし）。`tokens.json` の `revoked` を `true` に更新し、`revoked_at` に失効日時を記録する。既に失効済みの場合も `204` を返す（冪等）。
 
+#### バックアップ・エクスポート（Phase 5a）
+
+```
+GET  /admin/v1/databases/{name}/backup                   オンラインバックアップ（SQLite ファイル）
+POST /admin/v1/databases/{name}/restore                  バックアップファイルからリストア
+POST /admin/v1/databases/{name}/restore/point-in-time    WAL アーカイブから特定時点へリストア
+```
+
+**GET /admin/v1/databases/{name}/backup レスポンス（200 OK）：**
+
+- `Content-Type: application/octet-stream`
+- `Content-Disposition: attachment; filename="{name}.db"`
+- SQLite Online Backup API（`sqlite3_backup_*`）を使用したライブバックアップ
+- バックアップ完了まで WAL チェックポイントを一時抑制し、書き込み中でも整合性を保証する
+- バックアップ中も読み書きリクエストを継続受理する（ロックしない）
+
+**POST /admin/v1/databases/{name}/restore リクエスト：**
+
+- `Content-Type: application/octet-stream`（SQLite DB ファイルのバイナリ）
+- DB への新規クエリ受け付けを一時停止し、受信ファイルを `data.db` へ書き込む
+- 既存の WAL ファイル（`data.db-wal`）を削除しチェックポイント済み状態にする
+- `PRAGMA integrity_check` でリストア後の整合性を確認し、失敗時は元の DB を復元して `409` を返す
+- 成功時はリストア済み DB をオープンして受け付け再開
+
+**POST /admin/v1/databases/{name}/restore レスポンス：** `204 No Content`
+
+**POST /admin/v1/databases/{name}/restore/point-in-time リクエスト：**
+
+```json
+{ "timestamp": "2026-09-10T12:00:00Z" }
+```
+
+または
+
+```json
+{ "frame_no": 42 }
+```
+
+`timestamp` と `frame_no` はいずれか一方。両方指定時は `400 DB_INVALID_REQUEST`。
+
+処理フロー：
+
+1. `wal_retention_days = 0` の場合: `503 {"error":"PITR_NOT_ENABLED","code":"PITR_NOT_ENABLED"}`
+2. `wal-archive/` ディレクトリから `timestamp` 以前または指定 `frame_no` 以下のフレームを収集
+3. 対象フレームが存在しない場合: `404 {"error":"FRAME_NOT_FOUND","code":"FRAME_NOT_FOUND"}`
+4. DB を一時停止し、ベーススナップショットへ WAL フレームをリプレイして復元
+5. `PRAGMA integrity_check` で整合性確認
+6. 成功時: `204 No Content`
+
+**POST /admin/v1/databases/{name}/restore/point-in-time レスポンス：** `204 No Content`
+
+#### ブランチ管理（Phase 5b）
+
+```
+POST   /admin/v1/databases/{name}/branches                 ブランチ作成
+GET    /admin/v1/databases/{name}/branches                 ブランチ一覧
+DELETE /admin/v1/databases/{name}/branches/{branch-name}   ブランチ削除
+```
+
+ブランチ DB は `{data-dir}/databases/{name}___{branch-name}/` に作成される独立した DB である。
+ブランチ DB は通常の DB と同様に `/{name}___{branch-name}/v2/pipeline` でアクセス可能（Phase 2 以降の DB ルーティングを使用）。
+ブランチ名のバリデーション規則は DB 名と同じ（`^[a-zA-Z0-9_-]{1,127}$`）。
+
+**POST /admin/v1/databases/{name}/branches リクエスト：**
+
+```json
+{
+  "branch_name": "feature-x",
+  "from": "current"
+}
+```
+
+`from` フィールド：
+
+| 値 | 説明 |
+|----|------|
+| `"current"` | 現在の DB 状態のスナップショットからブランチを作成 |
+| `{"timestamp":"2026-09-10T12:00:00Z"}` | WAL アーカイブから指定時点のスナップショットからブランチを作成（`wal_retention_days > 0` 必須） |
+| `{"frame_no":42}` | 指定 WAL フレーム時点のスナップショットからブランチを作成 |
+
+処理フロー（`from: "current"` の場合）：
+
+1. `GET /admin/v1/databases/{name}/backup` と同じ Online Backup API でスナップショットを取得
+2. `{data-dir}/databases/{name}___{branch-name}/data.db` へ書き込む
+3. 新 DB を通常の DB として登録し sqld でオープンする
+
+処理フロー（`from: {timestamp}` または `{frame_no}` の場合）：
+
+1. WAL アーカイブから指定時点のベーススナップショットを取得
+2. 対象フレームまで WAL リプレイして復元
+3. 復元した DB を `{name}___{branch-name}` として登録しオープン
+
+**POST /admin/v1/databases/{name}/branches レスポンス（201 Created）：**
+
+```json
+{
+  "branch_name": "feature-x",
+  "source_db": "my-db",
+  "db_name": "my-db___feature-x",
+  "created_at": "2026-09-10T12:00:00Z",
+  "from_frame": 42
+}
+```
+
+`from_frame` は `from: "current"` の場合でも実際にコピーされた時点の WAL フレーム番号を返す。
+
+**GET /admin/v1/databases/{name}/branches レスポンス（200 OK）：**
+
+```json
+{
+  "branches": [
+    {
+      "branch_name": "feature-x",
+      "source_db": "my-db",
+      "db_name": "my-db___feature-x",
+      "created_at": "2026-09-10T12:00:00Z",
+      "from_frame": 42
+    }
+  ]
+}
+```
+
+ブランチのメタデータは `{data-dir}/meta/branches.json` に保存する。
+
+**DELETE /admin/v1/databases/{name}/branches/{branch-name} レスポンス：** `204 No Content`
+
+ブランチ DB（`{data-dir}/databases/{name}___{branch-name}/`）を削除し、`branches.json` から除去する。ブランチが存在しない場合も `204` を返す（冪等）。
+
+#### メトリクス（Phase 3）
+
+```
+GET /admin/v1/metrics     全 DB のメトリクス取得
+```
+
+**GET /admin/v1/metrics レスポンス（200 OK）：**
+
+```json
+{
+  "uptime_seconds": 3600,
+  "databases": [
+    {
+      "name": "my-db",
+      "queries_total": 1234,
+      "rows_read": 5678,
+      "rows_written": 91,
+      "connections_active": 2,
+      "size_bytes": 4096,
+      "integrity_errors": 0
+    }
+  ]
+}
+```
+
 ---
 
 ## 7. エラーハンドリング
@@ -1052,6 +1282,12 @@ DELETE /admin/v1/tokens/{id}     トークン失効（revoke）
 | `SQLITE_ERROR` | 400 | SQL 構文・実行エラー |
 | `SQLITE_CONSTRAINT` | 400 | 制約違反（UNIQUE 等） |
 | `STORAGE_BUSY` | 503 | WAL ロック待機タイムアウト |
+| `REPLICATION_TIMEOUT` | 503 | sync モードでレプリカ ACK タイムアウト |
+| `PITR_NOT_ENABLED` | 503 | PITR 試行時に `wal_retention_days = 0` |
+| `FRAME_NOT_FOUND` | 404 | PITR/ブランチ作成で指定フレームが存在しない |
+| `RESTORE_INTEGRITY_FAILED` | 409 | リストア後の `integrity_check` 失敗 |
+| `RESTORE_FRAME_CORRUPT` | 409 | WAL フレームの CRC32 検証失敗 |
+| `DB_RESERVED_NAME` | 400 | `___` を含む DB 名の直接作成試行 |
 | `INTERNAL_ERROR` | 500 | サーバー内部エラー |
 
 ### 7.4 エラーレスポンステストケース
@@ -1905,11 +2141,184 @@ T4-7: 統合テスト TC-4-1〜TC-4-5
 
 ---
 
-### Phase 5 以降
+### Phase 5a: バックアップ・PITR
 
-Phase 4 完了後に計画する。候補（優先度未確定）：
+#### 目標
 
-- ブランチ・ポイントインタイムリストア
+- WAL アーカイブによるポイントインタイムリストア（PITR）の実現
+- オンラインバックアップ API によるエクスポート・インポート
+- `wal_retention_days` 設定によるアーカイブ保持期間の管理
+
+#### WAL アーカイブ構造
+
+```
+{data-dir}/
+  databases/{name}/
+    data.db
+    data.db-wal
+    wal-archive/
+      snapshot-000000042.db    ← チェックポイント時点のスナップショット（コピー）
+      frame-000000043.bin      ← WAL フレーム（CRC32 チェックサム付き）
+      frame-000000044.bin
+      ...
+      manifest.json            ← アーカイブメタデータ
+```
+
+`manifest.json` 形式：
+
+```json
+{
+  "db": "my-db",
+  "base_frame": 42,
+  "snapshot": "snapshot-000000042.db",
+  "frames": [
+    {"frame_no": 43, "file": "frame-000000043.bin", "checksum": 3294921183, "ts": "2026-09-10T12:00:00Z"},
+    {"frame_no": 44, "file": "frame-000000044.bin", "checksum": 1234567890, "ts": "2026-09-10T12:00:01Z"}
+  ]
+}
+```
+
+#### アーカイブ保存タイミング
+
+1. チェックポイント直前に WAL フレームをアーカイブへコピーする
+2. チェックポイント時点の DB ファイルスナップショットを保存する（スナップショットは最新 1 件のみ保持）
+3. `wal_retention_days` を超えた古いフレームは定期クリーンアップで削除する（1 日 1 回）
+
+#### PITR リストア処理フロー
+
+```
+1. manifest.json を読み込む
+2. 指定 timestamp 以前 / frame_no 以下の最新スナップショットを選択
+3. スナップショットを data.db へコピー
+4. 対象フレームまで WAL フレームを順番にリプレイ（CRC32 検証必須）
+5. PRAGMA integrity_check で確認
+6. DB をオープンしてサービス再開
+```
+
+フレームの CRC32 検証失敗時: リストア中断、元の DB を復元し `409 RESTORE_FRAME_CORRUPT` を返す。
+
+#### テストケース（Phase 5a）
+
+| ID | シナリオ | 期待結果 |
+|----|---------|---------|
+| TC-5a-1 | バックアップ取得中に書き込みリクエストを同時実行 | バックアップは整合性を保って完了し、書き込みも成功 |
+| TC-5a-2 | バックアップファイルからリストア | リストア後クエリが成功し、元のデータが参照できる |
+| TC-5a-3 | 不正な SQLite ファイルでリストア | `409 RESTORE_INTEGRITY_FAILED` を返す |
+| TC-5a-4 | `wal_retention_days = 0` で PITR 試行 | `503 PITR_NOT_ENABLED` |
+| TC-5a-5 | 有効な timestamp で PITR リストア | 指定時点のデータに復元されている |
+| TC-5a-6 | アーカイブにない timestamp で PITR 試行 | `404 FRAME_NOT_FOUND` |
+| TC-5a-7 | CRC32 不一致フレームで PITR | `409 RESTORE_FRAME_CORRUPT`、元 DB 復元確認 |
+| TC-5a-8 | 古いフレームがクリーンアップ対象になる | `wal_retention_days` 超過フレームが削除されている |
+
+#### 実装タスク（Phase 5a）
+
+| タスク ID | 内容 |
+|----------|------|
+| T5a-1 | WAL アーカイブ書き込み: チェックポイント前フックでフレームコピー |
+| T5a-2 | スナップショット保存: チェックポイント時点の DB コピー |
+| T5a-3 | manifest.json 管理: 書き込み・読み込み・整合性確認 |
+| T5a-4 | クリーンアップスレッド: `wal_retention_days` 超過フレームの削除 |
+| T5a-5 | バックアップ API 実装: `GET /admin/v1/databases/{name}/backup` |
+| T5a-6 | リストア API 実装: `POST /admin/v1/databases/{name}/restore` |
+| T5a-7 | PITR API 実装: `POST .../restore/point-in-time`（フレームリプレイ） |
+| T5a-8 | エラーハンドリング: 各 API のエラーコード・冪等性 |
+| T5a-9 | 統合テスト: TC-5a-1〜TC-5a-8 |
+
+---
+
+### Phase 5b: ブランチ
+
+#### 目標
+
+- DB の任意時点からブランチを作成し、独立した DB として読み書き可能にする
+- ブランチ一覧・削除 API を提供する
+- ブランチは通常の DB として Phase 2 以降の全 API を利用可能にする
+
+#### ブランチ DB の命名規則
+
+ブランチ DB 内部名: `{source-db}___{branch-name}`（区切りは `___` トリプルアンダースコア）
+
+```
+例: my-db のブランチ feature-x → DB 内部名 my-db___feature-x
+アクセス URL: /{my-db___feature-x}/v2/pipeline
+```
+
+`___` を含む DB 名はブランチ DB として判定され、`POST /admin/v1/databases` での直接作成は拒否する（`400 DB_RESERVED_NAME`）。
+
+#### ブランチメタデータ（branches.json）
+
+`{data-dir}/meta/branches.json` に全ブランチのメタデータを保存する。
+
+```json
+{
+  "branches": [
+    {
+      "branch_name": "feature-x",
+      "source_db": "my-db",
+      "db_name": "my-db___feature-x",
+      "created_at": "2026-09-10T12:00:00Z",
+      "from_frame": 42
+    }
+  ]
+}
+```
+
+起動時に `branches.json` を読み込み、各ブランチ DB が存在する場合は自動でオープンする。
+
+#### ブランチ作成処理フロー
+
+**`from: "current"` の場合：**
+
+```
+1. Online Backup API で source DB のスナップショットを取得
+2. {data-dir}/databases/{name}___{branch-name}/data.db へ書き込み
+3. branches.json へメタデータを追加
+4. 新 DB を sqld でオープン
+5. 201 Created を返す
+```
+
+**`from: {timestamp}` / `{frame_no}` の場合：**
+
+```
+1. WAL アーカイブから指定時点のスナップショット + フレームを取得（Phase 5a 依存）
+2. PITR リストアと同じ処理でブランチ DB を構築
+3. branches.json へメタデータを追加
+4. 新 DB を sqld でオープン
+5. 201 Created を返す
+```
+
+`from: {timestamp}` / `{frame_no}` は `wal_retention_days > 0` が必須。未設定時は `503 PITR_NOT_ENABLED`。
+
+#### テストケース（Phase 5b）
+
+| ID | シナリオ | 期待結果 |
+|----|---------|---------|
+| TC-5b-1 | `from: "current"` でブランチ作成 | ブランチ DB がアクセス可能、元 DB とデータ一致 |
+| TC-5b-2 | ブランチ DB への書き込み | 元 DB に影響しない独立した書き込みが可能 |
+| TC-5b-3 | `from: {timestamp}` でブランチ作成 | 指定時点のデータを持つブランチが作成される |
+| TC-5b-4 | ブランチ一覧取得 | 作成済みブランチが branches.json から正しく返る |
+| TC-5b-5 | ブランチ削除 | DB ファイル削除、branches.json から除去 |
+| TC-5b-6 | `___` を含む名前で DB 作成試行 | `400 DB_RESERVED_NAME` |
+| TC-5b-7 | 再起動後のブランチ DB 自動復元 | branches.json から全ブランチが自動オープンされる |
+
+#### 実装タスク（Phase 5b）
+
+| タスク ID | 内容 |
+|----------|------|
+| T5b-1 | branches.json の読み書きロジック |
+| T5b-2 | ブランチ DB 命名・バリデーション（`___` 予約） |
+| T5b-3 | `from: "current"` ブランチ作成（Online Backup API 利用） |
+| T5b-4 | `from: {timestamp}/{frame_no}` ブランチ作成（Phase 5a 依存） |
+| T5b-5 | ブランチ一覧・削除 API 実装 |
+| T5b-6 | 起動時ブランチ自動復元ロジック |
+| T5b-7 | 統合テスト: TC-5b-1〜TC-5b-7 |
+
+---
+
+### Phase 5c 以降
+
+Phase 5a・5b 完了後に計画する。候補（優先度未確定）：
+
 - SQLite 拡張機能ロード（`.so` / Wasm）
 - libSQL 内部コンポーネントの段階的内製化（§3.5.3 のロードマップに従う）
 - 高可用性・自動フェイルオーバー
