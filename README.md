@@ -26,6 +26,7 @@ Adlaire DB は [Turso Cloud](https://turso.tech) が提供する機能をセル�
 | Phase 4 | プライマリ・レプリカ構成・WAL レプリケーション | 設計中 |
 | Phase 5 | オンラインバックアップ・PITR | 設計中 |
 | Phase 6 | ブランチ | 設計中 |
+| Phase 7 | SQLite 拡張機能・内製化・HA | 計画中 |
 
 ## 起動方法（Phase 1 予定）
 

@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.27  
+**バージョン：** 0.28  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-10  
 
@@ -428,7 +428,7 @@ ERROR {"msg":"database integrity check failed","db":"mydb","detail":"..."}
 
 #### 3.6.3 WAL フレームチェックサム
 
-レプリケーション（Phase 4）で転送する WAL フレームには CRC32 チェックサムを付与する（§6.4 レプリケーション API の `checksum` フィールド）。レプリカ側でフレーム受信後にチェックサムを検証し、不一致の場合はそのフレームを破棄してプライマリへ再送要求する。
+レプリケーション（Phase 4）で転送する WAL フレームには CRC32 チェックサムを付与する（Phase 4 レプリケーション API GET /replication/v1/log の `checksum` フィールド）。レプリカ側でフレーム受信後にチェックサムを検証し、不一致の場合はそのフレームを破棄してプライマリへ再送要求する。
 
 Phase 1〜3 ではチェックサム検証はローカル DB への SQLite 書き込みで行われる（WAL の組み込みチェックサム機構を使用）。
 
@@ -492,6 +492,9 @@ OPTIONS:
   --skip-integrity-check 起動時の PRAGMA integrity_check をスキップ（非推奨。WARN ログ出力）
   --replication-write-mode <MODE>
                          レプリケーション書き込みモード: async / sync（デフォルト: async）
+  --busy-timeout <MS>    WAL ロック待機タイムアウト（ミリ秒、デフォルト: 5000）
+  --shutdown-timeout <SECS>
+                         グレースフルシャットダウン最大待機時間（デフォルト: 5s）
 
 SUBCOMMANDS:
   adlaire-db token create --secret <SECRET> [--db <NAME>] [--expiry <DURATION>]
@@ -568,7 +571,7 @@ Turso Cloud の認証トークンと同じ JWT クレーム構造を採用し、
 
 Phase 1 ではトークンのスコープは全体一律。DB 単位の制御は Phase 2 で追加する。
 
-### 5.3b DB スコープ（Phase 2）
+### 5.4 DB スコープ（Phase 2）
 
 Phase 2 から JWT に省略可能な `dbs` クレームを追加する。
 
@@ -650,7 +653,7 @@ Phase 2 から JWT に省略可能な `dbs` クレームを追加する。
 7. 検証通過 → リクエスト処理へ
 ```
 
-### 5.4 トークン生成
+### 5.5 トークン生成
 
 ```bash
 # グローバル rw トークン（Phase 1 と同じ）
@@ -667,7 +670,7 @@ adlaire-db token create --secret "my-secret" \
 # → eyJ...（標準出力）
 ```
 
-### 5.5 トークン失効管理
+### 5.6 トークン失効管理
 
 **tokens.json の構造：**
 
@@ -1496,7 +1499,7 @@ Step 5: 停止完了
 ### 8.4 初期化フラグ優先順位まとめ
 
 ```
---auth-jwt-secret-file > ADLAIRE_JWT_SECRET (env) > --auth-jwt-secret > config.toml [auth] jwt_secret
+--auth-jwt-secret-file > --auth-jwt-secret > ADLAIRE_JWT_SECRET (env) > config.toml [auth] jwt_secret
 --data               > config.toml [storage] data_dir  （config.toml に書かないことを推奨）
 --port               > config.toml [server] port        (default: 8080)
 --admin-port         > config.toml [server] admin_port  (default: 8081)
@@ -1513,7 +1516,7 @@ Step 5: 停止完了
 | フェーズ | 内容 | テストケース | 実装タスク |
 |----------|------|------------|----------|
 | **Phase 1** | シングル DB・HTTP API（hrana-http v2）・JWT 認証 | TC-1〜TC-6 (6件) | T-1〜T-11 (11件) |
-| **Phase 2** | マルチ DB・管理 API・DB スコープ JWT | TC-2-1〜TC-2-6 (7件) | T2-1〜T2-6 (6件) |
+| **Phase 2** | マルチ DB・管理 API・DB スコープ JWT | TC-2-1〜TC-2-6（TC-2-5b 含む）(7件) | T2-1〜T2-6 (6件) |
 | **Phase 3** | WebSocket (hrana-ws v3)・埋め込みレプリカ・ATTACH DB・メトリクス | TC-3-1〜TC-3-7 (7件) | T3-1〜T3-9 (9件) |
 | **Phase 4** | プライマリ・レプリカ構成・WAL レプリケーション・書き込みリダイレクト | TC-4-1〜TC-4-5 (5件) | T4-1〜T4-7 (7件) |
 | **Phase 5** | オンラインバックアップ・PITR・WAL アーカイブ | TC-5-1〜TC-5-8 (8件) | T5-1〜T5-9 (9件) |
@@ -1643,7 +1646,7 @@ T-6: hrana-http v2 パイプライン実装
 T-7: JWT 認証ミドルウェア
   [ ] jsonwebtoken crate で HS256 検証
   [ ] Authorization: Bearer <JWT> ヘッダ抽出
-  [ ] 6 ステップ検証フロー実装（§5.5）
+  [ ] 6 ステップ検証フロー実装（§5.6）
       ①ヘッダ有無, ②署名, ③exp, ④revoke リスト照合,
       ⑤アクセスレベル, ⑥通過
   [ ] --auth-jwt-secret 未設定時は認証をスキップ（WARN ログ）
@@ -1656,14 +1659,14 @@ T-8: tokens.json 読み込み・revoke リスト
   [ ] なければ空リストで初期化・書き出し
   [ ] JWT 検証ステップ④での revoke 照合
   [ ] Phase 1 では tokens.json の更新は CLI のみ（管理 API は Phase 2）
-  参照: §5.5
+  参照: §5.6
 
 T-9: `token create` サブコマンド
   [ ] --secret <VALUE>, --expiry <DURATION>, --access ro|rw フラグ
   [ ] JWT を HS256 で署名して stdout に出力
   [ ] tok_<random> 形式の token_id を生成（sub クレーム）
   [ ] tokens.json に新規トークンを追記
-  参照: §4.1, §5.2, §5.4
+  参照: §4.1, §5.2, §5.5
   検証: TC-3（TOKEN=$(./adlaire-db token create ...)）
 
 T-10: ログ実装
@@ -1789,16 +1792,16 @@ T2-4: 管理 API — トークン CRUD
   [ ] GET /admin/v1/tokens / GET /admin/v1/tokens/{id} — tokens.json から読み込み
   [ ] DELETE /admin/v1/tokens/{id} — tokens.json の revoked を true に更新（冪等）
   [ ] expiry パース（30d / 24h / 3600s 等）→ JWT exp クレームへの変換
-  参照: §6.4（トークン管理）, §5.4, §5.5
+  参照: §6.4（トークン管理）, §5.5, §5.6
 
 T2-5: DB スコープ JWT（dbs クレーム）
-  [ ] Phase 1 の JWT 検証を拡張（7 ステップフロー §5.3b）
+  [ ] Phase 1 の JWT 検証を拡張（7 ステップフロー §5.4）
   [ ] dbs クレームが存在する場合、対象 DB 名でアクセス権を解決
   [ ] POST /admin/v1/tokens に dbs フィールドを追加
   [ ] tokens.json の dbs フィールドを保存
-  参照: §5.3b
+  参照: §5.4
 
-T2-6: 統合テスト TC-2-1〜TC-2-6
+T2-6: 統合テスト TC-2-1〜TC-2-6（TC-2-5b 含む）
   [ ] 各テストケースを実行し全て PASS することを確認
   [ ] Phase 1 の TC-1〜TC-6 がリグレッションしないことを確認
 ```
@@ -2299,7 +2302,7 @@ T5-3: manifest.json 管理
   [ ] manifest.json の読み込み・書き込みロジック（アトミック更新）
   [ ] 整合性確認: frames[] と実ファイルの突合
   [ ] manifest.json 破損時の起動エラー処理
-  参照: §3.6.3, §8.1 Step 5-2
+  参照: §3.2, §3.6.3, §3.6.6
 
 T5-4: クリーンアップスレッド
   [ ] wal_retention_days 設定を config.toml から読み込み
