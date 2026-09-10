@@ -760,13 +760,133 @@ Response 200:
 { "status": "ok" }
 ```
 
-### 6.3 WebSocket API（hrana-ws v3）
+### 6.3 WebSocket API（hrana-ws v3、Phase 3）
 
-（Phase 3 実装。詳細は Phase 3 着手時に策定）
+接続先：`ws://localhost:8080/v3/baton`（マルチ DB 時は `ws://localhost:8080/{db-name}/v3/baton`）
 
-接続先：`ws://localhost:8080/v3/baton`
+#### 接続・認証
 
-hrana WebSocket プロトコルに準拠する。libSQL クライアント SDK のインタラクティブトランザクション機能（`db.transaction()`）を有効にする。
+```json
+// Client → Server: hello
+{"type": "hello", "jwt": "<JWT>"}
+
+// Server → Client: hello_ok
+{"type": "hello_ok"}
+
+// Server → Client: hello_error（認証失敗）
+{"type": "hello_error", "error": {"message": "...", "code": "AUTH_INVALID"}}
+```
+
+#### ストリームオープン・クローズ
+
+```json
+// Client → Server: open_stream
+{"type": "request", "request_id": 1, "stream_id": 1,
+ "body": {"type": "open_stream"}}
+
+// Server → Client: response_ok
+{"type": "response_ok", "request_id": 1,
+ "response": {"type": "open_stream"}}
+
+// Client → Server: close_stream
+{"type": "request", "request_id": 99, "stream_id": 1,
+ "body": {"type": "close_stream"}}
+```
+
+#### SQL 実行（execute）
+
+```json
+// Client → Server
+{"type": "request", "request_id": 2, "stream_id": 1,
+ "body": {
+   "type": "execute",
+   "stmt": {"sql": "INSERT INTO t VALUES (?)", "args": [{"type":"integer","value":"42"}], "want_rows": false}
+ }}
+
+// Server → Client: 成功
+{"type": "response_ok", "request_id": 2,
+ "response": {
+   "type": "execute",
+   "result": {"cols": [], "rows": [], "rows_affected": 1, "last_insert_rowid": "42"}
+ }}
+
+// Server → Client: SQL エラー
+{"type": "response_error", "request_id": 2,
+ "error": {"message": "no such table: t", "code": "SQLITE_ERROR"}}
+```
+
+#### インタラクティブトランザクション
+
+```json
+// BEGIN
+{"type":"request","request_id":10,"stream_id":1,
+ "body":{"type":"execute","stmt":{"sql":"BEGIN","args":[],"want_rows":false}}}
+
+// INSERT
+{"type":"request","request_id":11,"stream_id":1,
+ "body":{"type":"execute","stmt":{"sql":"INSERT INTO t VALUES (1)","args":[],"want_rows":false}}}
+
+// COMMIT
+{"type":"request","request_id":12,"stream_id":1,
+ "body":{"type":"execute","stmt":{"sql":"COMMIT","args":[],"want_rows":false}}}
+```
+
+ストリームが閉じられる前にプロセスが落ちた場合、SQLite のトランザクションは自動ロールバックされる。
+
+#### 埋め込みレプリカ同期 API（Phase 3）
+
+クライアント SDK の embedded replica 機能が使用する内部 API。
+
+```
+GET /v2/replication/log?from_frame=<N>
+Authorization: Bearer <JWT>
+```
+
+**クエリパラメータ：**
+- `from_frame` : 取得開始フレーム番号（初回は `0`）
+
+**レスポンス（200 OK、Server-Sent Events）：**
+
+```
+Content-Type: text/event-stream
+
+data: {"frame_no":0,"data":"<base64-encoded WAL frame>"}
+
+data: {"frame_no":1,"data":"<base64-encoded WAL frame>"}
+
+data: {"frame_no":2,"data":"<base64-encoded WAL frame>"}
+```
+
+フレームがなくなると接続を閉じる（クライアントは再度リクエストして差分取得）。
+
+```
+GET /v2/replication/snapshot
+Authorization: Bearer <JWT>
+```
+
+**レスポンス（200 OK）：**
+
+```
+Content-Type: application/octet-stream
+X-Replication-Frame-No: 42
+
+<SQLite ページダンプのバイナリ>
+```
+
+初回同期時にクライアントがスナップショットを取得し、以後 `/log` で差分を追う。
+
+```
+POST /v2/replication/heartbeat
+Authorization: Bearer <JWT>
+```
+
+**レスポンス（200 OK）：**
+
+```json
+{"frame_no": 42}
+```
+
+クライアントが定期的に呼び出すことでサーバーは `frame_no` 以前の WAL を GC できる（Phase 3 では GC は実装しない、heartbeat の受付のみ）。
 
 ### 6.4 管理 API
 
@@ -1638,13 +1758,72 @@ adlaire-db serve --data ./data --role replica --primary-url http://primary:8082
 
 #### レプリケーション API
 
-プライマリが `--primary-port` で公開する内部エンドポイント（クライアントは直接使わない）：
+プライマリが `--primary-port`（デフォルト 8082）で公開する内部エンドポイント。クライアント SDK は直接使わない。すべてのリクエストに `Authorization: Bearer <replication-auth-token>` が必要。
+
+**GET /replication/v1/log?from_frame=\<N\>**
+
+WAL フレームを Server-Sent Events でストリーム配信する。
 
 ```
-GET  /replication/v1/log?from_frame=<N>   WAL フレームストリーム（SSE）
-GET  /replication/v1/snapshot             全スナップショット（初回同期）
-POST /replication/v1/heartbeat            レプリカの生存確認
-GET  /replication/v1/status               プライマリの同期状態
+HTTP/1.1 200 OK
+Content-Type: text/event-stream
+Cache-Control: no-cache
+
+data: {"frame_no":0,"db":"mydb","data":"<base64 WAL frame>","checksum":3294921183}
+
+data: {"frame_no":1,"db":"mydb","data":"<base64 WAL frame>","checksum":1928374652}
+```
+
+- `frame_no`: WAL フレームの通し番号（0 始まり）
+- `db`: 対象 DB 名（Phase 4 はマルチ DB 対応）
+- `data`: WAL フレームのバイナリを Base64 エンコードしたもの
+- `checksum`: フレームの CRC32 チェックサム
+
+フレームが追いついた場合は接続を保持し、新しいフレームが来次第送信する（long-poll SSE）。
+
+**GET /replication/v1/snapshot**
+
+レプリカの初回参加時に全スナップショットを取得する。
+
+```
+HTTP/1.1 200 OK
+Content-Type: application/octet-stream
+X-Replication-Frame-No: 42
+X-Replication-Db: mydb
+
+<SQLite ページダンプ バイナリ>
+```
+
+`X-Replication-Frame-No` が示す frame_no 以降の差分を `/log?from_frame=43` で取得することで同期を完成させる。
+
+**POST /replication/v1/heartbeat**
+
+レプリカの生存確認と進捗報告。
+
+```json
+// リクエスト
+{"replica_id": "replica-1", "synced_frame": 42}
+
+// レスポンス 200 OK
+{"primary_frame": 42, "lag_frames": 0}
+```
+
+プライマリは `synced_frame` 以前の WAL フレームを将来的に GC できる（Phase 4 では GC は未実装・受付のみ）。
+
+**GET /replication/v1/status**
+
+プライマリの現在状態。
+
+```json
+// 200 OK
+{
+  "role": "primary",
+  "current_frame": 42,
+  "replicas": [
+    {"id": "replica-1", "synced_frame": 42, "lag_frames": 0, "last_seen": "2026-09-10T12:00:00Z"},
+    {"id": "replica-2", "synced_frame": 39, "lag_frames": 3, "last_seen": "2026-09-10T11:59:55Z"}
+  ]
+}
 ```
 
 #### ヘルスチェック拡張
