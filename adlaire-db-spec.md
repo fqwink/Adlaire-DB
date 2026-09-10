@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.19  
+**バージョン：** 0.20  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-10  
 
@@ -1748,6 +1748,50 @@ TC-2-6: データディレクトリ永続化（マルチ DB）
   （c）db_a・db_b 両方のデータが復元されること
   （d）{data-dir}/databases/ 以下に db_a/ db_b/ ディレクトリが存在すること
   （e）{data-dir}/meta/databases.json に両 DB が記録されていること
+```
+
+**実装タスク（Phase 2）：**
+
+```
+T2-1: パスベース DB ルーター
+  [ ] axum Router を /{db-name}/v2/pipeline にマッチするように拡張
+  [ ] パスセグメントから db-name を抽出し、DB 名バリデーションを適用
+  [ ] 存在しない db-name → 404 DB_NOT_FOUND
+  [ ] Phase 1 の単一 DB ルート（/v2/pipeline）との共存（後方互換）
+  参照: §6.1, §3.4
+
+T2-2: マルチ DB マネージャ
+  [ ] 起動時に databases.json を読み込み、全 DB を sqld でオープン
+  [ ] DB 名 → sqld::Database のマップをメモリ上で管理（RwLock<HashMap>）
+  [ ] 新規 DB 作成時にマップへ追加・databases.json を更新
+  [ ] DB 削除時にマップから除去・ファイル削除・databases.json を更新
+  参照: §3.4, §8.1 Step 5〜6
+
+T2-3: 管理 API — DB CRUD
+  [ ] GET /admin/v1/databases → databases.json の一覧を返す
+  [ ] POST /admin/v1/databases — DB 名バリデーション・ディレクトリ作成・sqld オープン
+  [ ] GET /admin/v1/databases/{name} → 個別情報（name・created_at・size_bytes）
+  [ ] DELETE /admin/v1/databases/{name} — sqld クローズ・ディレクトリ削除
+  [ ] size_bytes は data.db のファイルサイズを返す
+  参照: §6.4（DB 管理）
+
+T2-4: 管理 API — トークン CRUD
+  [ ] POST /admin/v1/tokens — JWT 生成・tokens.json への追記・201 返却
+  [ ] GET /admin/v1/tokens / GET /admin/v1/tokens/{id} — tokens.json から読み込み
+  [ ] DELETE /admin/v1/tokens/{id} — tokens.json の revoked を true に更新（冪等）
+  [ ] expiry パース（30d / 24h / 3600s 等）→ JWT exp クレームへの変換
+  参照: §6.4（トークン管理）, §5.4, §5.5
+
+T2-5: DB スコープ JWT（dbs クレーム）
+  [ ] Phase 1 の JWT 検証を拡張（7 ステップフロー §5.3b）
+  [ ] dbs クレームが存在する場合、対象 DB 名でアクセス権を解決
+  [ ] POST /admin/v1/tokens に dbs フィールドを追加
+  [ ] tokens.json の dbs フィールドを保存
+  参照: §5.3b
+
+T2-6: 統合テスト TC-2-1〜TC-2-6
+  [ ] 各テストケースを実行し全て PASS することを確認
+  [ ] Phase 1 の TC-1〜TC-6 がリグレッションしないことを確認
 ```
 
 ---
