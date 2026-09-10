@@ -41,20 +41,48 @@ Rust で実装されるシングルバイナリ DB サーバー。**libSQL を�
 - フォーク外の外部クレートは使用しない（SHA-256・CRC32・TCP・HTTP は自前実装）
 - Phase 2 は Rust SDK 経由 TCP のみ（ポート 9876）。他言語 SDK 用 HTTP/JSON（ポート 8080）は Phase 2 完了後に追加（§18.5）
 
-### 1.3.1 後回し（Phase 2 スコープ外）
+### 1.3.1 後回し項目（フェーズ別）
 
-| 項目 | 理由 |
+**Phase 2 完了後（Phase 3 着手前）：**
+
+| 項目 | 内容 |
 |------|------|
-| 自前 B+Tree | Phase 3 の内製化ステップ |
-| 自前 SQL パーサ | Phase 5 の内製化ステップ |
-| 複数シャード | Phase 6 以降 |
-| レプリケーション | Adlaire WAL 正本設計確立が先決（Phase 6） |
-| 分散トランザクション | レプリケーション完成後（Phase 6） |
-| 他言語 SDK（HTTP/JSON） | Phase 2 完了後に追加。他言語 SDK の wire format（§18.5） |
-| 保存時暗号化 | トランスポート暗号化を優先 |
-| JWT | Phase 2 は API キー認証 |
-| Prometheus / Grafana | 構造化ログで代替 |
-| 自動フェイルオーバー | Phase 6 以降 |
+| 他言語 SDK（HTTP/JSON・:8080） | 他言語 SDK の wire format として追加（§18.2・§18.5） |
+| JWT 認証 | Phase 2 は API キー認証のみ。JWT は Phase 2+ で追加 |
+| 保存時暗号化 | トランスポート暗号化（TLS）を優先。ストレージ暗号化は Phase 2 以降（§25.4） |
+
+**Phase 3：B+Tree 内製化**
+
+| 項目 | 内容 |
+|------|------|
+| 自前 B+Tree | フォーク済み libSQL の SQLite B+Tree を Adlaire 独自実装に置き換え |
+
+**Phase 4：WAL エンジン内製化**
+
+| 項目 | 内容 |
+|------|------|
+| 自前 WAL エンジン | フォーク済み libSQL の SQLite WAL を Adlaire 独自 WAL エンジンに置き換え |
+
+**Phase 5：SQL パーサ内製化**
+
+| 項目 | 内容 |
+|------|------|
+| 自前 SQL パーサ | フォーク済み libSQL の libsql-parser を Adlaire 独自パーサに置き換え（外部依存ゼロ達成） |
+
+**Phase 6：分散対応**
+
+| 項目 | 内容 |
+|------|------|
+| レプリケーション | Adlaire WAL 正本設計の確立が先決 |
+| 複数シャード / Range-based Sharding | レプリケーション完成後 |
+| 分散トランザクション（OCC ベース） | シャーディング完成後 |
+| 自動フェイルオーバー | 分散対応完成後 |
+
+**フェーズ未定（将来検討）：**
+
+| 項目 | 内容 |
+|------|------|
+| Prometheus / Grafana | 構造化ログで代替（メトリクス出力は §20 参照） |
 
 ### 1.4 Adlaire DB の特徴
 
