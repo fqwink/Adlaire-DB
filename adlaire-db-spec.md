@@ -56,19 +56,19 @@ Rust で実装されるシングルバイナリ DB サーバー。**libSQL を�
 | Prometheus / Grafana | 構造化ログで代替 |
 | 自動フェイルオーバー | Phase 6 以降 |
 
-### 1.4 競合との差別化
+### 1.4 Adlaire DB の特徴
 
-| 項目 | immudb | FoundationDB | **Adlaire DB** |
-|------|--------|-------------|----------------|
-| 物理削除 | 不可（設計上禁止） | 可 | **論理削除のみ（削除事実は証明可能）** |
-| 並行制御 | シンプルロック | OCC + MVCC | **OCC + MVCC** |
-| 監査ログ | 完全対応 | なし | **append-only WAL + ハッシュチェーン** |
-| 外部検証 | 専用クライアント必要 | なし | **ファイル単体で検証可能** |
-| SQL | なし | なし（Layer） | **Phase 1-2: libSQL をそのまま採用。Phase 5 以降: Adlaire SQL（将来的に非互換化計画・I-14）** |
-| 外部依存 | 多数 | 多数 | **Phase 1 は libSQL のみ。段階的内製化で最終的にゼロ** |
-| ストレージ | 独自形式 | 独自形式 | **Phase 1-2: libSQL をそのまま採用（ファイルベース）→ Phase 3 以降: Adlaire 独自形式（将来的に非互換化計画・I-14）** |
-| デプロイ | サーバー + クライアント | 複数ロール（複雑） | **シングルバイナリ** |
-| 分散対応 | 限定的 | ✓（ネイティブ） | **Phase 2 以降** |
+| 項目 | **Adlaire DB** |
+|------|----------------|
+| 削除モデル | 論理削除のみ。削除の実行と削除の証明を両立する |
+| 並行制御 | OCC + MVCC。読み取りはロックしない。コミット時に競合検出 |
+| 監査ログ | append-only WAL + SHA-256 ハッシュチェーン |
+| 外部検証 | 専用クライアント不要。`wal.bin` とチェックポイントから独立検証可能 |
+| SQL | Phase 1-2: libSQL をそのまま採用。Phase 5 以降: Adlaire SQL（将来的に非互換化計画・I-14） |
+| 外部依存 | Phase 1 は libSQL のみ。段階的内製化で最終的にゼロ |
+| ストレージ | Phase 1-2: libSQL（ファイルベース）→ Phase 3 以降: Adlaire 独自形式（I-14） |
+| デプロイ | シングルバイナリ起動 |
+| 分散対応 | Phase 6 以降 |
 
 ### 1.5 設計不変条件（Design Invariants）
 
@@ -466,7 +466,7 @@ pub fn delete(&mut self, key: &str) -> Result<()>
 - **削除モデル（重要）** ：**物理削除 API は提供しない**。Delete は常に論理削除。
   - KV の現在値は「削除済み」状態に遷移（`scan` の結果から除外）
   - `Deleted` イベントがハッシュチェーンに永続記録される → 「誰がいつ削除したか」を外部検証可能
-  - immudb との差異：Adlaire DB は「削除の実行」と「削除の証明」を両立する
+  - Adlaire DB は「削除の実行」と「削除の証明」を両立する
   - GDPR「忘れられる権利」対応：削除は実行できる。削除した事実の監査ログは消去できない（設計上の制約として明示）
 - **パフォーマンス** ：O(1) + イベント記録
 
@@ -560,7 +560,7 @@ pub fn get_events_since(&self, timestamp: i64) -> Result<Vec<Event>>
 
 ### 4.3 外部検証（External Verification）
 
-**設計思想：** 専用クライアントを必要とせず、`wal.bin` の JSONL エクスポートと署名済みチェックポイントを受け取った第三者が独自にハッシュチェーンを検証できる。これは immudb との重要な差異であり、Adlaire DB の外部検証可能性の核心。
+**設計思想：** 専用クライアントを必要とせず、`wal.bin` の JSONL エクスポートと署名済みチェックポイントを受け取った第三者が独自にハッシュチェーンを検証できる。Adlaire DB の外部検証可能性の核心。
 
 #### 4.3.1 検証ファイル仕様
 
@@ -909,7 +909,7 @@ pub struct Database {
 
 ### 8.3 イベントログ圧縮（Compaction）
 
-immudb の教訓：ストレージが無限増大し、インデックスの削除もできないと運用上の問題になる。Adlaire DB は Phase 1 から圧縮ポリシーを設計に組み込む。
+ストレージが無限増大すると運用上の問題になる。Adlaire DB は Phase 1 から圧縮ポリシーを設計に組み込む。
 
 **圧縮ポリシー（設定ファイルで変更可能）：**
 ```
@@ -2684,11 +2684,11 @@ Coordinator が複数ノードのインデックス集約
 > **後回し（Phase 1 完了後に着手）**  
 > Phase 1 のシングルノード実装、WAL 不変条件の確立、クラッシュリカバリの検証が完了した後に設計を確定する。以下は研究知見に基づく将来設計草案であり、現時点では確定仕様ではない。
 
-FoundationDB の「アンバンドル・アーキテクチャ」と OCC+MVCC トランザクションモデルを参考に設計する。FDB の既知の制約（トランザクション 5 秒ハード制限、ACL なし）を Adlaire-DB では改善する。
+Adlaire DB の分散フェーズは OCC+MVCC トランザクションモデルを拡張し、シングルノードの設計不変条件（I-1〜I-14）を維持したまま分散化する。
 
 ### 20.1 アンバンドル・アーキテクチャ（Unbundled Architecture）
 
-FDB はすべてのコンポーネントを独立したロールに分離し、各ロールが単一責務を持つ。Adlaire-DB の分散フェーズもこの原則を採用する。
+各コンポーネントを独立したロールに分離し、各ロールが単一責務を持つ。
 
 **ロールマップ：**
 ```
@@ -2735,7 +2735,7 @@ FDB はすべてのコンポーネントを独立したロールに分離し、�
 
 ### 20.2 OCC + MVCC トランザクションモデル
 
-FDB の OCC（楽観的並行制御）+ MVCC（多版並行制御）を Adlaire-DB の分散フェーズに採用する。
+OCC（楽観的並行制御）+ MVCC（多版並行制御）を Adlaire-DB の分散フェーズに採用する。
 
 **設計原則：**
 - **読み取り時にロックを取得しない**（OCC）。読み取りはすべてスナップショットバージョンで行う（MVCC）
@@ -2772,10 +2772,9 @@ FDB の OCC（楽観的並行制御）+ MVCC（多版並行制御）を Adlaire-
    - 競合 ABORT を受けたクライアントは RV を再取得して最初からやり直し
 ```
 
-**Adlaire-DB 独自の改善点（FDB との差分）：**
-- FDB はトランザクション制限が**ハードコード**（5 秒、10MB、10KB key、100KB value）
-- Adlaire-DB は**設定ファイルで調整可能**（→ 20.8 参照）
-- FDB は ACL/認証なし → Adlaire-DB は Phase 2 から認証を組み込む（→ 20.9 参照）
+**Adlaire-DB の設計方針：**
+- トランザクション制限は**設定ファイルで調整可能**（→ 20.8 参照）
+- Phase 2 から認証を組み込む（→ 20.9 参照）
 
 ### 20.3 WAL-first 耐久性設計
 
@@ -2802,7 +2801,7 @@ FDB の OCC（楽観的並行制御）+ MVCC（多版並行制御）を Adlaire-
 
 ### 20.4 Generation-based リカバリ
 
-FDB の Generation-based Recovery を採用。システム障害時の回復を高速化する。
+Generation-based Recovery を採用。システム障害時の回復を高速化する。
 
 **Generation の定義：**
 - すべてのコミットには **CommitVersion（CV）** と **世代番号（Generation ID）** が付与される
@@ -2870,7 +2869,7 @@ async fn verify_replica_hash_chain(
 
 ### 20.6 Phase 3：シャーディング（Range-based Sharding）
 
-FDB の Range-based Sharding（Ordered Key-Value）を採用。Hash-based よりも範囲スキャンに有利。
+Range-based Sharding（Ordered Key-Value）を採用。Hash-based よりも範囲スキャンに有利。
 
 **シャード配置：**
 ```
@@ -2906,7 +2905,7 @@ shard_map.json:
 
 ### 20.7 Phase 4：分散トランザクション（OCC ベース）
 
-**OCC による分散トランザクション（FDB 相当）：**
+**OCC による分散トランザクション：**
 
 2PC（Two-Phase Commit）は「ロック保持中の参加者クラッシュ」で停止するリスクがある。OCC は読み取り時にロックを取らないため、2PC のブロッキング問題を回避できる。
 
@@ -2938,19 +2937,19 @@ shard_map.json:
 
 ### 20.8 設定可能なトランザクション制約
 
-FDB ではトランザクション制限がハードコードされている（5 秒、10MB）。Adlaire-DB では設定ファイルで調整可能とする。
+Adlaire-DB ではトランザクション制限を設定ファイルで調整可能とする。
 
 **設定項目（`adlaire-db.toml` 内 `[distributed]` セクション）：**
 ```toml
 [distributed.transaction]
-timeout_seconds = 10          # FDB は 5 秒ハード制限（Adlaire-DB は設定可能）
-max_payload_bytes = 20971520  # デフォルト 20MB（FDB は 10MB）
-max_key_bytes = 10240         # デフォルト 10KB（FDB 同等）
-max_value_bytes = 204800      # デフォルト 200KB（FDB は 100KB）
+timeout_seconds = 10          # タイムアウト秒数（設定可能）
+max_payload_bytes = 20971520  # デフォルト 20MB
+max_key_bytes = 10240         # デフォルト 10KB
+max_value_bytes = 204800      # デフォルト 200KB
 max_read_keys = 100000        # 1 TX あたりの最大 read キー数
 
 [distributed.resolver]
-conflict_window_seconds = 30  # Resolver が保持する書き込み履歴（FDB は 5 秒ハード）
+conflict_window_seconds = 30  # Resolver が保持する書き込み履歴
 
 [distributed.replication]
 replica_count = 2             # デフォルトレプリカ数
@@ -2964,9 +2963,7 @@ hash_check_interval_seconds = 60  # イベントログ・ハッシュ検証間�
 
 ### 20.9 認証・アクセス制御（分散フェーズ）
 
-**FDB の既知の弱点：ゼロ ACL。**  
-FDB ネットワークに到達できたクライアントはすべての操作を行える。  
-Adlaire-DB は Phase 2 から認証を組み込む。
+Adlaire-DB は Phase 2 から認証を組み込む。ネットワークに到達できたクライアントが無制限に操作できる設計を避け、すべてのアクセスに認証を要求する。
 
 **Phase 2 〜 4 の認証方式：**
 ```
@@ -2996,9 +2993,7 @@ node_key_path = "/etc/adlaire-db/node.key"
 
 ### 20.10 Layers：データモデルの抽象化
 
-FDB の「Layers」概念：生の KV の上に高レベルデータモデルを独立レイヤーとして実装する。
-
-Adlaire-DB では Phase 1 の KV + Event Log を基盤レイヤーとし、将来の拡張をレイヤーとして追加できる設計を明示する：
+Adlaire-DB では生の KV の上に高レベルデータモデルを独立レイヤーとして実装する。Phase 1 の KV + Event Log を基盤レイヤーとし、将来の拡張をレイヤーとして追加できる設計を明示する：
 
 ```
 ┌─────────────────────────────────────┐
@@ -3226,7 +3221,7 @@ FATAL   : サービス停止（起動失敗、致命的障害）
 
 ### 22.6 決定論的シミュレーションテスト（DST）
 
-FoundationDB は Flow 言語と決定論的シミュレーターにより約 1 兆 CPU 時間分のテストを実施し、Jepsen が「既知の全障害パターンに耐性がある」と評価した。Adlaire DB は **自前の決定論的シミュレーター**（外部クレートなし・I-11）を使用して同等のテスト戦略を実装する。
+Adlaire DB は **自前の決定論的シミュレーター**（外部クレートなし・I-11）を使用して分散システムの正確性を検証する。決定論的シミュレーションにより、膨大な障害シナリオを再現性のある形でテストできる。
 
 **基本原則：**
 - すべての非決定論的要素（ディスク I/O、時刻、乱数）をシミュレータが制御する
@@ -4577,8 +4572,7 @@ jq 'select(.duration_ms > 50)' /var/log/adlaire-db/*.json
 **対策：**
 ```
 ├─ Phase 1 で OCC の単体実装を完全に安定させてから分散化
-├─ Phase 2-4 は FoundationDB の論文・実装を詳細に研究して着手
-│  → §20 の分散実装詳細仕様を Phase 1 完了後に更新
+├─ Phase 2-4 は §20 の分散実装詳細仕様を Phase 1 完了後に更新
 └─ 各フェーズで 1ヶ月以上の DST + Chaos Engineering テスト期間
 ```
 
