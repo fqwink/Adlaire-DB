@@ -2101,7 +2101,7 @@ scrape_configs:
 |---|---|---|---|
 | `adlaire-db` | 実行バイナリ（静的リンク） | GitHub Releases | サーバー運用者 |
 | `adlaire-client`（Rust SDK） | ソースコード（tar.gz） | GitHub Releases | Rust アプリ開発者 |
-| Go / TypeScript / 他言語 SDK | ソースコード（tar.gz） | GitHub Releases | 各言語アプリ開発者 |
+| Go / TypeScript SDK | ソースコード（tar.gz） | GitHub Releases | 各言語アプリ開発者 |
 
 **方針：** サーバーバイナリのみコンパイル済みバイナリ配布。SDK はすべてソースコード配布（GitHub Releases）。利用者側でビルドする。
 
@@ -2138,7 +2138,7 @@ sha256sum adlaire-db-v{VERSION}-*.tar.gz > SHA256SUMS.txt
 - **GitHub Releases**：すべての配布物を一元管理する唯一の配布チャネル
   - サーバーバイナリアーカイブ（プラットフォーム別）+ `SHA256SUMS.txt`
   - Rust SDK（`adlaire-client`）ソースアーカイブ
-  - 他言語 SDK ソースアーカイブ
+  - Go / TypeScript SDK ソースアーカイブ
 - **crates.io / npm / pkg.go.dev 等の言語パッケージマネージャは使用しない**
 
 **検証手順（エンドユーザー向け）：**
@@ -2600,8 +2600,8 @@ fn main() {
 アプリケーション
     ├─ Rust SDK ──────────────┐
     ├─ Go SDK ────────────────┤ SDK API（言語ネイティブ）
-    ├─ TypeScript SDK ────────┤  ・OCC リトライ
-    └─ その他言語 SDK ────────┘  ・RAII トランザクション
+    └─ TypeScript SDK ────────┘  ・OCC リトライ
+                                 ・RAII トランザクション
              │                   ・論理削除透過
              │                   ・エラーマッピング
              │
@@ -2638,7 +2638,7 @@ SDK が TCP プロトコルの詳細とプロトコル実装を吸収する。�
 | クライアント | 接続方式 | 備考 |
 |---|---|---|
 | `adlaire-client`（Rust SDK） | TCP/ADLR/ADLA（§18.1） | 高性能・外部 HTTP クライアント不要 |
-| Go / TypeScript / Python SDK | TCP/ADLR/ADLA（§18.1） | SDK が TCP プロトコルを実装 |
+| Go / TypeScript SDK | TCP/ADLR/ADLA（§18.1） | SDK が TCP プロトコルを実装 |
 | curl・CI スクリプト・Web | HTTP/JSON API（§18.2）直接 | SDK なし・HTTP/JSON API に直接アクセス |
 
 #### 18.5.4 Phase 別実装計画
@@ -3904,47 +3904,23 @@ Phase 1 完了後（Week 10 以降）に着手予定。
 GET /api/v1/kv/:key
 ```
 
-**Python 実装例：**
-```python
-import requests
-
-url = "https://localhost:443/api/v1/kv/user:1"
-headers = {
+**TypeScript 実装例：**
+```typescript
+const url = "https://localhost:443/api/v1/kv/user:1";
+const headers = {
     "Authorization": "Bearer sk_live_abc123def456...",
     "Content-Type": "application/json"
-}
-
-response = requests.get(url, headers=headers, verify=False)  # verify=True 本番環境
-if response.status_code == 200:
-    data = response.json()
-    print(f"Value: {data}")
-elif response.status_code == 401:
-    print("Unauthorized - Invalid API Key")
-elif response.status_code == 404:
-    print("Key not found")
-```
-
-**Node.js 実装例：**
-```javascript
-const axios = require('axios');
-
-const config = {
-    method: 'GET',
-    url: 'https://localhost:443/api/v1/kv/user:1',
-    headers: {
-        'Authorization': 'Bearer sk_live_abc123def456...',
-        'Content-Type': 'application/json'
-    },
-    httpsAgent: new https.Agent({ rejectUnauthorized: false })  // 本番環境は true
 };
 
-axios(config)
-    .then(response => {
-        console.log('Value:', response.data);
-    })
-    .catch(error => {
-        console.error('Error:', error.response.status);
-    });
+const response = await fetch(url, { headers });
+if (response.ok) {
+    const data = await response.json();
+    console.log("Value:", data);
+} else if (response.status === 401) {
+    console.error("Unauthorized - Invalid API Key");
+} else if (response.status === 404) {
+    console.error("Key not found");
+}
 ```
 
 **Go 実装例：**
@@ -4044,21 +4020,20 @@ curl_close($ch);
 DELETE /api/v1/kv/:key
 ```
 
-**Python 実装例：**
-```python
-import requests
+**TypeScript 実装例：**
+```typescript
+const url = "https://localhost:443/api/v1/kv/user:1";
 
-url = "https://localhost:443/api/v1/kv/user:1"
-headers = {
-    "Authorization": "Bearer sk_live_abc123def456..."
+const response = await fetch(url, {
+    method: "DELETE",
+    headers: { "Authorization": "Bearer sk_live_abc123def456..." }
+});
+
+if (response.ok) {
+    console.log("Key deleted successfully");
+} else {
+    console.error("Error:", response.status);
 }
-
-response = requests.delete(url, headers=headers, verify=True)
-
-if response.status_code == 200:
-    print("Key deleted successfully")
-else:
-    print(f"Error: {response.status_code}")
 ```
 
 ### 26.3 Event API
@@ -4077,10 +4052,8 @@ Body:
 }
 ```
 
-**Node.js 実装例：**
-```javascript
-const axios = require('axios');
-
+**TypeScript 実装例：**
+```typescript
 const url = 'https://localhost:443/api/v1/events/user:1';
 const data = {
     event_type: 'UPDATE',
@@ -4091,19 +4064,16 @@ const data = {
     }
 };
 
-axios.post(url, data, {
+const response = await fetch(url, {
+    method: 'POST',
     headers: {
         'Authorization': 'Bearer sk_live_abc123def456...',
         'Content-Type': 'application/json'
     },
-    httpsAgent: new (require('https')).Agent({ rejectUnauthorized: false })
-})
-.then(response => {
-    console.log('Event appended:', response.data);
-})
-.catch(error => {
-    console.error('Error:', error.response.status);
+    body: JSON.stringify(data)
 });
+const result = await response.json();
+console.log('Event appended:', result);
 ```
 
 #### 26.3.2 GET イベント履歴
