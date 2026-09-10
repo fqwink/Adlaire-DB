@@ -38,8 +38,8 @@ Rust で実装されるシングルバイナリ DB サーバー。**libSQL を�
 
 **共通制約（全フェーズ）：**
 - Rust / Linux / シングルバイナリ起動（`./adlaire-db --data ./mydb --port 9876`）
-- フォーク外の外部クレートは使用しない（SHA-256・CRC32・TCP は自前実装）
-- TCP のみ（ポート 9876）。REST は後回し
+- フォーク外の外部クレートは使用しない（SHA-256・CRC32・TCP・HTTP は自前実装）
+- Phase 2 は TCP のみ（ポート 9876）。HTTP/JSON（ポート 8080）は Phase 2 完了後に追加（§18.5）
 
 ### 1.3.1 後回し（Phase 2 スコープ外）
 
@@ -50,7 +50,7 @@ Rust で実装されるシングルバイナリ DB サーバー。**libSQL を�
 | 複数シャード | Phase 6 以降 |
 | レプリケーション | Adlaire WAL 正本設計確立が先決（Phase 6） |
 | 分散トランザクション | レプリケーション完成後（Phase 6） |
-| REST API | TCP プロトコル 1 本に絞る |
+| HTTP/JSON API | Phase 2 完了後に追加。SDK wire format として位置づける（§18.5） |
 | 保存時暗号化 | トランスポート暗号化を優先 |
 | JWT | Phase 2 は API キー認証 |
 | Prometheus / Grafana | 構造化ログで代替 |
@@ -772,7 +772,7 @@ Phase 1 は悲観的ロックを使用しない。読み取りはロックなし
    → write_set: HashMap<Key, Value>
 
 2. get(key)
-   → state.bin から read_version 時点のバージョンを取得（MVCC）
+   → state.db から read_version 時点のバージョンを取得（MVCC）
    → read_set に (key, observed_version) を追加
 
 3. set(key, value) / delete(key)
@@ -782,7 +782,7 @@ Phase 1 は悲観的ロックを使用しない。読み取りはロックなし
    → read_set の各キーを検証：
      current_version(key) == observed_version  であれば OK
      current_version(key) >  observed_version  → 競合 → Abort
-   → 競合なし: write_set を WAL に書き込み → fsync → state.bin 更新
+   → 競合なし: write_set を WAL に書き込み → fsync → state.db 更新
    → global_version をインクリメント
 
 5. rollback() / Abort
@@ -2134,7 +2134,7 @@ sha256sum -c SHA256SUMS.txt
 
 ## 18. ネットワークインターフェース
 
-**Phase 2 では TCP カスタムプロトコル 1 本のみ。** REST は後回し（§1.3.1 参照）。
+**Phase 2 は TCP カスタムプロトコル 1 本のみ。** HTTP/JSON は Phase 2 完了後に追加（§18.5 参照）。
 
 ### 18.1 TCP（ポート 9876）：Adlaire バイナリプロトコル
 
@@ -2505,27 +2505,27 @@ console.log(history);
 
 ### 18.4 サーバ実装（Rust）概要
 
+外部クレートなし（I-11）。`std::net` のスレッドモデルで実装する（非同期ランタイム不使用）。
+
 ```rust
-// 擬似コード
+// 擬似コード（std::net のみ・外部クレートなし）
 
-use tokio::net::TcpListener;
-use axum::Router;
+use std::net::TcpListener;
+use std::thread;
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    let db = Arc::new(Mutex::new(Database::new(/* ... */)));
+
     // TCP サーバ（ポート 9876）
-    let tcp_listener = TcpListener::bind("127.0.0.1:9876").await.unwrap();
-    tokio::spawn(async move {
-        handle_tcp_connections(tcp_listener).await;
-    });
-    
-    // REST API サーバ（ポート 8080）← 後回し（Phase 1 スコープ外・§18.2 参照）
-    // Phase 1 は TCP のみ。以下は将来 Phase 2+ で実装予定のスタブ。
-    // let app = Router::new()
-    //     .route("/api/v1/kv/:key", axum::routing::get(get_kv).put(set_kv).delete(delete_kv))
-    //     .route("/api/v1/events/:key", axum::routing::post(append_event).get(get_history));
-    // axum::Server::bind(&"127.0.0.1:8080".parse().unwrap())
-    //     .serve(app.into_make_service()).await.unwrap();
+    let tcp_listener = TcpListener::bind("127.0.0.1:9876").unwrap();
+    for stream in tcp_listener.incoming() {
+        let db = Arc::clone(&db);
+        thread::spawn(move || handle_adlr_connection(stream.unwrap(), db));
+    }
+
+    // HTTP/JSON サーバ（ポート 8080）← Phase 2 完了後に追加（§18.2・§18.5 参照）
+    // let http_listener = TcpListener::bind("127.0.0.1:8080").unwrap();
+    // thread::spawn(move || { for stream in http_listener.incoming() { ... } });
 }
 ```
 
@@ -2535,7 +2535,7 @@ async fn main() {
 1. サーバー起動時
    ├─ .lock ファイル取得（I-5）
    ├─ wal.bin の末尾スキャン（COMMITTED / PENDING / PARTIAL 判定・I-8）
-   ├─ state.bin の存在確認（なければ --rebuild で WAL から再構築）
+   ├─ state.db の存在確認（なければ --rebuild で WAL から再構築）
    └─ ハッシュチェーン検証（CRC32 / チェーン断絶 → exit 2・I-3）
 
 2. トランザクション実行前
@@ -2544,13 +2544,13 @@ async fn main() {
 
 3. トランザクション完了後（コミット時）
    ├─ WAL COMMIT エントリ書き込み + fsync（I-1）
-   ├─ state.bin へ反映（B+Tree 更新）
+   ├─ state.db へ反映（libSQL 経由）
    └─ クライアントへ成功応答
 
 4. 定期チェックポイント
    ├─ WAL CHECKPOINT エントリ書き込み
-   ├─ state.bin のインテグリティ確認（adlaire-db verify）
-   └─ 古い WAL エントリの圧縮（state.bin が最新なら安全）
+   ├─ state.db のインテグリティ確認（adlaire-db verify）
+   └─ 古い WAL エントリの圧縮（state.db が最新なら安全）
 ```
 
 > **注：** 旧アーキテクチャの `metadata.dat`（バイナリ）・`data.kv`・`txlog.dat` ファイル仕様は v2.1 で廃止。現行のファイル仕様は §2.2 を参照。分散フェーズ（Phase 2-4）のストレージ設計は §20 を参照。
@@ -3457,8 +3457,8 @@ for seed in 0..1000 { test_crash_during_commit(seed); }
 
 ```
 【TCP（ポート 9876）】
-  実装：tokio-tls でラッピング
-  プロトコル：TLS 1.3 のみ（TLS 1.2以下は非対応）
+  実装：自前 TLS 1.3 ハンドシェイク実装（外部クレートなし・I-11）
+  プロトコル：TLS 1.3 のみ（TLS 1.2 以下は非対応）
   
   設定ファイル：
   {
@@ -3470,8 +3470,8 @@ for seed in 0..1000 { test_crash_during_commit(seed); }
     }
   }
 
-【REST API（ポート 8080 → ポート 443）】
-  実装：Axum + tokio-tls で HTTPS 対応
+【HTTP/JSON（ポート 8080 → ポート 443）】
+  実装：自前 HTTP/1.1 パーサ + 自前 TLS 1.3（外部クレートなし・I-11）
   
   リダイレクト設定：
     HTTP ポート 8080 でリッスン
@@ -3968,8 +3968,10 @@ Body:
 }
 ```
 
-**Rust 実装例：**
+**Rust 実装例（HTTP/JSON を直接使う場合。Rust SDK は TCP/ADLR/ADLA を使用・§18.5）：**
 ```rust
+// 注：Rust SDK（adlaire-client）は TCP/ADLR/ADLA で接続する。
+// 以下は HTTP/JSON エンドポイントをテスト目的で直接叩く例（reqwest は SDK 内部では使わない）。
 use reqwest::Client;
 use serde_json::json;
 
@@ -4151,8 +4153,10 @@ func main() {
 GET /api/v1/join/:left_key/:right_table?on=field
 ```
 
-**Rust 実装例：**
+**Rust 実装例（HTTP/JSON を直接使う場合。Rust SDK は TCP/ADLR/ADLA を使用・§18.5）：**
 ```rust
+// 注：Rust SDK（adlaire-client）は TCP/ADLR/ADLA で接続する。
+// 以下は HTTP/JSON エンドポイントをテスト目的で直接叩く例。
 use reqwest::Client;
 
 #[tokio::main]
