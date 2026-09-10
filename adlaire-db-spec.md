@@ -67,6 +67,9 @@ libSQL 内部コンポーネントの内製化はフェーズ完了後に計画�
 | マルチDB（パスベース） | 2 | URL パスで接続先 DB を指定 |
 | WebSocket API（hrana-ws） | 3 | インタラクティブトランザクション用 |
 | 埋め込みレプリカ同期 | 3 | クライアント側ローカルレプリカとの同期プロトコル |
+| ATTACH DATABASE（クロス DB クエリ） | 3 | 管理下 DB 間のみ許可。任意パス指定は禁止 |
+| メトリクス API | 3 | 接続数・クエリ数・ストレージ使用量の取得 |
+| SQLite 拡張機能ロード | 5+ | `.so` / Wasm 拡張（Vector Search 等）のロード |
 
 ### 2.2 データベース管理
 
@@ -74,7 +77,7 @@ libSQL 内部コンポーネントの内製化はフェーズ完了後に計画�
 |------|-------|------|
 | DB 作成・削除・一覧 | 2 | 管理 API 経由での DB ライフサイクル管理 |
 | トークン発行・失効 | 2 | DB ごと・全体のトークン管理 |
-| ブランチ | 5+ | DB のブランチ作成 |
+| ブランチ | 5+ | DB のブランチ作成（WAL スナップショットから派生） |
 | ポイントインタイムリストア | 5+ | 任意の時点への DB 復元 |
 
 ### 2.3 レプリケーション
@@ -83,6 +86,15 @@ libSQL 内部コンポーネントの内製化はフェーズ完了後に計画�
 |------|-------|------|
 | プライマリ・レプリカ構成 | 4 | 書き込みはプライマリ、読み取りはレプリカへ |
 | WAL ベース同期 | 4 | libSQL の WAL レプリケーションを使用 |
+| レプリカへの書き込みリダイレクト | 4 | 307 Temporary Redirect でプライマリへ転送 |
+
+### 2.4 対象外（自己ホストでは不適用）
+
+| 機能 | 理由 |
+|------|------|
+| データベースロケーション | Turso のエッジノード概念。自己ホストでは単一サーバーのため不要 |
+| 組織・グループ管理 | マルチテナント SaaS 向け機能。単一運営者の自己ホストには不要 |
+| ストレージクォータ | クラウド課金と連動した機能。自己ホストでは OS レベルで管理 |
 
 ---
 
@@ -1504,16 +1516,87 @@ TC-3-5: 埋め込みレプリカ同期
   期待: サーバー側のデータが local.db に同期される
 ```
 
-**Phase 3 実装タスク（骨格）：**
+#### ATTACH DATABASE（クロス DB クエリ）
+
+Turso Cloud と同様に、Adlaire が管理する DB 間に限り `ATTACH DATABASE` を許可する。
+
+**セキュリティモデル：**
+- クライアントが `ATTACH DATABASE 'other-db' AS alias` を送信した場合、Adlaire は `'other-db'` を DB 名として解釈し、`databases/other-db/data.db` のパスを解決する
+- 任意のファイルパス（`/etc/passwd` 等）は DB 名バリデーション（`^[a-zA-Z0-9_-]{1,127}$`）で事前に拒否する
+- 存在しない DB 名の場合は `404 DB_NOT_FOUND` を返す
+
+**実装方針：**
+- hrana-http v2 の `execute` リクエストで ATTACH SQL を受け取った際、Adlaire 側でインターセプトして DB 名を解決する
+- sqld の Connection に対してパス解決済みの ATTACH を発行する
+- 対象 DB の接続が未オープンの場合はその場でオープンする
+
+**追加テストケース：**
+
+```
+TC-3-6: ATTACH DATABASE（クロス DB クエリ）
+  （a）db_a・db_b を作成し、それぞれにテーブルとデータを投入
+  （b）db_a への pipeline で:
+      ATTACH DATABASE 'db_b' AS b;
+      SELECT * FROM b.t;
+      期待: db_b のデータが返る
+  （c）ATTACH DATABASE '/etc/passwd' AS evil
+      → 400 INVALID_DB_NAME（バリデーション拒否）
+  （d）ATTACH DATABASE 'nonexistent' AS x
+      → 404 DB_NOT_FOUND
+```
+
+#### メトリクス API
+
+```
+GET /admin/v1/metrics
+```
+
+認証: 管理トークン必須（§6.4 管理 API 認証と同じ）
+
+**レスポンス（200 OK）：**
+
+```json
+{
+  "uptime_seconds": 3600,
+  "databases": [
+    {
+      "name": "mydb",
+      "size_bytes": 4096,
+      "wal_size_bytes": 1024,
+      "connections_active": 2,
+      "queries_total": 1500,
+      "rows_read_total": 8000,
+      "rows_written_total": 200
+    }
+  ],
+  "tokens_total": 5,
+  "tokens_revoked": 1
+}
+```
+
+カウンター（`queries_total` 等）はプロセス起動からの累積値。再起動でリセットされる（Phase 3 時点では永続化しない）。
+
+**追加テストケース：**
+
+```
+TC-3-7: メトリクス API
+  （a）GET /admin/v1/metrics（管理トークンあり）→ 200、databases 配列に管理下 DB が含まれる
+  （b）クエリ実行後に queries_total が増加していること
+  （c）GET /admin/v1/metrics（管理トークンなし）→ 401
+```
+
+**Phase 3 実装タスク：**
 
 ```
 T3-1: WebSocket サーバー追加（axum の WebSocket upgrade）
 T3-2: hrana-ws v3 hello ハンドシェイク + JWT 認証
-T3-3: ストリーム多重化レイヤー実装
-T3-4: execute / batch / sequence リクエスト処理（sqld 境界再利用）
-T3-5: インタラクティブトランザクション状態管理
-T3-6: 埋め込みレプリカ同期 API 実装
-T3-7: 統合テスト TC-3-1〜TC-3-5
+T3-3: ストリーム多重化レイヤー実装（stream_id ごとの接続状態管理）
+T3-4: execute / batch / sequence / describe リクエスト処理（sqld 境界再利用）
+T3-5: インタラクティブトランザクション状態管理（BEGIN/COMMIT/ROLLBACK）
+T3-6: 埋め込みレプリカ同期 API（GET /v2/replication/log + snapshot + heartbeat）
+T3-7: ATTACH DATABASE インターセプト・DB 名バリデーション・パス解決
+T3-8: メトリクス収集（インメモリカウンター）+ GET /admin/v1/metrics
+T3-9: 統合テスト TC-3-1〜TC-3-7
 ```
 
 ---
@@ -1522,13 +1605,124 @@ T3-7: 統合テスト TC-3-1〜TC-3-5
 
 **目標**：プライマリ・レプリカ構成での運用
 
-- WAL ベースのレプリカ同期（libSQL フォークの機能を利用）
-- プライマリ書き込み・レプリカ読み取りルーティング
-- プライマリ障害時の動作（詳細はフェーズ着手時に設計）
+#### アーキテクチャ
 
-**完了条件：**
-- プライマリ + レプリカ構成でデータが同期される
-- レプリカへの書き込みがプライマリへリダイレクトされる
+```
+クライアント
+  │
+  ├─ 書き込み → プライマリ（:8080）─ WAL 同期 ─→ レプリカ 1（:8080）
+  │                                             └→ レプリカ 2（:8080）
+  └─ 読み取り → レプリカ（ロードバランサー経由）
+```
+
+- プライマリとレプリカは同じバイナリ。起動フラグでロールを決定する
+- レプリカはプライマリの WAL フレームを HTTP ストリームで受信して自身の DB に適用する
+- レプリカへの書き込みは `307 Temporary Redirect` でプライマリへ転送する
+
+#### 起動フラグ（Phase 4 追加）
+
+```
+# プライマリとして起動
+adlaire-db serve --data ./data --role primary --primary-port 8082
+
+# レプリカとして起動
+adlaire-db serve --data ./data --role replica --primary-url http://primary:8082
+```
+
+| フラグ | 説明 |
+|--------|------|
+| `--role` | `standalone`（デフォルト）/ `primary` / `replica` |
+| `--primary-port` | プライマリが WAL ストリームを公開するポート（デフォルト: 8082）|
+| `--primary-url` | レプリカが接続するプライマリの URL |
+| `--replication-auth-token` | プライマリ・レプリカ間の認証トークン |
+
+#### レプリケーション API
+
+プライマリが `--primary-port` で公開する内部エンドポイント（クライアントは直接使わない）：
+
+```
+GET  /replication/v1/log?from_frame=<N>   WAL フレームストリーム（SSE）
+GET  /replication/v1/snapshot             全スナップショット（初回同期）
+POST /replication/v1/heartbeat            レプリカの生存確認
+GET  /replication/v1/status               プライマリの同期状態
+```
+
+#### ヘルスチェック拡張
+
+Phase 4 から `GET /v2/health` のレスポンスにロール情報を追加する：
+
+```json
+{
+  "status": "ok",
+  "role": "primary",
+  "replication_lag_frames": 0
+}
+```
+
+レプリカの場合：
+
+```json
+{
+  "status": "ok",
+  "role": "replica",
+  "primary_url": "http://primary:8080",
+  "replication_lag_frames": 3
+}
+```
+
+#### 書き込みリダイレクト
+
+レプリカが書き込みリクエストを受信した場合：
+
+```
+HTTP/1.1 307 Temporary Redirect
+Location: http://primary:8080/{db-name}/v2/pipeline
+```
+
+クライアント（libSQL SDK）は自動的にプライマリへ再送する。
+
+#### 完了条件（テストケース）
+
+```
+TC-4-1: WAL 同期（基本）
+  （a）プライマリで INSERT 実行
+  （b）レプリカで SELECT → プライマリのデータが反映されている
+  （c）GET /v2/health（レプリカ）→ replication_lag_frames = 0 または小さい値
+
+TC-4-2: 書き込みリダイレクト
+  （a）レプリカのエンドポイントに直接 POST /v2/pipeline（INSERT）を送信
+  （b）307 Redirect でプライマリへ転送される
+  （c）プライマリで SELECT → データが存在する
+
+TC-4-3: レプリカ障害・復帰
+  （a）レプリカを停止
+  （b）プライマリで INSERT を複数回実行
+  （c）レプリカを再起動（同じ --primary-url で）
+  （d）レプリカが差分 WAL フレームを取得して追いつく
+  （e）SELECT → 最新データが返る
+
+TC-4-4: プライマリ停止時のレプリカ挙動
+  （a）プライマリを停止
+  （b）レプリカへの SELECT → 200（既存データは返せる）
+  （c）レプリカへの INSERT → 503 または 307（プライマリ到達不能）
+  （d）GET /v2/health（レプリカ）→ status:"degraded" 等の警告
+
+TC-4-5: マルチレプリカ同期
+  プライマリ 1 台 + レプリカ 2 台の構成で TC-4-1 を実施
+  両レプリカで同じデータが返ること
+```
+
+**Phase 4 実装タスク：**
+
+```
+T4-1: --role フラグ対応（standalone / primary / replica の起動分岐）
+T4-2: WAL フレームストリーム API（GET /replication/v1/log SSE）
+T4-3: スナップショット API（GET /replication/v1/snapshot）
+T4-4: レプリカ側 WAL フレーム受信・適用ループ
+T4-5: 書き込みリダイレクト（307 → primary-url）
+T4-6: GET /v2/health にロール・ lag 情報を追加
+T4-7: 統合テスト TC-4-1〜TC-4-5
+```
 
 ---
 
@@ -1537,9 +1731,10 @@ T3-7: 統合テスト TC-3-1〜TC-3-5
 Phase 4 完了後に計画する。候補（優先度未確定）：
 
 - ブランチ・ポイントインタイムリストア
-- libSQL 内部コンポーネントの段階的内製化
-- 高可用性・水平スケール
-- 監視・メトリクス API
+- SQLite 拡張機能ロード（`.so` / Wasm）
+- libSQL 内部コンポーネントの段階的内製化（§3.5.3 のロードマップに従う）
+- 高可用性・自動フェイルオーバー
+- メトリクス永続化・外部監視連携（Prometheus 等）
 
 ---
 
