@@ -1395,7 +1395,7 @@ pub struct Database {
 - **GC戦略** ：履歴圧縮、ウィンドウ管理
 - **インデックス最適化** ：B+ Tree 導入
 - **SQLクエリ層** ：SQL パーサ・エグゼキューター（オプション）
-- **外部API** ：REST API、gRPC インターフェース
+- **外部API** ：HTTP/JSON API（§18.2）
 
 ---
 
@@ -2497,7 +2497,7 @@ console.log(history);
 
 ### 18.3 パフォーマンス比較
 
-| 項目 | TCP（ポート 9876） | REST API（ポート 8080） |
+| 項目 | TCP（ポート 9876） | HTTP/JSON（ポート 8080） |
 |------|---|---|
 | **レイテンシ** | 低（1-5ms） | 中（5-15ms） |
 | **スループット** | 高 | 中 |
@@ -2627,7 +2627,7 @@ SDK がワイヤ形式の差異とプロトコル詳細を吸収する。アプ�
 
 ### 19.1 パフォーマンス目標
 
-| 項目 | TCP（ポート 9876） | REST API（ポート 8080） | 測定環境 |
+| 項目 | TCP（ポート 9876） | HTTP/JSON（ポート 8080） | 測定環境 |
 |------|---|---|---|
 | **レイテンシ** | < 5ms（P99） | < 15ms（P99） | 推奨仕様マシン |
 | **スループット** | 1000+ ops/sec | 500+ ops/sec | 推奨仕様マシン |
@@ -2665,7 +2665,7 @@ SDK がワイヤ形式の差異とプロトコル詳細を吸収する。アプ�
 
 **Phase 1（SQLite B+Tree）：**
 ```
-state.bin（自前 B+Tree）のインデックスを使用
+state.db（libSQL SQLite B+Tree）のインデックスを使用
 - メモリ効率：SQLite の page cache 設定に従う（デフォルト 2MB）
 - 対応データサイズ：SQLite の上限（< 281 TB）まで対応
 - 独自インデックス実装は不要（§1.3.1 参照）
@@ -3027,7 +3027,7 @@ adlaire_db_requests_total
   # リクエスト総数（operation タグ：GET, SET, DELETE, APPEND, JOIN）
 
 adlaire_db_request_duration_seconds
-  # リクエストレイテンシ分布（TCP vs REST API）
+  # リクエストレイテンシ分布（TCP vs HTTP/JSON）
 
 adlaire_db_errors_total
   # エラー数（error_type タグ：TIMEOUT, CORRUPTED, LOCK_TIMEOUT）
@@ -3162,7 +3162,7 @@ FATAL   : サービス停止（起動失敗、致命的障害）
 **テストシナリオ：**
 ```
 1. ファイル破損
-   - state.bin を一部上書き
+   - state.db を一部上書き
    - 起動時の整合性チェック検証
 
 2. ネットワーク遅延
@@ -3314,7 +3314,7 @@ for seed in 0..1000 { test_crash_during_commit(seed); }
 **バックアップポリシー：**
 ```
 日次フルバックアップ：毎日 深夜 2時
-  ├─ 対象：全ファイル（metadata.json, state.bin, wal.bin）
+  ├─ 対象：全ファイル（metadata.json, state.db, wal.bin）
   ├─ 保持：7日分
   └─ 検証：チェックサム確認
 
@@ -3570,7 +3570,7 @@ fn check_permission(api_key: &str, operation: Operation) -> Result<()> {
     └─ data/                    # データディレクトリ（§2.2 参照）
 
 【ファイルレベル権限】
-  metadata.json, state.bin, wal.bin
+  metadata.json, state.db, wal.bin
     ├─ Owner: adlaire-db:adlaire-db
     ├─ Permission: 600 (rw-------)
     └─ 他ユーザー・グループアクセス禁止
@@ -3806,7 +3806,7 @@ IV（初期化ベクトル）：96 ビット（推奨）
 
 【Key Rotation】
   新 Master Key に移行する際：
-    1. 全 state.bin を新 Key で復号化
+    1. 全 state.db を新 Key で復号化
     2. 新 Master Key で再暗号化
     3. メタデータ更新
     4. 旧 Key は 90日間保持後削除
@@ -3816,31 +3816,26 @@ IV（初期化ベクトル）：96 ビット（推奨）
 
 **暗号化対象：**
 ```
-✅ state.bin（自前 B+Tree 現在状態・インデックス）
+✅ state.db（libSQL 現在状態・インデックス）
 ✅ wal.bin（監査 WAL・ハッシュチェーン）
 ⚠️ metadata.json（平文。鍵情報は格納しない設計を推奨）
 ```
 
-**コード例（Rust）：**
+**コード例（Rust・擬似コード）：**
+
+> **注意（I-11）：** 外部クレート（`aes_gcm` 等）は使用しない。AES-256-GCM は自前実装する（後回し・§25.4 参照）。以下は API 設計の参考用擬似コードである。
 
 ```rust
-use aes_gcm::{Aes256Gcm, Nonce, Key};
-use aes_gcm::aead::{Aad, Payload};
-
-fn encrypt_data(plaintext: &[u8], key: &Key<Aes256Gcm>, iv: &[u8]) -> Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new(key);
-    let nonce = Nonce::from_slice(iv);
-    
-    cipher.encrypt(nonce, Payload::from(plaintext))
-        .map_err(|e| EncryptionError(e))
+// 自前 AES-256-GCM 実装（擬似コード）
+fn encrypt_data(plaintext: &[u8], key: &[u8; 32], iv: &[u8; 12]) -> Result<Vec<u8>> {
+    // AES-256-GCM 暗号化：自前実装（外部クレートなし・I-11）
+    // ciphertext || tag（16バイト）を返す
+    todo!("自前 AES-256-GCM 実装")
 }
 
-fn decrypt_data(ciphertext: &[u8], key: &Key<Aes256Gcm>, iv: &[u8]) -> Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new(key);
-    let nonce = Nonce::from_slice(iv);
-    
-    cipher.decrypt(nonce, Payload::from(ciphertext))
-        .map_err(|e| DecryptionError(e))
+fn decrypt_data(ciphertext: &[u8], key: &[u8; 32], iv: &[u8; 12]) -> Result<Vec<u8>> {
+    // AES-256-GCM 復号化：認証タグ検証 → 平文返却
+    todo!("自前 AES-256-GCM 実装")
 }
 ```
 
@@ -3850,7 +3845,7 @@ fn decrypt_data(ciphertext: &[u8], key: &Key<Aes256Gcm>, iv: &[u8]) -> Result<Ve
 【後回し：データ保存時暗号化実装】
 Phase 1 完了後（Week 10 以降）に着手予定。
 
-  1. state.bin の暗号化（AES-256-GCM でファイル全体を暗号化）
+  1. state.db の暗号化（AES-256-GCM でファイル全体を暗号化・自前実装 I-11）
   2. wal.bin の暗号化（エントリ単位または全体）
   3. 鍵管理機構実装
   4. Key Rotation 機能
@@ -3861,7 +3856,7 @@ Phase 1 完了後（Week 10 以降）に着手予定。
 
 ## 26. API リファレンス（実装例）
 
-### 26.1 REST API エンドポイント
+### 26.1 HTTP/JSON API エンドポイント
 
 **基本情報：**
 ```
@@ -3968,38 +3963,14 @@ Body:
 }
 ```
 
-**Rust 実装例（HTTP/JSON を直接使う場合。Rust SDK は TCP/ADLR/ADLA を使用・§18.5）：**
-```rust
-// 注：Rust SDK（adlaire-client）は TCP/ADLR/ADLA で接続する。
-// 以下は HTTP/JSON エンドポイントをテスト目的で直接叩く例（reqwest は SDK 内部では使わない）。
-use reqwest::Client;
-use serde_json::json;
-
-#[tokio::main]
-async fn main() {
-    let client = Client::new();
-    
-    let body = json!({
-        "value": {
-            "name": "John Doe",
-            "email": "john@example.com"
-        }
-    });
-
-    let response = client
-        .put("https://localhost:443/api/v1/kv/user:1")
-        .header("Authorization", "Bearer sk_live_abc123def456...")
-        .json(&body)
-        .send()
-        .await
-        .unwrap();
-
-    if response.status().is_success() {
-        println!("Key set successfully");
-    } else {
-        println!("Error: {}", response.status());
-    }
-}
+**curl 実装例（HTTP/JSON 直接アクセス。Rust SDK は TCP/ADLR/ADLA を使用・§18.5）：**
+```bash
+# 注：Rust SDK（adlaire-client）は TCP/ADLR/ADLA で接続する。
+# HTTP/JSON エンドポイントには curl またはその他言語 SDK から直接アクセスする。
+curl -X PUT https://localhost:443/api/v1/kv/user:1 \
+  -H "Authorization: Bearer sk_live_abc123def456..." \
+  -H "Content-Type: application/json" \
+  -d '{"value": {"name": "John Doe", "email": "john@example.com"}}'
 ```
 
 **PHP 実装例：**
@@ -4153,28 +4124,12 @@ func main() {
 GET /api/v1/join/:left_key/:right_table?on=field
 ```
 
-**Rust 実装例（HTTP/JSON を直接使う場合。Rust SDK は TCP/ADLR/ADLA を使用・§18.5）：**
-```rust
-// 注：Rust SDK（adlaire-client）は TCP/ADLR/ADLA で接続する。
-// 以下は HTTP/JSON エンドポイントをテスト目的で直接叩く例。
-use reqwest::Client;
-
-#[tokio::main]
-async fn main() {
-    let client = Client::new();
-
-    let response = client
-        .get("https://localhost:443/api/v1/join/order:1/order_items?on=order_id")
-        .header("Authorization", "Bearer sk_live_abc123def456...")
-        .send()
-        .await
-        .unwrap();
-
-    if response.status().is_success() {
-        let body = response.json::<serde_json::Value>().await.unwrap();
-        println!("Join result: {}", body);
-    }
-}
+**curl 実装例（HTTP/JSON 直接アクセス。Rust SDK は TCP/ADLR/ADLA を使用・§18.5）：**
+```bash
+# 注：Rust SDK（adlaire-client）は TCP/ADLR/ADLA で接続する。
+# HTTP/JSON エンドポイントには curl またはその他言語 SDK から直接アクセスする。
+curl -X GET "https://localhost:443/api/v1/join/order:1/order_items?on=order_id" \
+  -H "Authorization: Bearer sk_live_abc123def456..."
 ```
 
 ---
@@ -4266,7 +4221,7 @@ curl http://localhost:9090/api/v1/query?query=memory_usage_percent
    systemctl reload adlaire-db
 
 2. インデックスキャッシュをクリア（Phase 1）
-   # REST API経由
+   # HTTP/JSON API 経由
    curl -X POST https://localhost:443/api/v1/admin/cache/clear \
      -H "Authorization: Bearer sk_live_admin_xxx"
 
@@ -4274,9 +4229,9 @@ curl http://localhost:9090/api/v1/query?query=memory_usage_percent
 1. サーバーメモリをアップグレード
    現在：4GB → 推奨：8-16GB
 
-2. state.bin の B+Tree ページキャッシュ 設定を調整
+2. state.db の B+Tree ページキャッシュ 設定を調整
    → PRAGMA cache_size = -65536 で 64MB キャッシュ確保
-   → メモリ使用量を抑制（インデックスはディスク上の state.bin が保持）
+   → メモリ使用量を抑制（インデックスはディスク上の state.db が保持）
 
 3. データサイズを分割
    → シャード数を増やす
@@ -4334,7 +4289,7 @@ ls -lh /var/log/adlaire-db/
 # ハッシュチェーン・整合性検証
 adlaire-db verify --data /var/lib/adlaire-db/data
 
-# state.bin と WAL の乖離を確認（exit code 2 → 整合性異常）
+# state.db と WAL の乖離を確認（exit code 2 → 整合性異常）
 adlaire-db verify --data /var/lib/adlaire-db/data --check-state-db
 
 # ファイルシステムチェック
@@ -4343,8 +4298,8 @@ fsck /dev/sda1  # デバイス名は環境に応じて変更
 
 **対応方法：**
 ```
-【Phase 1：state.bin 再構築】
-1. state.bin を WAL から再構築（破損しても WAL が正本・I-1）
+【Phase 1：state.db 再構築】
+1. state.db を WAL から再構築（破損しても WAL が正本・I-1）
    adlaire-db rebuild --data /var/lib/adlaire-db/data
    systemctl restart adlaire-db
 
