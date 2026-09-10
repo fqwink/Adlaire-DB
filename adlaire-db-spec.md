@@ -39,7 +39,7 @@ Rust で実装されるシングルバイナリ DB サーバー。**libSQL を�
 **共通制約（全フェーズ）：**
 - Rust / Linux / シングルバイナリ起動（`./adlaire-db --data ./mydb --port 9876`）
 - フォーク外の外部クレートは使用しない（SHA-256・CRC32・TCP・HTTP は自前実装）
-- Phase 2 は TCP のみ（ポート 9876）。HTTP/JSON（ポート 8080）は Phase 2 完了後に追加（§18.5）
+- Phase 2 は Rust SDK 経由 TCP のみ（ポート 9876）。他言語 SDK 用 HTTP/JSON（ポート 8080）は Phase 2 完了後に追加（§18.5）
 
 ### 1.3.1 後回し（Phase 2 スコープ外）
 
@@ -50,7 +50,7 @@ Rust で実装されるシングルバイナリ DB サーバー。**libSQL を�
 | 複数シャード | Phase 6 以降 |
 | レプリケーション | Adlaire WAL 正本設計確立が先決（Phase 6） |
 | 分散トランザクション | レプリケーション完成後（Phase 6） |
-| HTTP/JSON API | Phase 2 完了後に追加。SDK wire format として位置づける（§18.5） |
+| 他言語 SDK（HTTP/JSON） | Phase 2 完了後に追加。他言語 SDK の wire format（§18.5） |
 | 保存時暗号化 | トランスポート暗号化を優先 |
 | JWT | Phase 2 は API キー認証 |
 | Prometheus / Grafana | 構造化ログで代替 |
@@ -1395,7 +1395,7 @@ pub struct Database {
 - **GC戦略** ：履歴圧縮、ウィンドウ管理
 - **インデックス最適化** ：B+ Tree 導入
 - **SQLクエリ層** ：SQL パーサ・エグゼキューター（オプション）
-- **外部API** ：HTTP/JSON API（§18.2）
+- **外部 API** ：他言語 SDK（HTTP/JSON・§18.2）
 
 ---
 
@@ -2220,12 +2220,12 @@ Status バイト:
 
 ---
 
-### 18.2 HTTP/JSON API（ポート 8080）
+### 18.2 他言語 SDK ワイヤ形式：HTTP/JSON（ポート 8080）
 
-> **Phase 2 完了後に実装。SDK の wire format として位置づける（§18.5 参照）。**  
-> Phase 2 は TCP（§18.1）のみ。HTTP/JSON は Phase 2 完了後に追加し、他言語 SDK および curl・Web クライアントの接続先とする。外部クレートなしで `std::net` + 自前 HTTP/1.1 パーサで実装する。
+> **Phase 2 完了後に実装。他言語 SDK の wire format として位置づける（§18.5 参照）。**  
+> Phase 2 は TCP（§18.1）のみ。HTTP/JSON は Phase 2 完了後に追加し、Go / TypeScript / Python SDK および curl・Web クライアントの接続先とする。外部クレートなしで `std::net` + 自前 HTTP/1.1 パーサで実装する。
 
-**用途** ：標準インターフェース、ウェブアプリケーション、ロードバランサー対応
+**用途** ：Go/TS/Python SDK・curl・Web クライアントの接続先。Rust SDK（§18.1）は TCP を使用するため、HTTP/JSON を使わない。
 
 #### 18.2.1 API エンドポイント
 
@@ -2495,14 +2495,14 @@ console.log(history);
 
 ---
 
-### 18.3 パフォーマンス比較
+### 18.3 SDK 別パフォーマンス比較（Rust SDK vs 他言語 SDK）
 
-| 項目 | TCP（ポート 9876） | HTTP/JSON（ポート 8080） |
+| 項目 | Rust SDK（TCP・:9876） | 他言語 SDK（HTTP/JSON・:8080） |
 |------|---|---|
 | **レイテンシ** | 低（1-5ms） | 中（5-15ms） |
 | **スループット** | 高 | 中 |
 | **オーバーヘッド** | 少ない | HTTP ヘッダ分多い |
-| **用途** | リアルタイム処理 | ウェブアプリ |
+| **用途** | Rust アプリ・高性能パス | Go/TS/Python SDK・curl・Web |
 | **ロードバランサー** | 対応可 | 標準対応 |
 | **ブラウザ接続** | 不可 | 可（JavaScript Fetch API） |
 
@@ -2627,7 +2627,7 @@ SDK がワイヤ形式の差異とプロトコル詳細を吸収する。アプ�
 
 ### 19.1 パフォーマンス目標
 
-| 項目 | TCP（ポート 9876） | HTTP/JSON（ポート 8080） | 測定環境 |
+| 項目 | Rust SDK（TCP・:9876） | 他言語 SDK（HTTP/JSON・:8080） | 測定環境 |
 |------|---|---|---|
 | **レイテンシ** | < 5ms（P99） | < 15ms（P99） | 推奨仕様マシン |
 | **スループット** | 1000+ ops/sec | 500+ ops/sec | 推奨仕様マシン |
@@ -3027,7 +3027,7 @@ adlaire_db_requests_total
   # リクエスト総数（operation タグ：GET, SET, DELETE, APPEND, JOIN）
 
 adlaire_db_request_duration_seconds
-  # リクエストレイテンシ分布（TCP vs HTTP/JSON）
+  # リクエストレイテンシ分布（Rust SDK（TCP）vs 他言語 SDK（HTTP/JSON））
 
 adlaire_db_errors_total
   # エラー数（error_type タグ：TIMEOUT, CORRUPTED, LOCK_TIMEOUT）
@@ -3856,7 +3856,7 @@ Phase 1 完了後（Week 10 以降）に着手予定。
 
 ## 26. API リファレンス（実装例）
 
-### 26.1 HTTP/JSON API エンドポイント
+### 26.1 他言語 SDK ワイヤ：HTTP/JSON API エンドポイント
 
 **基本情報：**
 ```
