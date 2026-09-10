@@ -2154,10 +2154,10 @@ Status バイト:
 
 ---
 
-### 18.2 REST API（ポート 8080）
+### 18.2 HTTP/JSON API（ポート 8080）
 
-> **後回し（Phase 1 スコープ外）**  
-> Phase 1 はカスタム TCP プロトコル（§18.1）のみ。REST と TCP の同時提供は後回し（§1.3.1 参照）。本セクションは将来の参考仕様として保持する。
+> **Phase 2 完了後に実装。SDK の wire format として位置づける（§18.5 参照）。**  
+> Phase 2 は TCP（§18.1）のみ。HTTP/JSON は Phase 2 完了後に追加し、他言語 SDK および curl・Web クライアントの接続先とする。外部クレートなしで `std::net` + 自前 HTTP/1.1 パーサで実装する。
 
 **用途** ：標準インターフェース、ウェブアプリケーション、ロードバランサー対応
 
@@ -2493,6 +2493,61 @@ async fn main() {
 ```
 
 > **注：** 旧アーキテクチャの `metadata.dat`（バイナリ）・`data.kv`・`txlog.dat` ファイル仕様は v2.1 で廃止。現行のファイル仕様は §2.2 を参照。分散フェーズ（Phase 2-4）のストレージ設計は §20 を参照。
+
+---
+
+### 18.5 クライアント接続アーキテクチャ（TCP + HTTP/JSON + SDK 複合）
+
+TCP バイナリプロトコルと HTTP/JSON API を並列で提供し、SDK がそれぞれのワイヤ形式を包む複合アーキテクチャを採用する。
+
+#### 18.5.1 全体像
+
+```
+アプリケーション
+    ├─ Rust SDK ──────────────→ TCP :9876（ADLR/ADLA）  高性能パス
+    ├─ 他言語 SDK（Go・TS 等）→ HTTP :8080（JSON）      汎用パス
+    └─ curl / Web / スクリプト→ HTTP :8080（JSON）      ツール直接アクセス
+                   ↓
+    ┌─────────────────────────────────────────┐
+    │   Adlaire サーバー                      │
+    │   :9876  TCP リスナー（std::net）       │
+    │   :8080  HTTP/1.1 リスナー（std::net）  │
+    └──────────────┬──────────────────────────┘
+                   │ 共通処理（OCC・WAL・libSQL）
+                   ▼
+              Database { StorageBackend, WalEngine, SqlEngine }（§2.5）
+```
+
+#### 18.5.2 SDK の役割
+
+SDK はワイヤ形式の差異を吸収し、アプリケーションに言語ネイティブな API を提供する。
+
+| SDK 機能 | 内容 |
+|---|---|
+| OCC WriteConflict 自動リトライ | `0x02 WRITE_CONFLICT` 受信時に指数バックオフでリトライ。リトライ上限はコンフィグ可 |
+| トランザクション管理 | BEGIN / COMMIT / ROLLBACK を RAII で包む（Rust では `Drop` でロールバック） |
+| 接続管理 | TCP: コネクションリース。HTTP: Keep-Alive。切断時は自動再接続 |
+| 論理削除透過 | DELETE コマンドを SDK 側で `0x02 DELETE` コマンドに変換（TCP）または DELETE エンドポイントに転送（HTTP） |
+| エラーマッピング | ステータスバイト / HTTP ステータスコードを言語ネイティブなエラー型へ変換 |
+
+#### 18.5.3 ワイヤ形式の選択基準
+
+| ユースケース | 推奨ワイヤ形式 |
+|---|---|
+| Rust アプリ・内部ツール・高スループット | TCP/ADLR/ADLA（§18.1） |
+| Go / TypeScript / Python アプリ | HTTP/JSON（§18.2） |
+| curl・CI スクリプト・監査ツール | HTTP/JSON（§18.2） |
+| Web フロントエンド（ブラウザ） | HTTP/JSON（§18.2） |
+
+#### 18.5.4 Phase 別実装計画
+
+| Phase | 追加内容 |
+|---|---|
+| Phase 2 | TCP/ADLR/ADLA（:9876）実装完了。Rust SDK（基本） |
+| Phase 2+ | HTTP/JSON（:8080）追加。他言語 SDK 雛形（Go / TypeScript） |
+| Phase 3〜 | SDK の OCC リトライ・接続プール強化 |
+
+**制約：** HTTP/JSON 実装も外部クレートなし（`std::net` + 自前 HTTP/1.1 パーサ）。`tokio` / `axum` / `hyper` は使用しない（I-11）。
 
 ---
 
