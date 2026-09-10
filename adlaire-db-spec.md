@@ -169,6 +169,103 @@ adlaire-db バイナリ（Rust）
 - sqld の `Connection` / `Database` 型を直接呼び出す形で統合する
 - sqld の HTTP サーバーループは起動しない（Adlaire サーバーが HTTP を受け付ける）
 
+#### 3.3.1 Cargo ワークスペース構成
+
+Adlaire DB のリポジトリは libSQL フォークを Git submodule として管理し、Cargo workspace で参照する。
+
+```
+adlaire-db/              ← このリポジトリ
+├── Cargo.toml           ← workspace root
+├── crates/
+│   └── adlaire-server/  ← Adlaire サーバー層
+│       ├── Cargo.toml
+│       └── src/
+└── libsql/              ← git submodule (fqwink/libsql fork)
+    ├── sqld/            ← sqld crate
+    └── libsql-sys/      ← SQLite バインディング
+```
+
+**workspace Cargo.toml：**
+
+```toml
+[workspace]
+members = [
+    "crates/adlaire-server",
+    "libsql/sqld",
+]
+resolver = "2"
+```
+
+**adlaire-server/Cargo.toml 主要依存：**
+
+```toml
+[dependencies]
+sqld = { path = "../../libsql/sqld", default-features = false, features = ["core"] }
+tokio  = { version = "1", features = ["full"] }
+axum   = "0.7"
+tower  = "0.4"
+serde  = { version = "1", features = ["derive"] }
+serde_json = "1"
+jsonwebtoken = "9"
+
+[build-dependencies]
+# libsql-sys が SQLite をコンパイルするため cc が必要
+cc = "1"
+```
+
+#### 3.3.2 sqld との境界（呼び出しインターフェース）
+
+Adlaire サーバー層が sqld に対して行う操作は以下の 3 種類に限定する（Phase 1 時点）。
+
+**① DB オープン（起動時・Phase 2 は DB 作成時）**
+
+```rust
+// 擬似コード。実際の型名は libSQL フォーク実装時に確定する
+let db: sqld::Database = sqld::Database::open(path, sqld::Config {
+    journal_mode: JournalMode::Wal,
+    busy_timeout: Duration::from_millis(5000),
+    ..Default::default()
+})?;
+```
+
+**② SQL 実行（hrana-http v2 pipeline リクエストごと）**
+
+```rust
+let conn: sqld::Connection = db.connect()?;
+let result: sqld::QueryResult = conn.execute_batch(&statements)?;
+// result を hrana-http v2 レスポンス形式に変換して返す
+```
+
+**③ DB クローズ（DB 削除時・サーバーシャットダウン時）**
+
+```rust
+drop(conn);
+drop(db); // Drop で WAL チェックポイント + ファイルクローズ
+```
+
+Adlaire サーバー層は sqld の HTTP サーバー・認証・レプリケーション機能を一切呼び出さない。これらは sqld の `core` feature フラグで無効化する（フラグが存在しない場合は Phase 1 着手時に feature 分割を実施する）。
+
+#### 3.3.3 hrana-http v2 プロトコル変換層
+
+sqld の `QueryResult` → hrana-http v2 レスポンス JSON への変換は Adlaire サーバー層で実装する。
+
+```
+POST /v2/pipeline
+  ↓ リクエスト JSON をパース（Adlaire）
+  ↓ statements[] を sqld::Connection に渡す（Adlaire → sqld 境界）
+  ↓ sqld::QueryResult を受け取る（sqld → Adlaire 境界）
+  ↓ hrana-http v2 results[] 形式に変換（Adlaire）
+  ↓ JSON レスポンスを返す（Adlaire）
+```
+
+sqld が独自の hrana 実装を持つ場合、その型をそのまま流用することも可とする（実装時判断）。ただし sqld の HTTP サーバーを起動する形にはしない。
+
+#### 3.3.4 Phase 1 の依存ロックダウン方針
+
+- libSQL フォークのコミットハッシュを submodule で固定する
+- Phase 1 着手時に `Cargo.lock` をリポジトリにコミットし、依存バージョンをロックする
+- フォーク内部の変更は必ず diff レビューを行い、意図しない upstream 取り込みを防ぐ
+
 ### 3.4 マルチDB のデータ分離（Phase 2）
 
 **ファイル分離：**
