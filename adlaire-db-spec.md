@@ -11,7 +11,7 @@
 ### 1.1 プロジェクト概要
 Rust で実装されるシングルバイナリ DB サーバー。**libSQL を全機能ごとフォークし**（SQL エンジン・ファイルベースストレージ・WAL・クラッシュリカバリを含む全機能をそのまま採用）、その上に Adlaire 独自の改ざん証明監査層（append-only WAL + ハッシュチェーン）と多クライアント TCP サーバー機能を構築する。フォークによってコードベースを直接保有し、以降のフェーズで libSQL の内部実装（B+Tree・WAL エンジン・SQL パーサ）を自前実装に段階的に置き換えて外部依存ゼロを達成する（内製化ロードマップ）。将来的には SQLite / libSQL との互換性を維持しない計画であり、Phase 5 完了後は Adlaire 独自の SQL・ストレージ形式として完全に独立する（I-14）。
 
-**ポジション：** 「libSQL フォーク上に構築した監査証明付きサーバーを、シングルバイナリで」。libSQL が提供する SQL + ファイルベースストレージを基盤に、append-only WAL + ハッシュチェーンによる改ざん検知、論理削除のみによる完全な変更履歴、多クライアント TCP サーバーを一つのバイナリで実現する。SQLite 内部実装の段階的内製化によって、長期的な自律性と監査可能性を確保する。
+**ポジション：** 「libSQL フォーク上に構築した監査証明付きサーバーを、シングルバイナリで」。全機能フォーク済みの libSQL（SQL エンジン・ストレージ・WAL・クラッシュリカバリ）を基盤として、append-only WAL + ハッシュチェーンによる改ざん検知、論理削除のみによる完全な変更履歴、多クライアント TCP サーバーを一つのバイナリで実現する。SQLite 内部実装の段階的内製化によって、長期的な自律性と監査可能性を確保する。
 
 ### 1.2 設計目標
 - **libSQL 全機能フォーク** ：Phase 1 は libSQL を全機能ごとフォークし、SQL・ファイル永続化・WAL・クラッシュリカバリをすべてそのまま採用する
@@ -105,10 +105,10 @@ Rust で実装されるシングルバイナリ DB サーバー。**libSQL を�
 読み取りトランザクションは書き込みトランザクションをブロックしない。各キーのバージョン履歴を保持し、read-version 時点の値を返す。古いバージョンは定期 GC で回収する（論理削除済みのものも含む）。
 
 **I-11：段階的内製化（長期目標：外部依存ゼロ）**  
-Phase 1 では libSQL クレートのみを許容する。それ以外の外部クレートは使用しない（SHA-256・CRC32・TCP サーバーは自前実装）。Phase 2 以降で libSQL の内部コンポーネント（B+Tree・WAL エンジン・SQL パーサ）を自前実装に段階的に置き換え、最終的に外部依存ゼロを達成する。「内製化が大変だから外部に頼り続ける」は理由として認めない。各 Phase の完了条件として内製化ステップを必ず含める。
+Phase 1 ではフォーク済み libSQL（Cargo ワークスペースメンバとして内包）のみを使用する。フォーク外の外部クレートは使用しない（SHA-256・CRC32・TCP サーバーは自前実装）。Phase 2 以降でフォーク内の libSQL 内部コンポーネント（B+Tree・WAL エンジン・SQL パーサ）を自前実装に段階的に置き換え、最終的に外部依存ゼロを達成する。「内製化が大変だから外部に頼り続ける」は理由として認めない。各 Phase の完了条件として内製化ステップを必ず含める。
 
 **I-12：置き換え可能抽象レイヤー**  
-各コンポーネント（ストレージ・WAL エンジン・SQL エンジン）は Phase 2 で Rust trait として定義する。Phase 2 では libSQL を実装として使用し、Phase 3〜5 では同じ trait の自前実装に差し替える。サーバー層（Adlaire サーバー層・OCC・MVCC）は trait 経由でのみコンポーネントと通信し、具体型に依存しない。trait の変更なしに実装を交換できることを Phase 完了条件とする（詳細は §2.5）。
+各コンポーネント（ストレージ・WAL エンジン・SQL エンジン）は Phase 2 で Rust trait として定義する。Phase 2 ではフォーク済み libSQL を初期実装として使用し、Phase 3〜5 では同じ trait の自前実装に差し替える。サーバー層（Adlaire サーバー層・OCC・MVCC）は trait 経由でのみコンポーネントと通信し、具体型に依存しない。trait の変更なしに実装を交換できることを Phase 完了条件とする（詳細は §2.5）。
 
 **I-14：libSQL 機能をそのまま採用し、将来的に非互換化する計画**  
 Phase 1 では libSQL をフォークし、libSQL が提供するすべての機能（SQL エンジン・ストレージ・WAL・クラッシュリカバリ）をそのまま採用する。この段階では SQLite / libSQL との互換性が自然に生じるが、それは意図した互換性ではなくフォークの副産物である。Phase 3 以降の内製化によって SQLite ファイルフォーマットを Adlaire 独自形式に移行し、Phase 5 以降で SQL 方言も Adlaire SQL として独立させる計画である。将来的には libSQL / SQLite クライアントとの透過的な接続性は保証しない。
@@ -122,7 +122,7 @@ Phase 1 では libSQL をフォークし、libSQL が提供するすべての機
 
 ### 2.1 全体構成
 
-Adlaire WAL（Write-Ahead Log）をすべての変更の唯一の監査記録とする。現在状態・インデックスは libSQL が管理する `state.db`（SQLite ファイル）に保持し、Adlaire WAL から再構築できる派生物として扱う。SQL は libSQL が Phase 1 から提供する。
+Adlaire WAL（Write-Ahead Log）をすべての変更の唯一の監査記録とする。現在状態・インデックスはフォーク済み libSQL が管理する `state.db`（SQLite ファイル）に保持し、Adlaire WAL から再構築できる派生物として扱う。SQL はフォーク済み libSQL が Phase 1 から提供する。
 
 ```
 クライアント（TCP）
@@ -145,7 +145,7 @@ Adlaire WAL（Write-Ahead Log）をすべての変更の唯一の監査記録と
    │  WAL コミット後に libSQL へ書き込み
    ▼
 ┌────────────────────────────────────┐
-│  libSQL（state.db）               │  Phase 1-2 ストレージ（Phase 3 以降で自前形式へ移行・I-14）
+│  フォーク済み libSQL（state.db）  │  Phase 1-2 ストレージ（Phase 3 以降で自前形式へ移行・I-14）
 │  ・SQL エンジン                   │  SQL クエリ・スキーマ管理
 │  ・SQLite B+Tree                  │  ← 派生物（Adlaire WAL から再構築可能）
 │  ・SQLite WAL                     │  Phase 2 以降で段階的に内製化（I-11）
@@ -156,7 +156,7 @@ Adlaire WAL（Write-Ahead Log）をすべての変更の唯一の監査記録と
       ← Adlaire WAL シーケンス + ハッシュのみで検証可（I-7、署名なし）
 ```
 
-**不変条件：** `state.db` が破損しても Adlaire WAL から完全に再構築できる（`--rebuild`）。Adlaire WAL を失った場合は監査記録が失われる（I-1）。libSQL が SQLite の内部実装を担い、段階的に自前実装に置き換わる（I-11）。
+**不変条件：** `state.db` が破損しても Adlaire WAL から完全に再構築できる（`--rebuild`）。Adlaire WAL を失った場合は監査記録が失われる（I-1）。フォーク済み libSQL が SQLite の内部実装を担い、段階的に自前実装に置き換わる（I-11）。
 
 ### 2.2 ストレージ構成（Phase 1：シングルノード）
 
@@ -176,7 +176,7 @@ adlaire_db/（データディレクトリ）
 **設計原則：**
 - `wal.bin`（Adlaire WAL）が失われたら監査記録が失われる（I-1）
 - `state.db` が失われても Adlaire WAL から完全再構築できる（`adlaire-db rebuild --data ./mydb`）
-- Phase 1 では libSQL クレートのみを使用。B+Tree・SQL は libSQL に委任（I-11）
+- Phase 1 ではフォーク済み libSQL の全機能をそのまま使用。B+Tree・SQL はフォーク内 libSQL に委任（I-11）
 - Phase 2 以降で libSQL の内部コンポーネントを自前実装に段階的に置き換える（I-11）
 - 複数シャード・shard_map.json は後回し（→ 1.3.1 参照）
 
@@ -425,9 +425,9 @@ impl Database {
 
 | コンポーネント | Phase 2（初期実装） | Phase 3〜5（差し替え実装） |
 |---|---|---|
-| `StorageBackend` | `LibSqlStorage`（libSQL 経由） | `AdlaireStorage`（自前 B+Tree） |
+| `StorageBackend` | `LibSqlStorage`（フォーク済み libSQL 経由） | `AdlaireStorage`（自前 B+Tree） |
 | `WalEngine` | `AdlaireWalFile`（wal.bin 直書き） | `AdlaireWalEngine`（自前 WAL エンジン） |
-| `SqlEngine` | `LibSqlEngine`（libSQL） | `AdlaireParser` + `AdlaireExecutor` |
+| `SqlEngine` | `LibSqlEngine`（フォーク済み libSQL） | `AdlaireParser` + `AdlaireExecutor` |
 
 ---
 
@@ -1106,7 +1106,7 @@ fn test_recovery_from_event_log() {
 |------|------|
 | **抽象 trait 定義（先行）** | `StorageBackend` / `WalEngine` / `SqlEngine` trait を §2.5 の通り定義する。libSQL 実装を作る前にまずこれを完成させる（I-12） |
 | `Database` 構造体 | `Box<dyn StorageBackend>` / `Box<dyn WalEngine>` / `Box<dyn SqlEngine>` を保持。サーバー層はここ経由のみ |
-| libSQL 初期実装 | `LibSqlStorage` / `AdlaireWalFile` / `LibSqlEngine` を各 trait の実装として作成 |
+| libSQL 初期実装 | `LibSqlStorage` / `AdlaireWalFile` / `LibSqlEngine` を各 trait の実装として作成（フォーク済み libSQL をラップ）|
 | Adlaire 監査 WAL | `wal.bin` の append-only 実装。SHA-256（自前）+ CRC32（自前）。fsync 境界（I-1） |
 | ハッシュチェーン | WAL エントリ単位の SHA-256（I-2）。CRC32 不一致・チェーン断絶 → グローバルロック・exit 2（I-3） |
 | OCC トランザクション | read-version / read-set / write-set。コミット時 read-set 検証 → WriteConflict Abort（I-9） |
