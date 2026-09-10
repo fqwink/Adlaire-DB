@@ -2650,3 +2650,1033 @@ Phase 1〜7 と並行して着手可能なものから開始する。
 | カバレッジ下限 | 内製クレート 95%・API 層 85% 未満でビルド失敗 |
 | クラッシュテスト | Phase 1 完了時点から CI 必須 |
 | プロパティテスト | 1000 ケース以上で回帰チェック |
+
+---
+
+## 14. 実装詳細（Rust レベル）
+
+### 14.1 モジュール構成
+
+```
+crates/adlaire-server/src/
+├── main.rs              ← エントリポイント・tokio ランタイム起動・CLI パース
+├── config.rs            ← Config struct・CLI フラグと config.toml のマージ
+├── error.rs             ← AppError enum（thiserror）・HTTP レスポンス変換
+├── state.rs             ← AppState struct・Arc<> ラッパー定義
+├── db/
+│   ├── mod.rs           ← DB 名バリデーション・DbInfo 型
+│   ├── manager.rs       ← DbManager struct・open/close/create/delete ロジック
+│   └── meta.rs          ← databases.json / tokens.json / branches.json 読み書き
+├── auth/
+│   ├── mod.rs           ← JWT 検証ロジック・Claims / AuthState struct
+│   └── middleware.rs    ← axum extractor: Authenticated
+├── http/
+│   ├── mod.rs           ← axum Router 組み立て（build_router / build_admin_router）
+│   ├── pipeline.rs      ← POST /v2/pipeline ハンドラ
+│   ├── health.rs        ← GET /v2/health ハンドラ
+│   └── admin/
+│       ├── mod.rs       ← 管理 API Router・AdminAuth extractor
+│       ├── databases.rs ← DB CRUD ハンドラ（Phase 2）
+│       ├── tokens.rs    ← トークン CRUD ハンドラ（Phase 2）
+│       ├── metrics.rs   ← GET /admin/v1/metrics（Phase 3）
+│       ├── backup.rs    ← バックアップ・リストア・PITR（Phase 5）
+│       └── branches.rs  ← ブランチ管理（Phase 6）
+├── hrana/
+│   ├── mod.rs           ← hrana-http v2 型の re-export
+│   ├── types.rs         ← PipelineRequest / PipelineResponse / Value 等
+│   └── convert.rs       ← sqld::QueryResult → hrana 型変換
+├── ws/
+│   ├── mod.rs           ← hrana-ws v3 WebSocket ハンドラ（Phase 3）
+│   ├── session.rs       ← WsSession・stream_id ごとの状態管理
+│   └── types.rs         ← ClientMsg / ServerMsg 型定義
+├── replication/
+│   ├── mod.rs           ← WAL レプリケーション共通型（Phase 4）
+│   ├── primary.rs       ← SSE /replication/v1/log・snapshot ハンドラ
+│   └── replica.rs       ← フレーム受信・CRC32 検証・適用ループ
+├── wal/
+│   ├── mod.rs           ← WAL アーカイブ公開 API（Phase 5）
+│   ├── archive.rs       ← フレーム書き込み・fsync・manifest 更新
+│   └── manifest.rs      ← Manifest / FrameMeta struct・アトミック保存
+└── metrics.rs           ← AtomicU64 カウンター・DashMap（Phase 3）
+```
+
+### 14.2 主要型定義
+
+#### AppState
+
+```rust
+// state.rs
+#[derive(Clone)]
+pub struct AppState {
+    pub config:  Arc<Config>,
+    pub db_mgr:  Arc<DbManager>,
+    pub auth:    Arc<AuthState>,
+    pub metrics: Arc<Metrics>,   // Phase 3～
+    pub role:    ServerRole,     // Phase 4～（デフォルト Standalone）
+}
+
+pub type SharedState = Arc<AppState>;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ServerRole {
+    Standalone,
+    Primary { primary_port: u16 },
+    Replica { primary_url: url::Url },
+}
+```
+
+#### Config
+
+```rust
+// config.rs
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub data_dir:    PathBuf,
+    pub port:        u16,              // デフォルト 8080
+    pub admin_port:  u16,              // デフォルト 8081
+    pub log_level:   tracing::Level,
+    pub auth:        AuthConfig,
+    pub admin:       AdminConfig,
+    pub storage:     StorageConfig,
+    pub replication: ReplicationConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthConfig {
+    pub jwt_secret: Option<Vec<u8>>,  // 32 バイト以上。None = 認証無効
+}
+
+#[derive(Debug, Clone)]
+pub struct AdminConfig {
+    pub auth_token: Option<String>,   // None = 認証無効（開発用）
+}
+
+#[derive(Debug, Clone)]
+pub struct StorageConfig {
+    pub busy_timeout_ms:              u64,  // デフォルト 5000
+    pub wal_checkpoint_pages:         u32,  // デフォルト 1000
+    pub wal_checkpoint_mode:          WalCheckpointMode,
+    pub wal_retention_days:           u32,  // 0 = PITR 無効
+    pub integrity_check_interval_hrs: u64,  // 0 = 無効
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum WalCheckpointMode { #[default] Passive, Full, Restart }
+
+#[derive(Debug, Clone)]
+pub struct ReplicationConfig {
+    pub write_mode:      ReplicationWriteMode,
+    pub sync_timeout_ms: u64,  // デフォルト 5000
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum ReplicationWriteMode { #[default] Async, Sync }
+```
+
+#### DbManager
+
+```rust
+// db/manager.rs
+pub struct DbManager {
+    data_dir: PathBuf,
+    dbs:      tokio::sync::RwLock<HashMap<String, Arc<sqld::Database>>>,
+    meta:     tokio::sync::RwLock<DatabasesMeta>,
+    config:   Arc<StorageConfig>,
+}
+
+impl DbManager {
+    /// 起動時: databases/ 以下を全件オープン
+    pub async fn open_all(data_dir: &Path, config: Arc<StorageConfig>) -> anyhow::Result<Self>;
+
+    /// DB 名 → sqld::Database を返す（存在しない場合 None）
+    pub async fn get(&self, name: &str) -> Option<Arc<sqld::Database>>;
+
+    /// DB 作成: ディレクトリ作成 → sqld オープン → meta 更新
+    pub async fn create(&self, name: &str) -> Result<DbInfo, AppError>;
+
+    /// DB 削除: sqld クローズ → ディレクトリ削除 → meta 更新
+    pub async fn delete(&self, name: &str) -> Result<(), AppError>;
+
+    /// DB 一覧（size_bytes は data.db のファイルサイズ）
+    pub async fn list(&self) -> Vec<DbInfo>;
+
+    /// シャットダウン時: 全 sqld::Database を drop
+    pub async fn close_all(self);
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DbInfo {
+    pub name:       String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub size_bytes: u64,
+}
+```
+
+#### JWT Claims と AuthState
+
+```rust
+// auth/mod.rs
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct Claims {
+    pub iss: Option<String>,
+    pub sub: String,                             // token_id（tok_xxx）
+    pub iat: i64,
+    pub exp: Option<i64>,
+    pub a:   AccessLevel,
+    pub dbs: Option<HashMap<String, AccessLevel>>, // Phase 2～
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AccessLevel { Rw, Ro }
+
+impl Claims {
+    /// DB 名に対するアクセスレベルを解決する
+    pub fn resolve_access(&self, db_name: &str) -> AccessLevel {
+        match &self.dbs {
+            Some(dbs) => dbs.get(db_name).cloned().unwrap_or(self.a.clone()),
+            None      => self.a.clone(),
+        }
+    }
+}
+
+pub struct AuthState {
+    secret:  Option<jsonwebtoken::DecodingKey>,
+    revoked: tokio::sync::RwLock<std::collections::HashSet<String>>,  // token_id
+    tokens:  tokio::sync::RwLock<Vec<TokenRecord>>,
+}
+
+impl AuthState {
+    /// 起動時: tokens.json からメモリへ展開
+    pub fn load(config: &Config, tokens: Vec<TokenRecord>) -> Self;
+
+    /// JWT 検証（6 ステップフロー §5.6）
+    pub fn verify(&self, raw_token: &str) -> Result<Claims, AppError>;
+
+    /// トークン発行: JWT 生成 + tokens.json 追記
+    pub async fn issue(&self, req: IssueTokenRequest, secret: &[u8]) -> Result<TokenIssued, AppError>;
+
+    /// トークン失効: revoked フラグ更新 + tokens.json 書き直し
+    pub async fn revoke(&self, token_id: &str, meta_path: &Path) -> Result<(), AppError>;
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TokenRecord {
+    pub id:         String,
+    pub access:     AccessLevel,
+    pub dbs:        Option<HashMap<String, AccessLevel>>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub revoked:    bool,
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+```
+
+#### AppError（全エラーコード対応）
+
+```rust
+// error.rs
+#[derive(Debug, thiserror::Error)]
+pub enum AppError {
+    #[error("authentication required")]
+    AuthRequired,
+    #[error("invalid or revoked token")]
+    AuthInvalid,
+    #[error("token expired")]
+    AuthExpired,
+    #[error("permission denied")]
+    PermissionDenied,
+    #[error("database not found: {0}")]
+    DbNotFound(String),
+    #[error("token not found: {0}")]
+    TokenNotFound(String),
+    #[error("database already exists: {0}")]
+    DbAlreadyExists(String),
+    #[error("invalid database name")]
+    InvalidDbName,
+    #[error("reserved database name")]
+    DbReservedName,
+    #[error("invalid request")]
+    InvalidRequest,
+    #[error("database is busy")]
+    StorageBusy,
+    #[error("replication timeout")]
+    ReplicationTimeout,
+    #[error("PITR not enabled")]
+    PitrNotEnabled,
+    #[error("frame not found")]
+    FrameNotFound,
+    #[error("restore integrity check failed")]
+    RestoreIntegrityFailed,
+    #[error("WAL frame corrupt")]
+    RestoreFrameCorrupt,
+    #[error("internal error: {0}")]
+    Internal(#[from] anyhow::Error),
+}
+
+impl axum::response::IntoResponse for AppError {
+    fn into_response(self) -> axum::response::Response {
+        use axum::http::StatusCode;
+        let (status, code) = match &self {
+            Self::AuthRequired          => (StatusCode::UNAUTHORIZED,            "AUTH_REQUIRED"),
+            Self::AuthInvalid           => (StatusCode::UNAUTHORIZED,            "AUTH_INVALID"),
+            Self::AuthExpired           => (StatusCode::UNAUTHORIZED,            "AUTH_EXPIRED"),
+            Self::PermissionDenied      => (StatusCode::FORBIDDEN,               "PERMISSION_DENIED"),
+            Self::DbNotFound(_)         => (StatusCode::NOT_FOUND,               "DB_NOT_FOUND"),
+            Self::TokenNotFound(_)      => (StatusCode::NOT_FOUND,               "TOKEN_NOT_FOUND"),
+            Self::DbAlreadyExists(_)    => (StatusCode::CONFLICT,                "DB_ALREADY_EXISTS"),
+            Self::InvalidDbName         => (StatusCode::BAD_REQUEST,             "INVALID_DB_NAME"),
+            Self::DbReservedName        => (StatusCode::BAD_REQUEST,             "DB_RESERVED_NAME"),
+            Self::InvalidRequest        => (StatusCode::BAD_REQUEST,             "INVALID_REQUEST"),
+            Self::StorageBusy           => (StatusCode::SERVICE_UNAVAILABLE,     "STORAGE_BUSY"),
+            Self::ReplicationTimeout    => (StatusCode::SERVICE_UNAVAILABLE,     "REPLICATION_TIMEOUT"),
+            Self::PitrNotEnabled        => (StatusCode::SERVICE_UNAVAILABLE,     "PITR_NOT_ENABLED"),
+            Self::FrameNotFound         => (StatusCode::NOT_FOUND,               "FRAME_NOT_FOUND"),
+            Self::RestoreIntegrityFailed=> (StatusCode::CONFLICT,                "RESTORE_INTEGRITY_FAILED"),
+            Self::RestoreFrameCorrupt   => (StatusCode::CONFLICT,                "RESTORE_FRAME_CORRUPT"),
+            Self::Internal(_)           => (StatusCode::INTERNAL_SERVER_ERROR,   "INTERNAL_ERROR"),
+        };
+        let body = axum::Json(serde_json::json!({
+            "error": self.to_string(),
+            "code":  code,
+        }));
+        (status, body).into_response()
+    }
+}
+```
+
+#### hrana 型（hrana-http v2 完全定義）
+
+```rust
+// hrana/types.rs
+
+// ─── リクエスト ───────────────────────────────────────────
+#[derive(Debug, serde::Deserialize)]
+pub struct PipelineRequest {
+    pub baton:    Option<String>,
+    pub requests: Vec<StreamRequest>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StreamRequest {
+    Execute  { stmt: Stmt },
+    Close,
+    Sequence { sql: String },
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct Stmt {
+    pub sql:        String,
+    pub args:       Vec<Value>,
+    #[serde(default)]
+    pub named_args: Vec<NamedArg>,
+    #[serde(default)]
+    pub want_rows:  bool,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum Value {
+    Integer { value: String },     // 整数を文字列で表現（i64 の範囲）
+    Real    { value: f64 },
+    Text    { value: String },
+    Blob    { value: String },     // base64 エンコード
+    Null,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct NamedArg {
+    pub name:  String,
+    pub value: Value,
+}
+
+// ─── レスポンス ──────────────────────────────────────────
+#[derive(Debug, serde::Serialize)]
+pub struct PipelineResponse {
+    pub baton:    Option<String>,
+    pub base_url: Option<String>,
+    pub results:  Vec<StreamResult>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum StreamResult {
+    Ok    { response: StreamResponse },
+    Error { error: HranaError },
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StreamResponse {
+    Execute { result: StmtResult },
+    Close,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct StmtResult {
+    pub cols:              Vec<Col>,
+    pub rows:              Vec<Vec<Value>>,
+    pub rows_affected:     u64,
+    pub last_insert_rowid: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct Col {
+    pub name:     Option<String>,
+    pub decltype: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct HranaError {
+    pub message: String,
+    pub code:    String,
+}
+```
+
+#### WAL アーカイブ manifest 型（Phase 5）
+
+```rust
+// wal/manifest.rs
+#[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
+pub struct Manifest {
+    pub version:    u32,             // フォーマットバージョン = 1
+    pub base_frame: u64,             // 最新スナップショット時点の WAL フレーム番号
+    pub snapshot:   Option<String>,  // "snapshot-{frame_no:012}.db"
+    pub frames:     Vec<FrameMeta>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FrameMeta {
+    pub frame_no:   u64,
+    pub file:       String,                       // "frame-{frame_no:012}.bin"
+    pub size:       u64,
+    pub checksum:   u32,                          // CRC32
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl Manifest {
+    pub fn load(path: &std::path::Path) -> anyhow::Result<Self>;
+
+    /// 一時ファイルへ書き込み → fsync → rename（POSIX アトミック）
+    pub fn save_atomic(&self, path: &std::path::Path) -> anyhow::Result<()>;
+
+    /// timestamp 以前の全フレームを返す
+    pub fn frames_before(&self, ts: chrono::DateTime<chrono::Utc>) -> Vec<&FrameMeta>;
+
+    /// frame_no 以下の全フレームを返す
+    pub fn frames_at_or_before(&self, frame_no: u64) -> Vec<&FrameMeta>;
+
+    /// 保持期間切れフレームをリストから除去し、除去したメタデータを返す
+    pub fn prune_before(&mut self, cutoff: chrono::DateTime<chrono::Utc>) -> Vec<FrameMeta>;
+}
+```
+
+#### Metrics（Phase 3）
+
+```rust
+// metrics.rs
+pub struct Metrics {
+    pub started_at:      std::time::Instant,
+    pub databases:       dashmap::DashMap<String, DbMetrics>,
+    pub tokens_total:    std::sync::atomic::AtomicU64,
+    pub tokens_revoked:  std::sync::atomic::AtomicU64,
+}
+
+#[derive(Default)]
+pub struct DbMetrics {
+    pub queries_total:      std::sync::atomic::AtomicU64,
+    pub rows_read_total:    std::sync::atomic::AtomicU64,
+    pub rows_written_total: std::sync::atomic::AtomicU64,
+    pub connections_active: std::sync::atomic::AtomicI64,
+}
+```
+
+### 14.3 axum 認証 Extractor
+
+```rust
+// auth/middleware.rs
+
+/// リクエストごとに JWT を検証し、Claims を抽出する axum Extractor
+pub struct Authenticated {
+    pub claims: Claims,
+}
+
+impl<S> axum::extract::FromRequestParts<S> for Authenticated
+where
+    S: Send + Sync,
+    SharedState: axum::extract::FromRef<S>,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let state = SharedState::from_ref(state);
+
+        // 認証無効モード（jwt_secret 未設定）はスキップ
+        if state.auth.is_disabled() {
+            return Ok(Authenticated { claims: Claims::anonymous() });
+        }
+
+        let header = parts.headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or(AppError::AuthRequired)?;
+
+        let token = header
+            .strip_prefix("Bearer ")
+            .ok_or(AppError::AuthInvalid)?;
+
+        let claims = state.auth.verify(token)?;
+        Ok(Authenticated { claims })
+    }
+}
+
+/// 管理 API 専用 Extractor（Bearer 文字列完全一致）
+pub struct AdminAuth;
+
+impl<S> axum::extract::FromRequestParts<S> for AdminAuth
+where
+    S: Send + Sync,
+    SharedState: axum::extract::FromRef<S>,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let state = SharedState::from_ref(state);
+        let expected = match &state.config.admin.auth_token {
+            None    => return Ok(AdminAuth),  // 認証無効
+            Some(t) => t,
+        };
+        let header = parts.headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or(AppError::AuthRequired)?;
+        let token = header.strip_prefix("Bearer ").ok_or(AppError::AuthInvalid)?;
+        if token != expected { return Err(AppError::AuthInvalid); }
+        Ok(AdminAuth)
+    }
+}
+```
+
+### 14.4 axum Router 設計
+
+```rust
+// http/mod.rs
+pub fn build_router(state: SharedState) -> axum::Router {
+    axum::Router::new()
+        // Phase 1: シングル DB
+        .route("/v2/pipeline",           axum::routing::post(pipeline::handle))
+        .route("/v2/health",             axum::routing::get(health::handle))
+        // Phase 2: パスベース DB ルーティング
+        .route("/:db_name/v2/pipeline",  axum::routing::post(pipeline::handle_db))
+        // Phase 3: WebSocket
+        .route("/v3/baton",              axum::routing::get(ws::handle))
+        .route("/:db_name/v3/baton",     axum::routing::get(ws::handle_db))
+        .with_state(state)
+}
+
+pub fn build_admin_router(state: SharedState) -> axum::Router {
+    use axum::routing::{delete, get, post};
+    axum::Router::new()
+        .nest("/admin/v1", axum::Router::new()
+            // Phase 2: DB CRUD
+            .route("/databases",
+                get(admin::databases::list).post(admin::databases::create))
+            .route("/databases/:name",
+                get(admin::databases::get).delete(admin::databases::delete))
+            // Phase 2: トークン CRUD
+            .route("/tokens",
+                get(admin::tokens::list).post(admin::tokens::create))
+            .route("/tokens/:id",
+                get(admin::tokens::get).delete(admin::tokens::revoke))
+            // Phase 3: メトリクス
+            .route("/metrics",           get(admin::metrics::get))
+            // Phase 5: バックアップ・PITR
+            .route("/databases/:name/backup",                    get(admin::backup::backup))
+            .route("/databases/:name/restore",                   post(admin::backup::restore))
+            .route("/databases/:name/restore/point-in-time",     post(admin::backup::pitr))
+            // Phase 6: ブランチ
+            .route("/databases/:name/branches",
+                get(admin::branches::list).post(admin::branches::create))
+            .route("/databases/:name/branches/:branch",          delete(admin::branches::delete))
+        )
+        .with_state(state)
+}
+```
+
+### 14.5 エントリポイント（main.rs）
+
+```rust
+// main.rs
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Step 1: CLI パース（clap derive）
+    let cli = Cli::parse();
+
+    // Step 2: 設定マージ（CLI > config.toml > デフォルト）
+    let config = Config::resolve(&cli)?;
+
+    // Step 3: ログ初期化（tracing + tracing-subscriber JSON）
+    init_tracing(&config.log_level);
+
+    // Step 4: データディレクトリ初期化
+    DataDir::init(&config.data_dir)?;
+
+    // Step 5: プロセス排他ロック（flock LOCK_EX | LOCK_NB）
+    let _lock = ProcessLock::acquire(&config.data_dir)?;
+
+    // Step 6: メタデータ読み込み + AuthState 初期化
+    let token_records = meta::load_tokens(&config.data_dir)?;
+    let auth = Arc::new(AuthState::load(&config, token_records));
+
+    // Step 7: DB 全件オープン（起動時整合性チェック込み）
+    let db_mgr = Arc::new(DbManager::open_all(&config.data_dir, Arc::clone(&config.storage)).await?);
+
+    // Step 8: AppState 構築
+    let state: SharedState = Arc::new(AppState {
+        config:  Arc::clone(&config),
+        db_mgr,
+        auth,
+        metrics: Arc::new(Metrics::new()),
+        role:    ServerRole::Standalone,
+    });
+
+    // Step 9: TCP ソケット bind
+    let api_listener   = tokio::net::TcpListener::bind(("0.0.0.0",       config.port)).await?;
+    let admin_listener = tokio::net::TcpListener::bind(("127.0.0.1", config.admin_port)).await?;
+
+    tracing::info!(port = config.port, admin_port = config.admin_port, "Adlaire DB listening");
+
+    // Step 10: サーバー起動 + グレースフルシャットダウン
+    let shutdown = shutdown_signal();
+    tokio::select! {
+        r = axum::serve(api_listener,   build_router(Arc::clone(&state)))       => r?,
+        r = axum::serve(admin_listener, build_admin_router(Arc::clone(&state))) => r?,
+        _ = shutdown => { tracing::info!("shutdown signal received"); }
+    }
+
+    // Step 11: DB クローズ（WAL flush + checkpoint）
+    Arc::try_unwrap(state).ok()
+        .map(|s| Arc::try_unwrap(s.db_mgr).ok())
+        .flatten()
+        .expect("db_mgr still referenced")
+        .close_all()
+        .await;
+
+    tracing::info!("Adlaire DB stopped");
+    Ok(())
+}
+
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut sigint  = signal(SignalKind::interrupt()).unwrap();
+    let mut sigterm = signal(SignalKind::terminate()).unwrap();
+    tokio::select! {
+        _ = sigint.recv()  => {},
+        _ = sigterm.recv() => {},
+    }
+}
+```
+
+### 14.6 hrana 変換ロジック
+
+```rust
+// hrana/convert.rs
+
+pub fn to_pipeline_response(
+    results: Vec<Result<sqld::QueryResult, sqld::Error>>,
+) -> PipelineResponse {
+    PipelineResponse {
+        baton:    None,
+        base_url: None,
+        results:  results.into_iter().map(to_stream_result).collect(),
+    }
+}
+
+fn to_stream_result(r: Result<sqld::QueryResult, sqld::Error>) -> StreamResult {
+    match r {
+        Ok(qr)  => StreamResult::Ok {
+            response: StreamResponse::Execute { result: to_stmt_result(qr) },
+        },
+        Err(e) => StreamResult::Error {
+            error: HranaError {
+                message: e.to_string(),
+                code:    sqld_error_code(&e),
+            },
+        },
+    }
+}
+
+fn to_stmt_result(qr: sqld::QueryResult) -> StmtResult {
+    StmtResult {
+        cols: qr.columns.into_iter().map(|c| Col {
+            name:     c.name,
+            decltype: c.decl_type,
+        }).collect(),
+        rows: qr.rows.into_iter().map(|row| {
+            row.values.into_iter().map(sqld_val_to_hrana).collect()
+        }).collect(),
+        rows_affected:     qr.rows_affected as u64,
+        last_insert_rowid: qr.last_insert_rowid.map(|n| n.to_string()),
+    }
+}
+
+fn sqld_error_code(e: &sqld::Error) -> String {
+    // sqld のエラー型は実装時に確定する。典型的なマッピングを示す
+    if e.to_string().contains("UNIQUE constraint") {
+        "SQLITE_CONSTRAINT".into()
+    } else {
+        "SQLITE_ERROR".into()
+    }
+}
+```
+
+### 14.7 DB 名バリデーション
+
+```rust
+// db/mod.rs
+use std::sync::LazyLock;
+use regex::Regex;
+
+static DB_NAME_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[a-zA-Z0-9_-]{1,127}$").unwrap()
+});
+
+const RESERVED_NAMES: &[&str]  = &["meta", "admin"];
+const BRANCH_SEP:     &str     = "___";
+
+pub fn validate_db_name(name: &str) -> Result<(), AppError> {
+    if !DB_NAME_RE.is_match(name) {
+        return Err(AppError::InvalidDbName);
+    }
+    if RESERVED_NAMES.contains(&name) {
+        return Err(AppError::InvalidDbName);
+    }
+    if name.contains(BRANCH_SEP) {
+        return Err(AppError::DbReservedName);
+    }
+    Ok(())
+}
+
+/// ブランチ DB の内部名を生成する
+pub fn branch_db_name(source: &str, branch: &str) -> String {
+    format!("{}{}{}", source, BRANCH_SEP, branch)
+}
+```
+
+### 14.8 WAL アーカイブ処理（Phase 5）
+
+チェックポイント前フックで WAL フレームを `wal-archive/` へコピーし、`manifest.json` をアトミックに更新する。
+
+```rust
+// wal/archive.rs
+use crc32fast::Hasher as Crc32Hasher;
+use tokio::io::AsyncWriteExt;
+
+pub async fn archive_frames(
+    db_name:    &str,
+    data_dir:   &std::path::Path,
+    new_frames: &[WalFrame],
+) -> anyhow::Result<()> {
+    let archive_dir   = data_dir.join("databases").join(db_name).join("wal-archive");
+    let manifest_path = archive_dir.join("manifest.json");
+
+    tokio::fs::create_dir_all(&archive_dir).await?;
+    let mut manifest = Manifest::load(&manifest_path).unwrap_or_default();
+
+    for frame in new_frames {
+        // CRC32 計算
+        let mut h = Crc32Hasher::new();
+        h.update(&frame.data);
+        let checksum = h.finalize();
+
+        let filename  = format!("frame-{:012}.bin", frame.frame_no);
+        let frame_path = archive_dir.join(&filename);
+
+        // 書き込み + fsync（I-4 保証）
+        let mut f = tokio::fs::File::create(&frame_path).await?;
+        f.write_all(&frame.data).await?;
+        f.sync_all().await?;
+
+        manifest.frames.push(FrameMeta {
+            frame_no:   frame.frame_no,
+            file:       filename,
+            size:       frame.data.len() as u64,
+            checksum,
+            created_at: chrono::Utc::now(),
+        });
+    }
+
+    // manifest をアトミック更新（tmp → fsync → rename）
+    manifest.save_atomic(&manifest_path)?;
+    Ok(())
+}
+
+/// manifest.json のアトミック保存
+impl Manifest {
+    pub fn save_atomic(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let tmp = path.with_extension("json.tmp");
+        let json = serde_json::to_vec_pretty(self)?;
+        std::fs::write(&tmp, &json)?;
+        // fsync → rename（POSIX アトミック）
+        let f = std::fs::File::open(&tmp)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+}
+```
+
+### 14.9 WebSocket セッション管理（Phase 3）
+
+```rust
+// ws/session.rs
+use std::collections::HashMap;
+
+pub struct WsSession {
+    db:      std::sync::Arc<sqld::Database>,
+    streams: HashMap<u32, WsStream>,  // stream_id → WsStream
+    auth:    Claims,
+}
+
+pub struct WsStream {
+    conn:    sqld::Connection,
+    tx_mode: TransactionMode,
+}
+
+#[derive(PartialEq)]
+pub enum TransactionMode { None, ReadOnly, ReadWrite }
+
+impl WsSession {
+    pub fn new(db: std::sync::Arc<sqld::Database>, auth: Claims) -> Self {
+        Self { db, streams: HashMap::new(), auth }
+    }
+
+    pub async fn handle_request(
+        &mut self,
+        stream_id: u32,
+        body: RequestBody,
+    ) -> Result<ResponseBody, AppError> {
+        match body {
+            RequestBody::OpenStream => {
+                let conn = self.db.connect()?;
+                self.streams.insert(stream_id, WsStream {
+                    conn,
+                    tx_mode: TransactionMode::None,
+                });
+                Ok(ResponseBody::OpenStream)
+            }
+            RequestBody::Execute { stmt } => {
+                let stream = self.streams.get_mut(&stream_id)
+                    .ok_or(AppError::InvalidRequest)?;
+                let result = stream.conn.execute(&stmt.sql, &stmt.args)?;
+                Ok(ResponseBody::Execute { result: to_stmt_result(result) })
+            }
+            RequestBody::CloseStream => {
+                self.streams.remove(&stream_id);
+                Ok(ResponseBody::CloseStream)
+            }
+        }
+    }
+}
+```
+
+### 14.10 WAL レプリケーション（Phase 4）
+
+**プライマリ側 WAL フレーム管理：**
+
+```rust
+// replication/primary.rs
+use tokio::sync::broadcast;
+
+pub struct ReplicationState {
+    /// 書き込みコミット時にフレームを broadcast する
+    pub frame_tx:      broadcast::Sender<WalFrame>,
+    pub current_frame: std::sync::atomic::AtomicU64,
+    pub replicas:      dashmap::DashMap<String, ReplicaStatus>,
+}
+
+#[derive(Clone, Debug)]
+pub struct WalFrame {
+    pub frame_no: u64,
+    pub db_name:  String,
+    pub data:     bytes::Bytes,
+    pub checksum: u32,  // CRC32
+}
+
+#[derive(Debug)]
+pub struct ReplicaStatus {
+    pub synced_frame: u64,
+    pub last_seen:    chrono::DateTime<chrono::Utc>,
+}
+```
+
+**レプリカ側フレーム受信・適用ループ：**
+
+```rust
+// replication/replica.rs
+pub async fn run_replica_loop(
+    primary_url:  url::Url,
+    db_mgr:       std::sync::Arc<DbManager>,
+    auth_token:   String,
+) {
+    let mut from_frame = db_mgr.current_max_frame().await;
+
+    loop {
+        match fetch_frames(&primary_url, from_frame, &auth_token).await {
+            Ok(frames) if frames.is_empty() => {
+                // フレームなし: バックオフして再試行
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            Ok(frames) => {
+                for frame in frames {
+                    // CRC32 検証
+                    let actual = crc32fast::hash(&frame.data);
+                    if actual != frame.checksum {
+                        tracing::error!(frame_no = frame.frame_no, "checksum mismatch, skipping");
+                        continue;
+                    }
+                    if let Err(e) = db_mgr.apply_wal_frame(&frame.db_name, &frame.data).await {
+                        tracing::error!(error = %e, "failed to apply WAL frame");
+                    }
+                    from_frame = frame.frame_no + 1;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "replica fetch error, retrying in 1s");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+```
+
+### 14.11 テスト実装パターン
+
+**ユニットテスト例（JWT 検証・全ケース）：**
+
+```rust
+// auth/mod.rs — #[cfg(test)] mod tests
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+
+    fn secret() -> Vec<u8> { "a".repeat(32).into_bytes() }
+
+    fn make_auth() -> AuthState {
+        AuthState::load_with(Some(secret()), vec![])
+    }
+
+    #[test]
+    fn valid_rw_token_passes() {
+        let auth  = make_auth();
+        let token = auth.issue_test_token(AccessLevel::Rw, None);
+        let c = auth.verify(&token).unwrap();
+        assert_eq!(c.a, AccessLevel::Rw);
+    }
+
+    #[test]
+    fn expired_token_is_rejected() {
+        let auth  = make_auth();
+        let token = auth.issue_test_token_exp(AccessLevel::Rw, Utc::now() - Duration::seconds(1));
+        assert!(matches!(auth.verify(&token), Err(AppError::AuthExpired)));
+    }
+
+    #[test]
+    fn wrong_signature_is_rejected() {
+        let auth = make_auth();
+        assert!(matches!(auth.verify("eyJ.eyJ.badsig"), Err(AppError::AuthInvalid)));
+    }
+
+    #[test]
+    fn revoked_token_is_rejected() {
+        let auth  = make_auth();
+        let token = auth.issue_test_token(AccessLevel::Rw, None);
+        let sub   = auth.verify(&token).unwrap().sub;
+        auth.revoke_sync(&sub);
+        assert!(matches!(auth.verify(&token), Err(AppError::AuthInvalid)));
+    }
+
+    #[test]
+    fn db_scope_rw_overrides_global_ro() {
+        let claims = Claims {
+            sub: "tok_x".into(),
+            a:   AccessLevel::Ro,
+            dbs: Some([("db_a".into(), AccessLevel::Rw)].into()),
+            iss: None, iat: 0, exp: None,
+        };
+        assert_eq!(claims.resolve_access("db_a"), AccessLevel::Rw);
+        assert_eq!(claims.resolve_access("db_b"), AccessLevel::Ro);
+    }
+}
+```
+
+**統合テスト例（TC-1）：**
+
+```rust
+// tests/integration/phase1.rs
+//! cargo test --test integration
+
+mod helpers;
+use helpers::TestServer;
+
+#[tokio::test]
+async fn tc1_sql_execution() {
+    let srv = TestServer::spawn(Default::default()).await;
+
+    let resp = srv.pipeline(serde_json::json!({
+        "baton": null,
+        "requests": [
+            {"type":"execute","stmt":{"sql":"CREATE TABLE t(id INT, v TEXT)","args":[],"want_rows":false}},
+            {"type":"execute","stmt":{"sql":"INSERT INTO t VALUES(1,'hello')","args":[],"want_rows":false}},
+            {"type":"execute","stmt":{"sql":"SELECT * FROM t","args":[],"want_rows":true}},
+            {"type":"close"}
+        ]
+    })).await;
+
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let row = &body["results"][2]["response"]["result"]["rows"][0];
+    assert_eq!(row[0], serde_json::json!({"type":"integer","value":"1"}));
+    assert_eq!(row[1], serde_json::json!({"type":"text","value":"hello"}));
+}
+
+#[tokio::test]
+async fn tc2_health_check() {
+    let srv = TestServer::spawn(Default::default()).await;
+    let resp = srv.get("/v2/health").await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.json::<serde_json::Value>().await.unwrap(), serde_json::json!({"status":"ok"}));
+}
+
+#[tokio::test]
+async fn tc3_jwt_auth() {
+    let secret = "test-secret-32bytes-minimum-len!";
+    let srv = TestServer::spawn(TestConfig {
+        jwt_secret: Some(secret.to_string()),
+        ..Default::default()
+    }).await;
+
+    let valid_token = srv.create_token(secret, "rw", None);
+
+    // (a) 有効トークン → 200
+    assert_eq!(srv.pipeline_with_token(&valid_token, minimal_select()).await.status(), 200);
+
+    // (b) Authorization ヘッダなし → 401 AUTH_REQUIRED
+    let no_auth = srv.pipeline_no_auth(minimal_select()).await;
+    assert_eq!(no_auth.status(), 401);
+    assert_eq!(no_auth.json::<serde_json::Value>().await.unwrap()["code"], "AUTH_REQUIRED");
+
+    // (c) 不正トークン → 401 AUTH_INVALID
+    let bad = srv.pipeline_with_token("eyJ.eyJ.badsig", minimal_select()).await;
+    assert_eq!(bad.status(), 401);
+    assert_eq!(bad.json::<serde_json::Value>().await.unwrap()["code"], "AUTH_INVALID");
+}
+```
