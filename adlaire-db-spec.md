@@ -299,6 +299,43 @@ sqld が独自の hrana 実装を持つ場合、その型をそのまま流用�
 - Phase 1 着手時に `Cargo.lock` をリポジトリにコミットし、依存バージョンをロックする
 - フォーク内部の変更は必ず diff レビューを行い、意図しない upstream 取り込みを防ぐ
 
+#### 3.3.5 クレート一覧
+
+**外部クレート一覧：**
+
+| クレート | バージョン | 用途 | 導入フェーズ |
+|---------|-----------|------|------------|
+| `sqld`（libSQL fork） | submodule 固定 | SQL 実行 / WAL / ページストレージ | 1 |
+| `tokio` | 1 | 非同期ランタイム | 1 |
+| `axum` | 0.7 | HTTP フレームワーク・ルーティング | 1 |
+| `tower` | 0.4 | ミドルウェアスタック | 1 |
+| `serde` / `serde_json` | 1 | JSON シリアライズ・デシリアライズ | 1 |
+| `jsonwebtoken` | 9 | JWT HS256 署名・検証 | 1 |
+| `thiserror` | 1 | `AppError` derive | 1 |
+| `anyhow` | 1 | 内部エラーラッパー・`main()` 戻り値 | 1 |
+| `clap` | 4 | CLI パース（derive マクロ） | 1 |
+| `tracing` | 0.1 | 構造化ログ計装 | 1 |
+| `tracing-subscriber` | 0.3 | JSON Lines ログ出力 | 1 |
+| `chrono` | 0.4 | `DateTime<Utc>`・タイムスタンプ処理 | 1 |
+| `regex` | 1 | DB 名バリデーション（`LazyLock<Regex>`） | 1 |
+| `tokio-tungstenite` | 0.21 | WebSocket フレーム送受信 | 3 |
+| `dashmap` | 5 | `Metrics`・`ReplicationState` の並行マップ | 3 |
+| `url` | 2 | `ServerRole::Replica` の `primary_url` 型 | 4 |
+| `bytes` | 1 | WAL フレームバッファ（`WalFrame::data`） | 4 |
+| `crc32fast` | 1 | WAL フレーム CRC32 チェックサム | 4 |
+| `cc`（build-dep） | 1 | `libsql-sys` が SQLite をコンパイルするためのビルド依存 | 1 |
+
+**内製クレート一覧（現行 + 計画）：**
+
+| クレート名（予定） | 状態 | 置き換え対象の外部クレート | 内製化フェーズ |
+|------------------|------|--------------------------|-------------|
+| `adlaire-server` | 実装中（Phase 1〜） | —（新規実装。置き換えでなく追加） | Phase 1〜 |
+| `adlaire-wal` | 計画 | libSQL WAL チェックポイント制御（`sqld`） | Phase 4 完了後 |
+| `adlaire-storage` | 計画 | libSQL SQLite ページャー（`sqld` / `libsql-sys`） | `adlaire-wal` 内製後 |
+| `adlaire-sql-parser` | 計画 | libSQL SQLite パーサ（`libsql-sys`） | 最後（最難関） |
+
+内製クレートへの移行は §3.5.3 のロードマップ・§将来の内製化方針に従い段階的に行う。
+
 ### 3.4 マルチDB のデータ分離（Phase 2）
 
 **ファイル分離：**
