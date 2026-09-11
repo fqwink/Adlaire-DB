@@ -2750,7 +2750,7 @@ PRAGMA journal_mode = WAL;
 
 - SQLite のデフォルト自動チェックポイント（1000 pages）をそのまま使用（Phase 1）
 - Phase 1 では手動チェックポイントの API は提供しない
-- Phase 4（レプリケーション）時に WAL チェックポイント制御を再設計する
+- Phase 10（レプリケーション）時に WAL チェックポイント制御を再設計する
 
 ### 13.4 busy timeout エラー
 
@@ -2907,8 +2907,8 @@ pub struct AppState {
     pub config:  Arc<Config>,
     pub db_mgr:  Arc<DbManager>,
     pub auth:    Arc<AuthState>,
-    pub metrics: Arc<Metrics>,   // Phase 3～
-    pub role:    ServerRole,     // Phase 4～（デフォルト Standalone）
+    pub metrics: Arc<Metrics>,   // Phase 9～
+    pub role:    ServerRole,     // Phase 10～（デフォルト Standalone）
 }
 
 pub type SharedState = Arc<AppState>;
@@ -3011,7 +3011,7 @@ pub struct Claims {
     pub iat: i64,
     pub exp: Option<i64>,
     pub a:   AccessLevel,
-    pub dbs: Option<HashMap<String, AccessLevel>>, // Phase 2～
+    pub dbs: Option<HashMap<String, AccessLevel>>, // Phase 7～
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -3058,7 +3058,13 @@ impl AuthState {
     pub async fn verify(&self, raw_token: &str) -> Result<Claims, AppError>;
 
     /// トークン発行: JWT 生成 + tokens.json 追記
-    pub async fn issue(&self, req: IssueTokenRequest, secret: &[u8]) -> Result<TokenIssued, AppError>;
+    /// dbs: None = 全 DB アクセス、Some = DB スコープ付き
+    pub async fn issue(
+        &self,
+        access: AccessLevel,
+        exp:    Option<chrono::DateTime<chrono::Utc>>,
+        dbs:    Option<HashMap<String, AccessLevel>>,
+    ) -> Result<String, AppError>;
 
     /// トークン失効: revoked フラグ更新 + tokens.json 書き直し
     pub async fn revoke(&self, token_id: &str, meta_path: &Path) -> Result<(), AppError>;
@@ -3393,9 +3399,9 @@ pub fn build_router(state: SharedState) -> axum::Router {
         // Phase 1: シングル DB
         .route("/v2/pipeline",           axum::routing::post(pipeline::handle))
         .route("/v2/health",             axum::routing::get(health::handle))
-        // Phase 2: パスベース DB ルーティング
+        // Phase 6: パスベース DB ルーティング
         .route("/:db_name/v2/pipeline",  axum::routing::post(pipeline::handle_db))
-        // Phase 3: WebSocket
+        // Phase 8: WebSocket
         .route("/v3/baton",              axum::routing::get(ws::handle))
         .route("/:db_name/v3/baton",     axum::routing::get(ws::handle_db))
         .with_state(state)
@@ -3407,23 +3413,23 @@ pub fn build_admin_router(state: SharedState) -> axum::Router {
     // （axum 0.7 では from_extractor_with_state が削除されたため）
     axum::Router::new()
         .nest("/admin/v1", axum::Router::new()
-            // Phase 2: DB CRUD
+            // Phase 6: DB CRUD
             .route("/databases",
                 get(admin::databases::list).post(admin::databases::create))
             .route("/databases/:name",
                 get(admin::databases::get).delete(admin::databases::delete))
-            // Phase 2: トークン CRUD
+            // Phase 7: トークン CRUD
             .route("/tokens",
                 get(admin::tokens::list).post(admin::tokens::create))
             .route("/tokens/:id",
                 get(admin::tokens::get).delete(admin::tokens::revoke))
-            // Phase 3: メトリクス
+            // Phase 9: メトリクス
             .route("/metrics",           get(admin::metrics::get))
-            // Phase 5: バックアップ・PITR
+            // Phase 12〜13: バックアップ・PITR
             .route("/databases/:name/backup",                    get(admin::backup::backup))
             .route("/databases/:name/restore",                   post(admin::backup::restore))
             .route("/databases/:name/restore/point-in-time",     post(admin::backup::pitr))
-            // Phase 6: ブランチ
+            // Phase 14: ブランチ
             .route("/databases/:name/branches",
                 get(admin::branches::list).post(admin::branches::create))
             .route("/databases/:name/branches/:branch",          delete(admin::branches::delete))
@@ -3511,9 +3517,8 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
 }
 
 fn run_token_create(args: TokenCreateArgs) -> anyhow::Result<()> {
-    let secret = hex::decode(&args.secret)
-        .context("--secret は hex エンコードされた 32 バイト以上のバイト列")?;
-    anyhow::ensure!(secret.len() >= 32, "jwt_secret must be at least 32 bytes");
+    let secret = args.secret.as_bytes().to_vec();
+    anyhow::ensure!(secret.len() >= 32, "--secret は 32 バイト以上の文字列を指定してください");
     let access: AccessLevel = match args.access.as_str() {
         "rw" => AccessLevel::Rw,
         "ro" => AccessLevel::Ro,
@@ -3524,7 +3529,9 @@ fn run_token_create(args: TokenCreateArgs) -> anyhow::Result<()> {
         .transpose()?
         .map(|d| chrono::Utc::now() + d);
     let auth = AuthState::load_with(&secret, vec![]);
-    let token = auth.issue(access, exp)?;
+    // dbs は token create サブコマンドでは None（全 DB アクセス）
+    let token = tokio::runtime::Handle::current()
+        .block_on(auth.issue(access, exp, None))?;
     println!("{token}");
     Ok(())
 }
@@ -4218,8 +4225,8 @@ pub async fn handle_db(
     Path(db_name): Path<String>,
     Json(req): Json<PipelineRequest>,
 ) -> Result<Json<PipelineResponse>, AppError> {
-    let db = state.db_pool.get(&db_name)
-        .ok_or(AppError::NotFound(format!("database '{}' not found", db_name)))?;
+    let db = state.db_mgr.get(&db_name).await
+        .ok_or_else(|| AppError::DbNotFound(db_name.clone()))?;
     let results = execute_pipeline(&db, &claims, &req.requests).await?;
     Ok(Json(PipelineResponse { baton: None, base_url: None, results }))
 }
