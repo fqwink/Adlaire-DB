@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.31  
+**バージョン：** 0.33  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-11  
 
@@ -322,15 +322,15 @@ sqld が独自の hrana 実装を持つ場合、その型をそのまま流用�
 | `tracing-subscriber` | 0.3 | JSON Lines ログ出力 | 1 |
 | `chrono` | 0.4 | `DateTime<Utc>`・タイムスタンプ処理 | 1 |
 | `regex` | 1 | DB 名バリデーション（`LazyLock<Regex>`） | 1 |
-| `tokio-tungstenite` | 0.21 | WebSocket フレーム送受信 | 3 |
+| `tokio-tungstenite` | 0.21 | WebSocket フレーム送受信 | 8 |
 | `toml` | 0.8 | `config.toml` デシリアライズ | 1 |
 | `libc` | 0.2 | `flock` による排他プロセスロック | 1 |
 | `base64` | 0.22 | Blob フィールドの Base64 エンコード | 1 |
 | `hex` | 0.4 | `generate_token_id()` の hex エンコード | 1 |
-| `dashmap` | 5 | `Metrics`・`ReplicationState` の並行マップ | 3 |
-| `url` | 2 | `ServerRole::Replica` の `primary_url` 型 | 4 |
-| `bytes` | 1 | WAL フレームバッファ（`WalFrame::data`） | 4 |
-| `crc32fast` | 1 | WAL フレーム CRC32 チェックサム | 4 |
+| `dashmap` | 5 | `Metrics`・`ReplicationState` の並行マップ | 9 |
+| `url` | 2 | `ServerRole::Replica` の `primary_url` 型 | 10 |
+| `bytes` | 1 | WAL フレームバッファ（`WalFrame::data`） | 10 |
+| `crc32fast` | 1 | WAL フレーム CRC32 チェックサム | 10 |
 | `cc`（build-dep） | 1 | `libsql-sys` が SQLite をコンパイルするためのビルド依存 | 1 |
 
 **内製クレート一覧（現行 + 計画）：**
@@ -1158,7 +1158,7 @@ POST /admin/v1/databases/{name}/restore/point-in-time    WAL アーカイブか�
 { "frame_no": 42 }
 ```
 
-`timestamp` と `frame_no` はいずれか一方。両方指定時は `400 DB_INVALID_REQUEST`。
+`timestamp` と `frame_no` はいずれか一方。両方指定時は `400 INVALID_REQUEST`。
 
 処理フロー：
 
@@ -3316,6 +3316,7 @@ pub struct DbMetrics {
     pub rows_read_total:    std::sync::atomic::AtomicU64,
     pub rows_written_total: std::sync::atomic::AtomicU64,
     pub connections_active: std::sync::atomic::AtomicI64,
+    pub integrity_errors:   std::sync::atomic::AtomicU64,
 }
 ```
 
@@ -4328,17 +4329,26 @@ impl AuthState {
             let mut revoked = self.revoked.write().await;
             revoked.insert(token_id.to_string());
         }
-        // tokens リストから該当エントリを削除して永続化
+        // tokens リストの該当エントリを論理削除（revoked=true）して永続化
         {
             let mut tokens = self.tokens.write().await;
-            tokens.retain(|t| t.id != token_id);
+            let record = tokens.iter_mut()
+                .find(|t| t.id == token_id)
+                .ok_or(AppError::TokenNotFound)?;
+            record.revoked    = true;
+            record.revoked_at = Some(chrono::Utc::now());
             let meta = TokensMeta { tokens: tokens.clone() };
             save_atomic(meta_path, &meta).map_err(AppError::Internal)?;
         }
         Ok(())
     }
 
-    pub fn issue(&self, access: AccessLevel, exp: Option<chrono::DateTime<chrono::Utc>>) -> Result<String, AppError> {
+    pub async fn issue(
+        &self,
+        access: AccessLevel,
+        exp:    Option<chrono::DateTime<chrono::Utc>>,
+        dbs:    Option<HashMap<String, AccessLevel>>,
+    ) -> Result<String, AppError> {
         let secret = self.secret_bytes.as_ref().ok_or(AppError::AuthDisabled)?;
         let claims = Claims {
             iss: Some("adlaire-db".into()),
@@ -4346,7 +4356,7 @@ impl AuthState {
             iat: chrono::Utc::now().timestamp(),
             exp: exp.map(|e| e.timestamp()),
             a:   access,
-            dbs: None,
+            dbs,
         };
         jsonwebtoken::encode(
             &jsonwebtoken::Header::default(),
@@ -4377,13 +4387,12 @@ impl AuthState {
         let bytes = self.secret_bytes.as_ref().expect("secret not set");
         let key = jsonwebtoken::EncodingKey::from_secret(bytes);
         let claims = Claims {
-            sub: "test".into(),
-            a:   access,
-            jti: Some(generate_token_id()),
-            exp: exp.map(|t| t.timestamp()),
-            dbs: None,
-            iss: None,
+            iss: Some("adlaire-db".into()),
+            sub: generate_token_id(),
             iat: Utc::now().timestamp(),
+            exp: exp.map(|t| t.timestamp()),
+            a:   access,
+            dbs: None,
         };
         jsonwebtoken::encode(&jsonwebtoken::Header::default(), &claims, &key).unwrap()
     }
