@@ -1550,1307 +1550,12 @@ Step 5: 停止完了
 | **Phase 14** | ブランチ作成・一覧・削除 | TC-6-1〜TC-6-7 (7件) | T6-1〜T6-7 (7件) |
 | **Phase 15** | SQLite 拡張・内製化・HA | — | — |
 
-### Phase 1：ビルド基盤・CLI
 
-**目標**：Cargo ワークスペースと libSQL サブモジュールを確立し、CLI の骨格を動かす
+### 9.0 共通実装詳細
 
-**スコープ：**
-- Cargo workspace 初期化（adlaire-server crate + libsql submodule）
-- clap による `serve` / `token` サブコマンド骨格
-- config.toml 3-way マージ（CLI > TOML > デフォルト）
-- CI: cargo build / cargo test が通る状態を維持
+全フェーズで共有される型定義・モジュール構成を以下に示す。
 
-**実装タスク：**
-
-```
-T-1: リポジトリ・ビルド基盤
-  [ ] Cargo workspace 初期化（adlaire-server crate + libsql submodule）
-  [ ] libSQL フォークを git submodule として追加
-  [ ] sqld crate が core feature でビルドできることを確認
-  [ ] CI: cargo build / cargo test が通る状態を維持
-  参照: §3.3.1
-
-T-2: CLI フレームワーク
-  [ ] clap による `serve` / `token` サブコマンドの骨格実装
-  [ ] `serve` フラグ: --data, --port, --admin-port, --auth-jwt-secret,
-      --auth-jwt-secret-file, --log-level, --busy-timeout, --shutdown-timeout
-  [ ] config.toml 読み込み（フラグ > config.toml > デフォルト）
-  [ ] --data 未指定時の起動エラー
-  参照: §4.1, §4.2, §8.4
-```
-
----
-
-### Phase 2：データディレクトリ・sqld 統合
-
-**目標**：データディレクトリを初期化し、sqld でシングル DB を開ける状態にする
-
-**スコープ：**
-- `--data` パスのディレクトリ作成・パーミッション設定
-- flock による排他プロセスロック
-- sqld::Database::open()・WAL モード設定
-
-**実装タスク：**
-
-```
-T-3: データディレクトリ初期化
-  [ ] --data パスの作成（mkdir -p）
-  [ ] .lock ファイルによる排他ロック（flock）
-  [ ] databases/ meta/ サブディレクトリ作成
-  [ ] ディレクトリパーミッション警告（700 未満で WARN）
-  参照: §3.2, §8.1 Step 3〜4, §10.3
-
-T-4: sqld 統合・DB オープン
-  [ ] sqld::Database::open() でシングル DB を開く
-  [ ] PRAGMA journal_mode = WAL を起動時に適用
-  [ ] busy_timeout を設定
-  [ ] PRAGMA synchronous = NORMAL を設定
-  [ ] サーバーシャットダウン時に drop（WAL flush + close）
-  参照: §3.3.2, §13, §8.1 Step 6, §8.2 Step 3
-  検証: TC-5（データ永続性）
-```
-
----
-
-### Phase 3：HTTP サーバー・hrana パイプライン
-
-**目標**：libSQL クライアント SDK が Adlaire DB に接続して SQL を実行できる最小構成
-
-**スコープ：**
-- axum HTTP サーバー起動・SIGINT/SIGTERM ハンドラ
-- GET `/v2/health`
-- POST `/v2/pipeline`（hrana-http v2 完全実装）
-
-**完了条件（テストケース）：**
-
-```
-TC-1: 認証なしモードで SQL 実行
-  $ ./adlaire-db serve --data ./testdb --port 8080
-  $ curl -s -X POST http://localhost:8080/v2/pipeline \
-      -H "Content-Type: application/json" \
-      -d '{"baton":null,"requests":[
-            {"type":"execute","stmt":{"sql":"CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, v TEXT)","args":[],"want_rows":false}},
-            {"type":"execute","stmt":{"sql":"INSERT INTO t VALUES (1, \"hello\")","args":[],"want_rows":false}},
-            {"type":"execute","stmt":{"sql":"SELECT * FROM t","args":[],"want_rows":true}},
-            {"type":"close"}
-          ]}'
-  期待: results に rows=[[[integer,"1"],[text,"hello"]]] が含まれる
-
-TC-2: ヘルスチェック
-  $ curl -s http://localhost:8080/v2/health
-  期待: {"status":"ok"}
-
-TC-6: 起動・停止
-  （a）./adlaire-db serve で起動 → "Adlaire DB listening on ..." ログ
-  （b）Ctrl+C でクリーンシャットダウン → .lock ファイルが解放される
-  （c）再起動できる（.lock がゾンビ残留しない）
-```
-
-**実装タスク：**
-
-```
-T-5: HTTP サーバー骨格（axum）
-  [ ] tokio ランタイム起動
-  [ ] axum Router: POST /v2/pipeline, GET /v2/health
-  [ ] --port でバインドアドレスを指定
-  [ ] SIGINT / SIGTERM ハンドラ登録（graceful shutdown）
-  [ ] "Adlaire DB listening" INFO ログ出力
-  参照: §6.1, §8.1 Step 7〜8, §8.2
-  検証: TC-2（ヘルスチェック）, TC-6（起動・停止）
-
-T-6: hrana-http v2 パイプライン実装
-  [ ] POST /v2/pipeline のリクエスト JSON デシリアライズ
-      （baton, requests[].type, requests[].stmt.sql/args/want_rows）
-  [ ] requests を sqld::Connection.execute_batch() に渡す
-  [ ] sqld::QueryResult を hrana-http v2 results[] 形式に変換
-      （cols, rows, rows_affected, last_insert_rowid）
-  [ ] SQL エラーを results[i].type="error" として返す（HTTP 200 のまま）
-  [ ] "close" type リクエストを正しく処理する
-  参照: §6.2, §3.3.3
-  検証: TC-1（SQL 実行）
-```
-
----
-
-### Phase 4：JWT 認証・token コマンド
-
-**目標**：JWT HS256 認証と `adlaire-db token create` が動作する
-
-**スコープ：**
-- Authorization: Bearer ヘッダ抽出・6 ステップ検証フロー
-- tokens.json 読み込み・revoke リスト照合
-- `token create` サブコマンド（JWT 生成・stdout 出力）
-
-**完了条件（テストケース）：**
-
-```
-TC-3: JWT 認証ありモード
-  $ SECRET="test-secret"
-  $ TOKEN=$(./adlaire-db token create --secret "$SECRET")
-  $ ./adlaire-db serve --data ./testdb --port 8080 --auth-jwt-secret "$SECRET"
-  （a）有効なトークンで SQL 実行 → 200 OK
-  （b）Authorization ヘッダなし → 401 AUTH_REQUIRED
-  （c）不正なトークン → 401 AUTH_INVALID
-```
-
-**実装タスク：**
-
-```
-T-7: JWT 認証ミドルウェア
-  [ ] jsonwebtoken crate で HS256 検証
-  [ ] Authorization: Bearer <JWT> ヘッダ抽出
-  [ ] 6 ステップ検証フロー実装（§5.6）
-      ①ヘッダ有無, ②署名, ③exp, ④revoke リスト照合,
-      ⑤アクセスレベル, ⑥通過
-  [ ] --auth-jwt-secret 未設定時は認証をスキップ（WARN ログ）
-  [ ] 各エラーの HTTP ステータス・コード返却（§7.3）
-  参照: §5.1〜5.5, §7.3
-  検証: TC-3（JWT 認証）, ETC-1（認証エラー）, ETC-2（権限エラー）
-
-T-8: tokens.json 読み込み・revoke リスト
-  [ ] 起動時に meta/tokens.json をメモリに展開（§8.1 Step 5）
-  [ ] なければ空リストで初期化・書き出し
-  [ ] JWT 検証ステップ④での revoke 照合
-  [ ] Phase 1〜5 では tokens.json の更新は CLI のみ（管理 API は Phase 7）
-  参照: §5.6
-
-T-9: `token create` サブコマンド
-  [ ] --secret <VALUE>, --expiry <DURATION>, --access ro|rw フラグ
-  [ ] JWT を HS256 で署名して stdout に出力
-  [ ] tok_<random> 形式の token_id を生成（sub クレーム）
-  [ ] tokens.json に新規トークンを追記
-  参照: §4.1, §5.2, §5.5
-  検証: TC-3（TOKEN=$(./adlaire-db token create ...)）
-```
-
----
-
-### Phase 5：ログ・統合テスト
-
-**目標**：構造化ログを整備し Phase 1〜5 全テストを完走させる
-
-**スコープ：**
-- tracing + JSON Lines 出力
-- HTTP リクエストログ
-- TC-4（TypeScript SDK）・TC-5（データ永続性）を含む全件完走
-
-**完了条件（テストケース）：**
-
-```
-TC-4: TypeScript SDK 互換性
-  const client = createClient({
-    url: "http://localhost:8080",
-    authToken: "<JWT>",          // 認証なしモードなら省略可
-  });
-  await client.execute("CREATE TABLE IF NOT EXISTS users (id INT, name TEXT)");
-  await client.execute("INSERT INTO users VALUES (1, 'Alice')");
-  const result = await client.execute("SELECT * FROM users");
-  期待: result.rows[0] = { id: 1, name: "Alice" }
-
-TC-5: データ永続性（I-4 検証）
-  （a）INSERT 後にサーバーを Ctrl+C で停止
-  （b）同じ --data で再起動
-  （c）SELECT で挿入したデータが返ること
-```
-
-**実装タスク：**
-
-```
-T-10: ログ実装
-  [ ] tracing crate + tracing-subscriber（JSON Lines 出力）
-  [ ] --log-level フラグ対応
-  [ ] HTTP リクエストごとの INFO ログ（method, path, status, duration_ms）
-  [ ] 起動・停止の INFO ログ
-  参照: §12
-
-T-11: 統合テスト・TC 完走確認
-  [ ] TC-1: curl で SQL 実行（CREATE / INSERT / SELECT）
-  [ ] TC-2: GET /v2/health → {"status":"ok"}
-  [ ] TC-3: JWT 認証（有効・ヘッダなし・不正トークン）
-  [ ] TC-4: TypeScript SDK (@libsql/client) による CRUD
-  [ ] TC-5: データ永続性（再起動後に SELECT）
-  [ ] TC-6: 起動・停止・.lock 解放
-```
-
-**タスク依存グラフ（Phase 1〜5）：**
-
-```
-T-1 → T-2 → T-3 → T-4 ─┐
-                          ├→ T-5 → T-6 → T-7 → T-8 → T-9 → T-10 → T-11
-                          └→ T-5（並行可）
-```
-
-T-4〜T-5 は並行実装可。T-6（hrana 変換）は T-4・T-5 の両方が揃った後。
-
-**対象外（Phase 6 以降）：**
-- マルチ DB・管理 API・WebSocket・レプリケーション
-
----
-
-### Phase 6：マルチ DB ルーター・DB マネージャ
-
-**目標**：1インスタンスで複数 DB をルーティングできる
-
-- パスベース DB ルーティング（`/{db-name}/v2/pipeline`）
-- DB ごとのデータ分離
-
-**実装タスク：**
-
-```
-T2-1: パスベース DB ルーター
-  [ ] axum Router を /{db-name}/v2/pipeline にマッチするように拡張
-  [ ] パスセグメントから db-name を抽出し、DB 名バリデーションを適用
-  [ ] 存在しない db-name → 404 DB_NOT_FOUND
-  [ ] Phase 1〜5 の単一 DB ルート（/v2/pipeline）との共存（後方互換）
-  参照: §6.1, §3.4
-
-T2-2: マルチ DB マネージャ
-  [ ] 起動時に databases.json を読み込み、全 DB を sqld でオープン
-  [ ] DB 名 → sqld::Database のマップをメモリ上で管理（RwLock<HashMap>）
-  [ ] 新規 DB 作成時にマップへ追加・databases.json を更新
-  [ ] DB 削除時にマップから除去・ファイル削除・databases.json を更新
-  参照: §3.4, §8.1 Step 5〜6
-```
-
----
-
-### Phase 7：管理 API・トークン CRUD・DB スコープ JWT
-
-**目標**：管理 API と DB スコープアクセス制御を実装する
-
-- 管理 API（DB CRUD・トークン CRUD）
-- DB 単位のアクセス制御（JWT クレーム拡張）
-
-**完了条件（テストケース）：**
-
-```
-TC-2-1: マルチ DB SQL 実行
-  （a）POST /admin/v1/databases {"name":"db_a"} → 201
-  （b）POST /admin/v1/databases {"name":"db_b"} → 201
-  （c）POST /db_a/v2/pipeline で db_a に CREATE TABLE t(v TEXT); INSERT
-  （d）POST /db_b/v2/pipeline で db_b に CREATE TABLE t(v TEXT); 別データ INSERT
-  （e）db_a の SELECT → db_a のデータのみ返る
-  （f）db_b の SELECT → db_b のデータのみ返る（db_a のデータは見えない）
-
-TC-2-2: 管理 API — DB CRUD
-  （a）GET /admin/v1/databases → [] （初期は空リスト）
-  （b）POST /admin/v1/databases {"name":"testdb"} → 201, {id,name,created_at}
-  （c）GET /admin/v1/databases → [testdb] がリストに含まれる
-  （d）GET /admin/v1/databases/testdb → 200, DB の詳細情報
-  （e）DELETE /admin/v1/databases/testdb → 204
-  （f）GET /admin/v1/databases/testdb → 404
-  （g）POST /testdb/v2/pipeline（削除後） → 404 DB_NOT_FOUND
-
-TC-2-3: DB 名バリデーション
-  （a）POST /admin/v1/databases {"name":""} → 400 INVALID_DB_NAME
-  （b）POST /admin/v1/databases {"name":"a b"} → 400 INVALID_DB_NAME（スペース不可）
-  （c）POST /admin/v1/databases {"name":"../evil"} → 400 INVALID_DB_NAME（パストラバーサル不可）
-  （d）POST /admin/v1/databases {"name":"validname"} → 201（英数字・ハイフン・アンダースコアは有効）
-  （e）同名 DB を再作成 → 409 DB_ALREADY_EXISTS
-
-TC-2-4: トークン CRUD
-  （a）POST /admin/v1/tokens {"access":"rw","expiry":"30d"} → 201, {id,token,access,expires_at}
-  （b）GET /admin/v1/tokens → 発行済みトークン一覧（secret は含まない）
-  （c）GET /admin/v1/tokens/{id} → トークン詳細（revoked フラグ含む）
-  （d）DELETE /admin/v1/tokens/{id} → 204（revoke 実行）
-  （e）GET /admin/v1/tokens/{id} → revoked:true になっている
-
-TC-2-5: トークン失効の即時反映
-  （a）有効トークン T で POST /v2/pipeline → 200
-  （b）DELETE /admin/v1/tokens/{T.id} で T を失効
-  （c）同じトークン T で POST /v2/pipeline → 401 AUTH_INVALID（失効反映が即時であること）
-  （d）新規トークン T2 で POST /v2/pipeline → 200（他のトークンは影響なし）
-
-TC-2-5b: DB スコープトークン
-  （a）POST /admin/v1/tokens {"access":"ro","dbs":{"db_a":"rw"}} → 201
-  （b）発行トークンで POST /db_a/v2/pipeline INSERT → 200（db_a は rw 許可）
-  （c）発行トークンで POST /db_b/v2/pipeline INSERT → 403 PERMISSION_DENIED
-       （db_b は dbs に含まれないため a="ro" が適用）
-  （d）発行トークンで POST /db_b/v2/pipeline SELECT → 200（読み取りは ro で許可）
-  （e）GET /admin/v1/tokens/{id} → dbs フィールドに {"db_a":"rw"} が含まれる
-
-TC-2-6: データディレクトリ永続化（マルチ DB）
-  （a）db_a / db_b を作成し各テーブルにデータ投入
-  （b）サーバーを停止・再起動（同じ --data ディレクトリ）
-  （c）db_a・db_b 両方のデータが復元されること
-  （d）{data-dir}/databases/ 以下に db_a/ db_b/ ディレクトリが存在すること
-  （e）{data-dir}/meta/databases.json に両 DB が記録されていること
-```
-
-**実装タスク：**
-
-```
-T2-3: 管理 API — DB CRUD
-  [ ] GET /admin/v1/databases → databases.json の一覧を返す
-  [ ] POST /admin/v1/databases — DB 名バリデーション・ディレクトリ作成・sqld オープン
-  [ ] GET /admin/v1/databases/{name} → 個別情報（name・created_at・size_bytes）
-  [ ] DELETE /admin/v1/databases/{name} — sqld クローズ・ディレクトリ削除
-  [ ] size_bytes は data.db のファイルサイズを返す
-  参照: §6.4（DB 管理）
-
-T2-4: 管理 API — トークン CRUD
-  [ ] POST /admin/v1/tokens — JWT 生成・tokens.json への追記・201 返却
-  [ ] GET /admin/v1/tokens / GET /admin/v1/tokens/{id} — tokens.json から読み込み
-  [ ] DELETE /admin/v1/tokens/{id} — tokens.json の revoked を true に更新（冪等）
-  [ ] expiry パース（30d / 24h / 3600s 等）→ JWT exp クレームへの変換
-  参照: §6.4（トークン管理）, §5.5, §5.6
-
-T2-5: DB スコープ JWT（dbs クレーム）
-  [ ] Phase 4 の JWT 検証を拡張（7 ステップフロー §5.4）
-  [ ] dbs クレームが存在する場合、対象 DB 名でアクセス権を解決
-  [ ] POST /admin/v1/tokens に dbs フィールドを追加
-  [ ] tokens.json の dbs フィールドを保存
-  参照: §5.4
-
-T2-6: 統合テスト TC-2-1〜TC-2-6（TC-2-5b 含む）
-  [ ] 各テストケースを実行し全て PASS することを確認
-  [ ] Phase 1〜6 の TC がリグレッションしないことを確認
-```
-
----
-
-### Phase 8：WebSocket（hrana-ws v3）
-
-**目標**：Turso のインタラクティブトランザクション（hrana-ws v3）が動作する
-
-#### hrana-ws v3 プロトコル概要
-
-hrana-ws は libSQL / Turso の WebSocket ワイヤプロトコル。HTTP の hrana-http v2 と異なり、ステートフルな接続上でインタラクティブトランザクションを実現する。
-
-参照仕様: [libSQL/sqld/docs/HRANA_3_SPEC.md](https://github.com/tursodatabase/libsql/blob/main/libsql-server/docs/HRANA_3_SPEC.md)
-
-#### エンドポイント
-
-```
-ws://host:8080/v3/baton      ← hrana-ws v3
-wss://host:8080/v3/baton     ← TLS 経由（リバースプロキシ）
-```
-
-#### 接続フロー
-
-```
-Client                          Server
-  |                               |
-  |── WebSocket Upgrade ─────────>|
-  |<─ 101 Switching Protocols ───|
-  |                               |
-  |── ClientMsg: hello ──────────>|  jwt: "<JWT>"
-  |<─ ServerMsg: hello ──────────|  OK or error
-  |                               |
-  |── ClientMsg: request ────────>|  request_id, stream_id, body
-  |<─ ServerMsg: response_ok ────|  request_id, result
-  |    or response_error          |
-  |                               |
-  |── ClientMsg: close_stream ──>|
-  |── WebSocket Close ───────────>|
-```
-
-#### メッセージ型
-
-**ClientMsg（クライアント→サーバー）：**
-
-| type | 説明 |
-|------|------|
-| `hello` | 接続開始。`jwt` フィールドで認証 |
-| `request` | stream_id と body を持つリクエスト |
-| `close_stream` | ストリームのクローズ |
-
-**request body の種類：**
-
-| type | 説明 |
-|------|------|
-| `open_stream` | 新規ストリームを開く |
-| `close_stream` | ストリームを閉じる |
-| `execute` | 単一 SQL 文を実行（hrana-http の execute と同形式）|
-| `batch` | 複数 SQL 文をバッチ実行 |
-| `sequence` | テキスト形式の複数 SQL 文を順序実行 |
-| `describe` | SQL 文のパラメータ・カラム情報を返す |
-| `store_sql` / `close_sql` | SQL テキストを ID でキャッシュ（再利用） |
-
-**ServerMsg（サーバー→クライアント）：**
-
-| type | 説明 |
-|------|------|
-| `hello_ok` | 認証成功 |
-| `hello_error` | 認証失敗 |
-| `response_ok` | リクエスト成功。request_id + result |
-| `response_error` | リクエスト失敗。request_id + error |
-
-#### インタラクティブトランザクション
-
-ストリーム上でトランザクション状態を保持する。
-
-```
-open_stream(stream_id=1)
-execute(stream_id=1, sql="BEGIN")
-execute(stream_id=1, sql="INSERT INTO t VALUES (1)")
-execute(stream_id=1, sql="INSERT INTO t VALUES (2)")
-execute(stream_id=1, sql="COMMIT")
-close_stream(stream_id=1)
-```
-
-複数の stream を同一 WebSocket 接続上で多重化できる（stream_id で識別）。
-
-#### sqld との統合（Phase 8）
-
-Phase 1〜7 と同様、sqld の WebSocket サーバーループは起動しない。**Adlaire 独自の hrana-ws プロトコル変換レイヤーを実装する**（§3.3.3 の hrana-http 変換層と同じ設計方針）。
-
-採用理由：
-
-- sqld の WebSocket ハンドラはセッション管理・認証と密結合しており、ライブラリとして分離が困難
-- Phase 1〜7 で構築した hrana-http 変換レイヤー（§3.3.3）の延長として実装でき、アーキテクチャの一貫性を保てる
-- WebSocket コネクションのライフサイクル（hello / stream_id / baton 管理）を Adlaire が完全制御できる
-
-WebSocket フレームの受受信・送信には `tokio-tungstenite` クレートを使用する。クエリ実行は Phase 1〜7 と同じ `sqld::Connection::execute_batch()` を経由する（§3.3.2）。
-
-**完了条件（テストケース）：**
-
-```
-TC-3-1: インタラクティブトランザクション
-  TypeScript SDK:
-  const tx = await db.transaction("write");
-  await tx.execute("INSERT INTO t VALUES (1)");
-  await tx.execute("INSERT INTO t VALUES (2)");
-  await tx.commit();
-  const r = await db.execute("SELECT COUNT(*) FROM t");
-  期待: r.rows[0][0] = 2
-
-TC-3-2: トランザクションロールバック
-  const tx = await db.transaction("write");
-  await tx.execute("INSERT INTO t VALUES (99)");
-  await tx.rollback();
-  const r = await db.execute("SELECT * FROM t WHERE id = 99");
-  期待: r.rows.length = 0
-
-TC-3-3: 複数ストリームの多重化
-  stream_id=1 で BEGIN → INSERT (sleep)
-  stream_id=2 で SELECT（別トランザクション）→ 正常応答
-  stream_id=1 で COMMIT
-  期待: 2 ストリームが干渉しない
-
-TC-3-4: JWT 認証（WebSocket）
-  hello メッセージに有効 JWT → hello_ok
-  hello メッセージに不正 JWT → hello_error
-```
-
----
-
-### Phase 9：ATTACH DB・メトリクス
-
-**目標**：クロス DB クエリとインメモリメトリクス API を実装する
-
-#### ATTACH DATABASE（クロス DB クエリ）
-
-Turso Cloud と同様に、Adlaire が管理する DB 間に限り `ATTACH DATABASE` を許可する。
-
-**セキュリティモデル：**
-- クライアントが `ATTACH DATABASE 'other-db' AS alias` を送信した場合、Adlaire は `'other-db'` を DB 名として解釈し、`databases/other-db/data.db` のパスを解決する
-- 任意のファイルパス（`/etc/passwd` 等）は DB 名バリデーション（`^[a-zA-Z0-9_-]{1,127}$`）で事前に拒否する
-- 存在しない DB 名の場合は `404 DB_NOT_FOUND` を返す
-
-**実装方針：**
-- hrana-http v2 の `execute` リクエストで ATTACH SQL を受け取った際、Adlaire 側でインターセプトして DB 名を解決する
-- sqld の Connection に対してパス解決済みの ATTACH を発行する
-- 対象 DB の接続が未オープンの場合はその場でオープンする
-
-**追加テストケース：**
-
-```
-TC-3-5: ATTACH DATABASE（クロス DB クエリ）
-  （a）db_a・db_b を作成し、それぞれにテーブルとデータを投入
-  （b）db_a への pipeline で:
-      ATTACH DATABASE 'db_b' AS b;
-      SELECT * FROM b.t;
-      期待: db_b のデータが返る
-  （c）ATTACH DATABASE '/etc/passwd' AS evil
-      → 400 INVALID_DB_NAME（バリデーション拒否）
-  （d）ATTACH DATABASE 'nonexistent' AS x
-      → 404 DB_NOT_FOUND
-```
-
-#### メトリクス API
-
-```
-GET /admin/v1/metrics
-```
-
-認証: 管理トークン必須（§6.4 管理 API 認証と同じ）
-
-**レスポンス（200 OK）：**
-
-```json
-{
-  "uptime_seconds": 3600,
-  "databases": [
-    {
-      "name": "mydb",
-      "size_bytes": 4096,
-      "wal_size_bytes": 1024,
-      "connections_active": 2,
-      "queries_total": 1500,
-      "rows_read_total": 8000,
-      "rows_written_total": 200
-    }
-  ],
-  "tokens_total": 5,
-  "tokens_revoked": 1
-}
-```
-
-カウンター（`queries_total` 等）はプロセス起動からの累積値。再起動でリセットされる（Phase 9 時点では永続化しない）。
-
-**追加テストケース：**
-
-```
-TC-3-6: メトリクス API
-  （a）GET /admin/v1/metrics（管理トークンあり）→ 200、databases 配列に管理下 DB が含まれる
-  （b）クエリ実行後に queries_total が増加していること
-  （c）GET /admin/v1/metrics（管理トークンなし）→ 401
-```
-
-**Phase 8 実装タスク：**
-
-```
-T3-1: WebSocket サーバー追加（axum の WebSocket upgrade）
-T3-2: hrana-ws v3 hello ハンドシェイク + JWT 認証
-T3-3: ストリーム多重化レイヤー実装（stream_id ごとの接続状態管理）
-T3-4: execute / batch / sequence / describe リクエスト処理（sqld 境界再利用）
-T3-5: インタラクティブトランザクション状態管理（BEGIN/COMMIT/ROLLBACK）
-```
-
-**Phase 9 実装タスク：**
-
-```
-T3-6: ATTACH DATABASE インターセプト・DB 名バリデーション・パス解決
-T3-7: メトリクス収集（インメモリカウンター）+ GET /admin/v1/metrics
-T3-8: 統合テスト TC-3-1〜TC-3-6
-```
-
----
-
-### Phase 10：レプリケーション基盤（WAL ストリーム・スナップショット）
-
-**目標**：プライマリ・レプリカ構成での運用
-
-#### アーキテクチャ
-
-```
-クライアント
-  │
-  ├─ 書き込み → プライマリ（:8080）─ WAL 同期 ─→ レプリカ 1（:8080）
-  │                                             └→ レプリカ 2（:8080）
-  └─ 読み取り → レプリカ（ロードバランサー経由）
-```
-
-- プライマリとレプリカは同じバイナリ。起動フラグでロールを決定する
-- レプリカはプライマリの WAL フレームを HTTP ストリームで受信して自身の DB に適用する
-- レプリカへの書き込みは `307 Temporary Redirect` でプライマリへ転送する
-
-#### 起動フラグ（Phase 10 追加）
-
-```
-# プライマリとして起動
-adlaire-db serve --data ./data --role primary --primary-port 8082
-
-# レプリカとして起動
-adlaire-db serve --data ./data --role replica --primary-url http://primary:8082
-```
-
-| フラグ | 説明 |
-|--------|------|
-| `--role` | `standalone`（デフォルト）/ `primary` / `replica` |
-| `--primary-port` | プライマリが WAL ストリームを公開するポート（デフォルト: 8082）|
-| `--primary-url` | レプリカが接続するプライマリの URL |
-| `--replication-auth-token` | プライマリ・レプリカ間の認証トークン |
-
-#### レプリケーション API
-
-プライマリが `--primary-port`（デフォルト 8082）で公開する内部エンドポイント。クライアント SDK は直接使わない。すべてのリクエストに `Authorization: Bearer <replication-auth-token>` が必要。
-
-**GET /replication/v1/log?from_frame=\<N\>**
-
-WAL フレームを Server-Sent Events でストリーム配信する。
-
-```
-HTTP/1.1 200 OK
-Content-Type: text/event-stream
-Cache-Control: no-cache
-
-data: {"frame_no":0,"db":"mydb","data":"<base64 WAL frame>","checksum":3294921183}
-
-data: {"frame_no":1,"db":"mydb","data":"<base64 WAL frame>","checksum":1928374652}
-```
-
-- `frame_no`: WAL フレームの通し番号（0 始まり）
-- `db`: 対象 DB 名（Phase 10 はマルチ DB 対応）
-- `data`: WAL フレームのバイナリを Base64 エンコードしたもの
-- `checksum`: フレームの CRC32 チェックサム
-
-フレームが追いついた場合は接続を保持し、新しいフレームが来次第送信する（long-poll SSE）。
-
-**GET /replication/v1/snapshot**
-
-レプリカの初回参加時に全スナップショットを取得する。
-
-```
-HTTP/1.1 200 OK
-Content-Type: application/octet-stream
-X-Replication-Frame-No: 42
-X-Replication-Db: mydb
-
-<SQLite ページダンプ バイナリ>
-```
-
-`X-Replication-Frame-No` が示す frame_no 以降の差分を `/log?from_frame=43` で取得することで同期を完成させる。
-
-**POST /replication/v1/heartbeat**
-
-レプリカの生存確認と進捗報告。
-
-```json
-// リクエスト
-{"replica_id": "replica-1", "synced_frame": 42}
-
-// レスポンス 200 OK
-{"primary_frame": 42, "lag_frames": 0}
-```
-
-プライマリは `synced_frame` 以前の WAL フレームを将来的に GC できる（Phase 10 では GC は未実装・受付のみ）。
-
-**GET /replication/v1/status**
-
-プライマリの現在状態。
-
-```json
-// 200 OK
-{
-  "role": "primary",
-  "current_frame": 42,
-  "replicas": [
-    {"id": "replica-1", "synced_frame": 42, "lag_frames": 0, "last_seen": "2026-09-10T12:00:00Z"},
-    {"id": "replica-2", "synced_frame": 39, "lag_frames": 3, "last_seen": "2026-09-10T11:59:55Z"}
-  ]
-}
-```
-
-#### ヘルスチェック拡張
-
-Phase 11 から `GET /v2/health` のレスポンスにロール情報を追加する：
-
-```json
-{
-  "status": "ok",
-  "role": "primary",
-  "replication_lag_frames": 0
-}
-```
-
-レプリカの場合：
-
-```json
-{
-  "status": "ok",
-  "role": "replica",
-  "primary_url": "http://primary:8080",
-  "replication_lag_frames": 3
-}
-```
-
-#### 書き込みリダイレクト
-
-レプリカが書き込みリクエストを受信した場合：
-
-```
-HTTP/1.1 307 Temporary Redirect
-Location: http://primary:8080/{db-name}/v2/pipeline
-```
-
-クライアント（libSQL SDK）は自動的にプライマリへ再送する。
-
----
-
-### Phase 11：レプリカ同期・書き込みリダイレクト
-
-**目標**：レプリカが WAL フレームを受信・適用し書き込みをプライマリへ転送する
-
-#### 完了条件（テストケース）
-
-```
-TC-4-1: WAL 同期（基本）
-  （a）プライマリで INSERT 実行
-  （b）レプリカで SELECT → プライマリのデータが反映されている
-  （c）GET /v2/health（レプリカ）→ replication_lag_frames = 0 または小さい値
-
-TC-4-2: 書き込みリダイレクト
-  （a）レプリカのエンドポイントに直接 POST /v2/pipeline（INSERT）を送信
-  （b）307 Redirect でプライマリへ転送される
-  （c）プライマリで SELECT → データが存在する
-
-TC-4-3: レプリカ障害・復帰
-  （a）レプリカを停止
-  （b）プライマリで INSERT を複数回実行
-  （c）レプリカを再起動（同じ --primary-url で）
-  （d）レプリカが差分 WAL フレームを取得して追いつく
-  （e）SELECT → 最新データが返る
-
-TC-4-4: プライマリ停止時のレプリカ挙動
-  （a）プライマリを停止
-  （b）レプリカへの SELECT → 200（既存データは返せる）
-  （c）レプリカへの INSERT → 503 または 307（プライマリ到達不能）
-  （d）GET /v2/health（レプリカ）→ status:"degraded" 等の警告
-
-TC-4-5: マルチレプリカ同期
-  プライマリ 1 台 + レプリカ 2 台の構成で TC-4-1 を実施
-  両レプリカで同じデータが返ること
-```
-
-**Phase 10 実装タスク：**
-
-```
-T4-1: --role フラグ対応（standalone / primary / replica の起動分岐）
-T4-2: WAL フレームストリーム API（GET /replication/v1/log SSE）
-T4-3: スナップショット API（GET /replication/v1/snapshot）
-```
-
-**Phase 11 実装タスク：**
-
-```
-T4-4: レプリカ側 WAL フレーム受信・適用ループ
-T4-5: 書き込みリダイレクト（307 → primary-url）
-T4-6: GET /v2/health にロール・ lag 情報を追加
-T4-7: 統合テスト TC-4-1〜TC-4-5
-```
-
----
-
-### Phase 12：WAL アーカイブ・manifest 管理
-
-**目標**：WAL フレームのアーカイブと manifest.json による管理を実装する
-
-**スコープ：**
-- WAL アーカイブ書き込み（チェックポイント前フック）
-- manifest.json による WAL フレーム管理
-- `wal_retention_days` 設定によるアーカイブ保持期間の管理
-
-**完了条件（テストケース）：**
-
-```
-TC-5-8: 保持期間超過フレームのクリーンアップ
-  設定: wal_retention_days = 1
-  （a）2 日前のタイムスタンプを持つフレームを作成
-  （b）クリーンアップ実行（または 24h 経過後）
-  （c）該当フレームが削除され、manifest.json から除去されている
-```
-
-**Phase 12 実装タスク：**
-
-```
-T5-1: WAL フレームアーカイブ書き込み
-  [ ] sqld チェックポイント前フックで WAL フレームを wal-archive/ へコピー
-  [ ] フレームごとに CRC32 チェックサムを計算・付与
-  [ ] manifest.json へフレームメタデータを追記
-  参照: §3.2, §3.6.3, §6.4（PITR）
-
-T5-2: スナップショット保存
-  [ ] チェックポイント完了後に data.db を snapshot-{frame_no}.db へコピー
-  [ ] スナップショットは最新 1 件のみ保持（古い snapshot ファイルを削除）
-  [ ] manifest.json の base_frame / snapshot フィールドを更新
-  参照: §3.6.3
-
-T5-3: manifest.json 管理
-  [ ] manifest.json の読み込み・書き込みロジック（アトミック更新）
-  [ ] 整合性確認: frames[] と実ファイルの突合
-  [ ] manifest.json 破損時の起動エラー処理
-  参照: §3.2, §3.6.3, §3.6.6
-
-T5-4: クリーンアップスレッド
-  [ ] wal_retention_days 設定を config.toml から読み込み
-  [ ] 24h ごとに manifest.json をスキャンし期限超過フレームを削除
-  [ ] 削除後に manifest.json を更新
-  参照: §4.2, §3.6.6
-  検証: TC-5-8
-```
-
----
-
-### Phase 13：バックアップ・リストア・PITR API
-
-**目標**：WAL アーカイブからのオンラインバックアップと任意時点リストア（PITR）が動作する
-
-**スコープ：**
-- バックアップ API：`GET /admin/v1/databases/{name}/backup`
-- リストア API：`POST /admin/v1/databases/{name}/restore`
-- PITR API：`POST /admin/v1/databases/{name}/restore/point-in-time`
-
-**完了条件（テストケース）：**
-
-```
-TC-5-1: バックアップと同時書き込み
-  （a）GET /admin/v1/databases/{name}/backup を開始（大きな DB でストリーミング）
-  （b）バックアップ中に POST /{name}/v2/pipeline で INSERT を実行
-  （c）バックアップは整合性を保って完了し、書き込みリクエストも 200 で成功
-
-TC-5-2: バックアップからリストア
-  （a）GET /admin/v1/databases/{name}/backup でバックアップファイルを取得
-  （b）POST /admin/v1/databases/{name}/restore でリストア
-  （c）リストア後 SELECT → 元のデータが参照できる
-
-TC-5-3: 不正ファイルでリストア
-  （a）POST /admin/v1/databases/{name}/restore（不正な SQLite ファイルをアップロード）
-  期待: 409 RESTORE_INTEGRITY_FAILED
-
-TC-5-4: PITR 無効時の試行
-  設定: wal_retention_days = 0（または未設定）
-  （a）POST /admin/v1/databases/{name}/restore/point-in-time
-  期待: 503 PITR_NOT_ENABLED
-
-TC-5-5: タイムスタンプ指定 PITR
-  （a）t=T1 に INSERT A、t=T2 に INSERT B
-  （b）POST .../restore/point-in-time {"timestamp": "T1+1s"}
-  （c）SELECT → A が存在し B が存在しない
-
-TC-5-6: アーカイブ範囲外タイムスタンプ
-  （a）POST .../restore/point-in-time（アーカイブに存在しない timestamp）
-  期待: 404 FRAME_NOT_FOUND
-
-TC-5-7: CRC32 不一致フレームで PITR
-  （a）フレームファイルを手動で破壊
-  （b）POST .../restore/point-in-time
-  期待: 409 RESTORE_FRAME_CORRUPT、元 DB が復元されている
-```
-
-**対象外（Phase 14 以降）：**
-- ブランチ機能（Phase 14）
-- 外部ストレージへのアーカイブ転送
-
-**Phase 13 実装タスク：**
-
-```
-T5-5: バックアップ API
-  [ ] GET /admin/v1/databases/{name}/backup → sqlite3_backup_* API でオンラインバックアップ
-  [ ] バックアップ中の書き込みをブロックしない（Online Backup API の並行性保証）
-  [ ] レスポンス: SQLite ファイルをストリーミング送信（Content-Type: application/octet-stream）
-  参照: §6.4（バックアップ / PITR / ブランチ）
-  検証: TC-5-1, TC-5-2
-
-T5-6: リストア API
-  [ ] POST /admin/v1/databases/{name}/restore → アップロードされた SQLite ファイルを適用
-  [ ] PRAGMA integrity_check でファイル整合性検証
-  [ ] 検証失敗時: 元 DB を復元し 409 RESTORE_INTEGRITY_FAILED を返す
-  [ ] 成功時: sqld をリロードしてサービス再開
-  参照: §6.4, §7.3
-  検証: TC-5-2, TC-5-3
-
-T5-7: PITR API
-  [ ] POST /admin/v1/databases/{name}/restore/point-in-time（timestamp / frame_no 指定）
-  [ ] wal_retention_days = 0 の場合は即座に 503 PITR_NOT_ENABLED
-  [ ] manifest.json から対象フレームを特定
-  [ ] スナップショット + WAL フレームリプレイ処理を実装
-  [ ] CRC32 検証失敗時: 元 DB 復元 + 409 RESTORE_FRAME_CORRUPT
-  参照: §6.4, §7.3, §3.6.3
-  検証: TC-5-4〜TC-5-7
-
-T5-8: エラーハンドリング・冪等性
-  [ ] 各 API エラーコードを §7.3 の定義に沿って実装
-  [ ] リストア・PITR の中断時に元 DB を必ず復元すること（ロールバック保証）
-  [ ] 管理 API への Admin JWT 検証をバックアップ・リストアエンドポイントにも適用
-  参照: §7.3, §10
-
-T5-9: 統合テスト
-  [ ] TC-5-1〜TC-5-8 を全て実行し PASS することを確認
-  [ ] Phase 1〜11 の TC がリグレッションしないことを確認
-```
-
----
-
-### Phase 14：ブランチ
-
-**目標**：DB の任意時点からブランチを作成し、独立した DB として読み書き可能にする
-
-**スコープ：**
-- ブランチ DB 作成 API（`from: "current"` / `from: {timestamp}` / `from: {frame_no}`）
-- ブランチ一覧・削除 API
-- ブランチ DB 命名規則と予約名バリデーション（`___`）
-- 再起動後のブランチ DB 自動復元
-
-**完了条件（テストケース）：**
-
-```
-TC-6-1: current から新規ブランチ作成
-  （a）POST /admin/v1/databases/my-db/branches {"branch_name":"feature-x","from":"current"} → 201
-  （b）GET /my-db___feature-x/v2/pipeline SELECT → 元 DB と同じデータが返る
-  （c）GET /admin/v1/databases/my-db/branches → feature-x が含まれる
-
-TC-6-2: ブランチ DB への独立書き込み
-  （a）ブランチ DB に INSERT A
-  （b）元 DB を SELECT → A が存在しない
-  （c）ブランチ DB を SELECT → A が存在する
-
-TC-6-3: タイムスタンプ指定でブランチ作成
-  （a）t=T1 に my-db へ INSERT A、t=T2 に INSERT B
-  （b）POST .../branches {"branch_name":"snap","from":"T1+1s"} → 201
-  （c）ブランチ DB を SELECT → A が存在し B が存在しない
-
-TC-6-4: ブランチ一覧取得
-  （a）feature-x・snap の 2 ブランチを作成
-  （b）GET /admin/v1/databases/my-db/branches → 両ブランチが含まれる
-
-TC-6-5: ブランチ削除
-  （a）DELETE /admin/v1/databases/my-db/branches/feature-x → 204
-  （b）GET /admin/v1/databases/my-db/branches → feature-x が含まれない
-  （c）/my-db___feature-x/v2/pipeline → 404 DB_NOT_FOUND
-  （d）{data-dir}/databases/my-db___feature-x/ ディレクトリが削除されている
-
-TC-6-6: 予約名バリデーション
-  （a）POST /admin/v1/databases {"name":"a___b"} → 400 DB_RESERVED_NAME
-
-TC-6-7: 再起動後のブランチ自動復元
-  （a）feature-x ブランチを作成
-  （b）サーバーを再起動（同じ --data）
-  （c）/my-db___feature-x/v2/pipeline SELECT → データが復元されている
-```
-
-**対象外（Phase 15 以降）：**
-- ブランチのマージ
-- ブランチ間 diff
-
-**Phase 14 実装タスク一覧：**
-
-```
-T6-1: branches.json 読み書きロジック
-  [ ] {data-dir}/meta/branches.json の読み込み・書き込み（アトミック更新）
-  [ ] 起動時に branches.json を読み込み（§8.1 Step 5-3）
-  [ ] branches.json がない場合は空で初期化
-  参照: §3.2, §8.1 Step 5-3
-
-T6-2: ブランチ DB 命名・バリデーション
-  [ ] `___` を含む DB 名を予約名として判定
-  [ ] POST /admin/v1/databases で `___` 含む名前 → 400 DB_RESERVED_NAME
-  [ ] ブランチ DB 内部名の生成: {source}___{branch-name}
-  参照: §7.3
-  検証: TC-6-6
-
-T6-3: `from: "current"` ブランチ作成
-  [ ] sqlite3_backup_* API で source DB のオンラインスナップショットを取得
-  [ ] {data-dir}/databases/{name}___{branch}/ ディレクトリ作成
-  [ ] スナップショットを data.db として配置
-  [ ] branches.json へメタデータを追加
-  [ ] 新 DB を sqld でオープン・マルチ DB マネージャへ登録
-  参照: §6.4（ブランチ）
-  検証: TC-6-1, TC-6-2
-
-T6-4: `from: {timestamp}/{frame_no}` ブランチ作成
-  [ ] wal_retention_days = 0 の場合は 503 PITR_NOT_ENABLED
-  [ ] T5-7 の PITR ロジックを再利用してブランチ DB を構築
-  [ ] 構築先: {data-dir}/databases/{name}___{branch}/data.db
-  [ ] branches.json へメタデータを追加（from_frame を記録）
-  参照: §6.4, T5-7
-  検証: TC-6-3
-
-T6-5: ブランチ一覧・削除 API
-  [ ] GET /admin/v1/databases/{name}/branches → branches.json からフィルタして返す
-  [ ] DELETE /admin/v1/databases/{name}/branches/{branch-name}
-        → sqld クローズ・ディレクトリ削除・branches.json 更新
-  参照: §6.4（ブランチ）
-  検証: TC-6-4, TC-6-5
-
-T6-6: 起動時ブランチ自動復元ロジック
-  [ ] branches.json を読み込み、各 db_name の DB ディレクトリが存在すれば sqld でオープン
-  [ ] ディレクトリが存在しないエントリは WARN ログを出力してスキップ
-  参照: §8.1 Step 5-3
-  検証: TC-6-7
-
-T6-7: 統合テスト
-  [ ] TC-6-1〜TC-6-7 を全て実行し PASS することを確認
-  [ ] Phase 1〜13 の TC がリグレッションしないことを確認
-```
-
----
-
-### Phase 15：SQLite 拡張・内製化・HA
-
-Phase 14 完了後に計画する。候補（優先度未確定）：
-
-- SQLite 拡張機能ロード（`.so` / Wasm）
-- libSQL 内部コンポーネントの段階的内製化（§3.5.3 のロードマップに従う）
-- 高可用性・自動フェイルオーバー
-- メトリクス永続化・外部監視連携（Prometheus 等）
-
----
-
-## 10. セキュリティ考慮事項
-
-### 10.1 JWT シークレット管理
-
-**優先順位：** `--auth-jwt-secret-file` > `--auth-jwt-secret` > 環境変数 `ADLAIRE_JWT_SECRET` > 設定ファイル `[auth] jwt_secret`
-
-| 方法 | 推奨度 | 用途 |
-|------|--------|------|
-| `--auth-jwt-secret-file <PATH>` | 本番推奨 | ファイルから読み込み。ファイルパーミッション 600 で保護 |
-| 環境変数 `ADLAIRE_JWT_SECRET` | 本番可 | コンテナ・systemd での秘密注入に適す |
-| `--auth-jwt-secret <VALUE>` | 開発のみ | プロセスリストに secret が露出するため本番不可 |
-| config.toml `jwt_secret` | 非推奨 | 設定ファイルが平文で読まれる。git に入れないこと |
-
-secret が未設定の場合は認証を完全に無効化する（起動時に `WARN` ログを出力する）。
-
-**シークレットの最小要件（実装で検証する）：**
-- 長さ 32 バイト以上
-- 未満の場合: 起動失敗 `Error: jwt_secret must be at least 32 bytes`
-
-**ローテーション方針（Phase 1 時点）：**
-- 旧 secret でのトークンは即時無効化される（新 secret で再発行が必要）
-- ローテーション手順: 新 secret で新トークン発行 → クライアント切り替え → 旧 secret 廃止
-- ゼロダウンタイムローテーション（複数 secret の同時受理）は Phase 1 対象外
-
-### 10.2 管理ポート（8081）のアクセス制御
-
-**デフォルト動作：**
-
-```
-bind: 127.0.0.1:8081   ← localhost のみ待機（Phase 1 固定）
-```
-
-Phase 1〜5 では管理ポートのバインドアドレスは `127.0.0.1` 固定であり、変更できない（`--admin-bind` フラグは Phase 6 以降で追加する）。
-外部ネットワークへの公開が必要な場合は Phase 6 以降でリバースプロキシ経由で行うこと。公開する場合は必ず `[admin] auth_token` を設定し、TLS ターミネーション（Nginx・Caddy 等）を前段に置くこと。
-
-**推奨構成（本番）：**
-
-```
-Internet → Reverse Proxy (TLS) → :8080 (API)
-                                → :8081 (Admin) ← VPN / internal network only
-```
-
-### 10.3 データディレクトリのファイルパーミッション
-
-起動時に `--data` で指定したディレクトリのパーミッションを検証・適用する。
-
-| パス | 推奨パーミッション | 内容 |
-|------|--------------------|------|
-| `{data-dir}/` | `700` | ルートディレクトリ |
-| `{data-dir}/meta/` | `700` | tokens.json・databases.json |
-| `{data-dir}/meta/tokens.json` | `600` | JWT secret と同等の機密 |
-| `{data-dir}/databases/{name}/` | `700` | DB ファイルディレクトリ |
-| `{data-dir}/databases/{name}/data.db` | `600` | SQLite 本体 |
-| `{data-dir}/databases/{name}/data.db-wal` | `600` | WAL ファイル |
-
-実装方針：
-- 起動時に `data-dir` が `700` 未満の場合は `WARN` ログを出力する（強制変更はしない）
-- 新規作成するファイル・ディレクトリは上記パーミッションで作成する
-
-### 10.4 TLS
-
-Phase 1〜7 では TLS をネイティブ実装しない。リバースプロキシ（Nginx・Caddy 等）による TLS ターミネーションを推奨する。
-
-```
-Client → [TLS] → Nginx/Caddy → [plain HTTP] → adlaire-db :8080
-```
-
-TLS ネイティブ対応は Phase 13 以降の検討事項とする。
-
-### 10.5 トークン情報の漏洩防止
-
-- `GET /admin/v1/tokens` および `GET /admin/v1/tokens/{id}` は JWT 文字列（`token` フィールド）を返さない（§6.4 参照）
-- JWT 文字列は `POST /admin/v1/tokens` の発行時レスポンスでのみ返す（以降は再取得不可）
-- `tokens.json` に JWT 文字列は保存しない（`id` と `access` と有効期限のみ保存）
-
-### 10.6 パストラバーサル対策
-
-DB 名・ファイルパス生成時に以下を必ず適用する：
-
-1. DB 名バリデーション（§6.4 の正規表現 `^[a-zA-Z0-9_-]{1,127}$`）
-2. `databases/{name}/` パス構築時に `Path::new(data_dir).join("databases").join(name)` を使用し、`..` を含む入力をバリデーションで事前排除する
-3. 予約語（`meta`・`admin`）のブロック
-
----
-
-## 11. 配布・デプロイ
-
-- シングルバイナリ（`adlaire-db`）として配布
-- ターゲット：Linux x86_64 / aarch64
-- 静的リンク（musl）によるランタイム依存ゼロを目標（Phase 1 完了後に検討）
-- 配布チャネル：GitHub Releases
-- リリース成果物には SHA-256 チェックサムを添付する
-
----
-
-## 12. ログ仕様
-
-### 12.1 フォーマット
-
-構造化 JSON Lines（1 行 1 イベント）。
-
-```json
-{"ts":"2024-01-01T00:00:00.123Z","level":"INFO","msg":"request completed","method":"POST","path":"/v2/pipeline","status":200,"duration_ms":3,"db":null,"error":null}
-```
-
-| フィールド | 型 | 必須 | 説明 |
-|---|---|---|---|
-| `ts` | string (RFC 3339, ms 精度) | ✓ | イベント発生時刻（UTC） |
-| `level` | string | ✓ | `TRACE` / `DEBUG` / `INFO` / `WARN` / `ERROR` |
-| `msg` | string | ✓ | 人間可読メッセージ |
-| `method` | string | HTTP リクエスト時 | HTTP メソッド |
-| `path` | string | HTTP リクエスト時 | リクエストパス |
-| `status` | integer | HTTP レスポンス時 | HTTP ステータスコード |
-| `duration_ms` | integer | HTTP リクエスト時 | 処理時間（ミリ秒） |
-| `db` | string \| null | マルチ DB 時 | 対象 DB 名（Phase 6〜） |
-| `error` | string \| null | エラー時 | エラーコードまたはメッセージ |
-
-### 12.2 ログレベル
-
-| レベル | 用途 |
-|---|---|
-| `ERROR` | リクエスト処理失敗・起動失敗・ファイル I/O エラー |
-| `WARN` | 認証失敗・存在しない DB へのアクセス・設定非推奨 |
-| `INFO` | 起動・停止・HTTP リクエスト完了（デフォルト） |
-| `DEBUG` | SQL 実行詳細・WAL チェックポイント |
-| `TRACE` | hrana プロトコル詳細・バイト列ダンプ |
-
-デフォルトレベル：`INFO`。`--log-level` フラグまたは環境変数 `ADLAIRE_LOG_LEVEL` で変更可。
-
-### 12.3 出力先
-
-- デフォルト：stdout（コンテナ・systemd との親和性）
-- `--log-file <PATH>` 指定時：ファイルへ書き出し（ローテーションは外部ツール任せ）
-- stdout とファイルの同時出力は非サポート（Phase 1 時点）
-
-### 12.4 起動・停止ログ例
-
-```
-{"ts":"...","level":"INFO","msg":"Adlaire DB starting","version":"0.1.0","data_dir":"/var/lib/adlaire","port":8080}
-{"ts":"...","level":"INFO","msg":"Adlaire DB listening","addr":"0.0.0.0:8080","admin_addr":"127.0.0.1:8081"}
-{"ts":"...","level":"INFO","msg":"shutdown signal received"}
-{"ts":"...","level":"INFO","msg":"Adlaire DB stopped"}
-```
-
----
-
-## 13. WAL 設定
-
-### 13.1 WAL モード
-
-すべての SQLite DB は起動時に WAL モードを有効化する。
-
-```sql
-PRAGMA journal_mode = WAL;
-```
-
-- WAL により複数の同時読み取りと 1 書き込みが並行可能
-- クラッシュ後の自動リカバリは SQLite が保証
-
-### 13.2 設定パラメータ
-
-| パラメータ | デフォルト | CLI フラグ | config.toml キー | 説明 |
-|---|---|---|---|---|
-| busy timeout | 5000 ms | `--busy-timeout` | `[storage] busy_timeout_ms` | ロック待機タイムアウト。超過時 503 BUSY |
-| WAL checkpoint interval | 1000 pages | — | `[storage] wal_checkpoint_pages` | 自動チェックポイントのページ閾値 |
-| WAL checkpoint mode | `PASSIVE` | — | `[storage] wal_checkpoint_mode` | `PASSIVE` / `FULL` / `RESTART` |
-| synchronous | `NORMAL` | — | `[storage] synchronous` | `OFF` は非サポート（I-4 違反） |
-
-### 13.3 チェックポイント挙動
-
-- SQLite のデフォルト自動チェックポイント（1000 pages）をそのまま使用（Phase 1）
-- Phase 1 では手動チェックポイントの API は提供しない
-- Phase 10（レプリケーション）時に WAL チェックポイント制御を再設計する
-
-### 13.4 busy timeout エラー
-
-WAL ロック待機が `busy_timeout_ms` を超えた場合：
-
-```json
-{
-  "error": {
-    "message": "database is busy",
-    "code": "STORAGE_BUSY"
-  }
-}
-```
-
-HTTP ステータス：503
-
----
-
-## 付録：用語定義
-
-| 用語 | 定義 |
-|------|------|
-| Turso Cloud | libSQL のマネージドホスティングサービス。Adlaire DB の hrana プロトコル互換の参照実装 |
-| libSQL | SQLite フォーク。HTTP API・WAL レプリケーション等を追加した OSS DB ライブラリ |
-| sqld | libSQL のサーバーコンポーネント。HTTP API・WebSocket API を提供する |
-| libSQL フォーク | Adlaire DB 専用に改変した libSQL（sqld 含む）。本プロジェクトの全体基盤 |
-| hrana | Turso / libSQL のワイヤプロトコル名。hrana-http（HTTP版）と hrana-ws（WebSocket版）がある |
-| baton | hrana プロトコルにおけるセッション継続識別子 |
-
----
-
-## 将来の内製化方針
-
-### 基本方針
-- 内製化の単位はクレートとする
-- 外部クレートを内製クレートに段階的に差し替えることで内製化を進める
-- 既存の外部クレートで要件を満たせる場合は積極的に採用する
-- 既存クレートで不足する機能は、最初から内製クレートとして開発する
-- **外部クレートと内製クレートの併用パターンを初期段階から採用する**
-- 内製化の順序は実装難易度が低いものから優先する
-
-### 併用パターン
-
-初期段階から外部クレートと内製クレートを併用する。
-外部クレートで不足する機能を内製クレートで補い、
-成熟次第に外部クレートを内製クレートへ差し替える。
-
-### 内製化順序（難易度低い順）
-
-| 優先度 | 対象 | 現行クレート | 備考 |
-|--------|------|------------|------|
-| 1 | WAL チェックポイント制御 | libSQL | Phase 10 と直結 |
-| 2 | ストレージ層 | libSQL（SQLite ページャー）| WAL 内製後に着手 |
-| 3 | SQL パーサ | libSQL（SQLite）| 最難関・最後 |
-
-### 実施時期
-
-Phase 1〜7 と並行して着手可能なものから開始する。
-
----
-
-## テストカバレッジ方針
-
-### 原則
-
-- **意味のあるテストのみ書く**：カバレッジ数値のためだけのテストは禁止
-- 各テストは「何が壊れたら検出できるか」を明確にする
-- テストのないコードより、誤ったテストのほうが危険
-
-### テスト種別と対象
-
-| 種別 | 対象 | 必須条件 |
-|------|------|---------|
-| **ユニットテスト** | フィルタ評価・JWT 検証・エラー処理 | 境界値・異常系を必ず含む |
-| **統合テスト** | TC-* 全件 | CI で全件通過必須。1件でも失敗はリリース不可 |
-| **プロパティテスト** | クエリ演算子・WAL 整合性 | 任意入力で不変条件が崩れないことを検証 |
-| **クラッシュテスト** | fsync 保証（I-4）・自動 ROLLBACK（I-5） | プロセス強制終了 → 再起動 → データ検証。WAL 内製時は必須 |
-
-### カバレッジ目標
-
-| 層 | 目標 | 備考 |
-|----|------|------|
-| WAL・ストレージ（内製クレート） | **95%以上** | データ整合性に直結。妥協しない |
-| API・認証層 | **85%以上** | TC-* で大部分をカバー |
-| エラーハンドリング | **100%** | 全エラーコードに対応するテストを必須とする |
-
-### CI ゲート（厳格）
-
-| チェック | 条件 |
-|---------|------|
-| 統合テスト（TC-*） | 全件グリーン必須。スキップ禁止 |
-| カバレッジ下限 | 内製クレート 95%・API 層 85% 未満でビルド失敗 |
-| クラッシュテスト | Phase 1 完了時点から CI 必須 |
-| プロパティテスト | 1000 ケース以上で回帰チェック |
-
----
-
-## 14. 実装詳細（Rust レベル）
-
-### 14.1 モジュール構成
+#### 14.1 モジュール構成
 
 ```
 crates/adlaire-server/src/
@@ -2896,7 +1601,8 @@ crates/adlaire-server/src/
 └── metrics.rs           ← AtomicU64 カウンター・DashMap（Phase 9）
 ```
 
-### 14.2 主要型定義
+
+#### 14.2 主要型定義
 
 #### AppState
 
@@ -3320,132 +2026,89 @@ pub struct DbMetrics {
 }
 ```
 
-### 14.3 axum 認証 Extractor
+
+### Phase 1：ビルド基盤・CLI
+
+**目標**：Cargo ワークスペースと libSQL サブモジュールを確立し、CLI の骨格を動かす
+
+**スコープ：**
+- Cargo workspace 初期化（adlaire-server crate + libsql submodule）
+- clap による `serve` / `token` サブコマンド骨格
+- config.toml 3-way マージ（CLI > TOML > デフォルト）
+- CI: cargo build / cargo test が通る状態を維持
+
+**実装タスク：**
+
+```
+T-1: リポジトリ・ビルド基盤
+  [ ] Cargo workspace 初期化（adlaire-server crate + libsql submodule）
+  [ ] libSQL フォークを git submodule として追加
+  [ ] sqld crate が core feature でビルドできることを確認
+  [ ] CI: cargo build / cargo test が通る状態を維持
+  参照: §3.3.1
+
+T-2: CLI フレームワーク
+  [ ] clap による `serve` / `token` サブコマンドの骨格実装
+  [ ] `serve` フラグ: --data, --port, --admin-port, --auth-jwt-secret,
+      --auth-jwt-secret-file, --log-level, --busy-timeout, --shutdown-timeout
+  [ ] config.toml 読み込み（フラグ > config.toml > デフォルト）
+  [ ] --data 未指定時の起動エラー
+  参照: §4.1, §4.2, §8.4
+```
+
+---
+
+
+#### 実装詳細
+
+#### 14.12 CLI 構造体
 
 ```rust
-// auth/middleware.rs
+// main.rs
+#[derive(Parser)]
+#[command(name = "adlaire-db", version, about = "Self-hosted libSQL-compatible DB server")]
+pub struct Cli { #[command(subcommand)] pub command: CliCommand }
 
-/// リクエストごとに JWT を検証し、Claims を抽出する axum Extractor
-pub struct Authenticated(pub Claims);
-// 利用側: Authenticated(claims): Authenticated
-
-impl<S> axum::extract::FromRequestParts<S> for Authenticated
-where
-    S: Send + Sync,
-    SharedState: axum::extract::FromRef<S>,
-{
-    type Rejection = AppError;
-
-    async fn from_request_parts(
-        parts: &mut http::request::Parts,
-        state: &S,
-    ) -> Result<Self, Self::Rejection> {
-        let state = SharedState::from_ref(state);
-
-        // 認証無効モード（jwt_secret 未設定）はスキップ
-        if state.auth.is_disabled() {
-            return Ok(Authenticated(Claims::unauthenticated()));
-        }
-
-        let header = parts.headers
-            .get(http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .ok_or(AppError::AuthRequired)?;
-
-        let token = header
-            .strip_prefix("Bearer ")
-            .ok_or(AppError::AuthInvalid)?;
-
-        let claims = state.auth.verify(token).await?;
-        Ok(Authenticated(claims))
-    }
+#[derive(Subcommand)]
+pub enum CliCommand {
+    Serve(ServeArgs),
+    Token { #[command(subcommand)] cmd: TokenSubcommand },
 }
 
-/// 管理 API 専用 Extractor（Bearer 文字列完全一致）
-pub struct AdminAuth;
+#[derive(Subcommand)]
+pub enum TokenSubcommand { Create(TokenCreateArgs) }
 
-impl<S> axum::extract::FromRequestParts<S> for AdminAuth
-where
-    S: Send + Sync,
-    SharedState: axum::extract::FromRef<S>,
-{
-    type Rejection = AppError;
+#[derive(Parser)]
+pub struct ServeArgs {
+    #[arg(long, required = true)] pub data:                    PathBuf,
+    #[arg(long)] pub port:                                     Option<u16>,
+    #[arg(long)] pub admin_port:                               Option<u16>,
+    #[arg(long)] pub config:                                   Option<PathBuf>,
+    #[arg(long)] pub auth_jwt_secret:                          Option<String>,
+    #[arg(long)] pub auth_jwt_secret_file:                     Option<PathBuf>,
+    #[arg(long)] pub admin_auth_token:                         Option<String>,
+    #[arg(long)] pub log_level:                                Option<String>,
+    #[arg(long, default_value_t = false)] pub skip_integrity_check: bool,
+    #[arg(long)] pub replication_write_mode:                   Option<String>,
+    #[arg(long)] pub busy_timeout:                             Option<u64>,
+    #[arg(long)] pub shutdown_timeout:                         Option<u64>,
+}
 
-    async fn from_request_parts(
-        parts: &mut http::request::Parts,
-        state: &S,
-    ) -> Result<Self, Self::Rejection> {
-        let state = SharedState::from_ref(state);
-        let expected = match &state.config.admin_auth_token {
-            None    => return Ok(AdminAuth),  // 認証無効
-            Some(t) => t,
-        };
-        let header = parts.headers
-            .get(http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .ok_or(AppError::AuthRequired)?;
-        let token = header.strip_prefix("Bearer ").ok_or(AppError::AuthInvalid)?;
-        if token != expected { return Err(AppError::AuthInvalid); }
-        Ok(AdminAuth)
-    }
+#[derive(Parser)]
+pub struct TokenCreateArgs {
+    #[arg(long, required = true)] pub secret: String,
+    #[arg(long, default_value = "rw")] pub access: String,
+    #[arg(long)] pub expiry: Option<String>,
+    #[arg(long, value_name = "DB:ACCESS")] pub db: Vec<String>,
 }
 ```
 
-### 14.4 axum Router 設計
+`--data` のみ required。その他はすべて `Option<T>` にして 3-way マージで解決する。
 
-```rust
-// http/mod.rs
-pub fn build_router(state: SharedState) -> axum::Router {
-    axum::Router::new()
-        // Phase 1: シングル DB
-        .route("/v2/pipeline",           axum::routing::post(pipeline::handle))
-        .route("/v2/health",             axum::routing::get(health::handle))
-        // Phase 6: パスベース DB ルーティング
-        .route("/:db_name/v2/pipeline",  axum::routing::post(pipeline::handle_db))
-        // Phase 8: WebSocket
-        .route("/v3/baton",              axum::routing::get(ws::handle))
-        .route("/:db_name/v3/baton",     axum::routing::get(ws::handle_db))
-        .with_state(state)
-}
+---
 
-pub fn build_admin_router(state: SharedState) -> axum::Router {
-    use axum::routing::{delete, get, post};
-    // AdminAuth は Layer ではなく各ハンドラの引数 Extractor として使用する
-    // （axum 0.7 では from_extractor_with_state が削除されたため）
-    axum::Router::new()
-        .nest("/admin/v1", axum::Router::new()
-            // Phase 6: DB CRUD
-            .route("/databases",
-                get(admin::databases::list).post(admin::databases::create))
-            .route("/databases/:name",
-                get(admin::databases::get).delete(admin::databases::delete))
-            // Phase 7: トークン CRUD
-            .route("/tokens",
-                get(admin::tokens::list).post(admin::tokens::create))
-            .route("/tokens/:id",
-                get(admin::tokens::get).delete(admin::tokens::revoke))
-            // Phase 9: メトリクス
-            .route("/metrics",           get(admin::metrics::get))
-            // Phase 12〜13: バックアップ・PITR
-            .route("/databases/:name/backup",                    get(admin::backup::backup))
-            .route("/databases/:name/restore",                   post(admin::backup::restore))
-            .route("/databases/:name/restore/point-in-time",     post(admin::backup::pitr))
-            // Phase 14: ブランチ
-            .route("/databases/:name/branches",
-                get(admin::branches::list).post(admin::branches::create))
-            .route("/databases/:name/branches/:branch",          delete(admin::branches::delete))
-        )
-        .with_state(state)
-}
 
-// 各管理ハンドラは先頭引数に _auth: AdminAuth を必須とする。例：
-// pub async fn list(
-//     _auth: AdminAuth,
-//     State(state): State<SharedState>,
-// ) -> Result<Json<...>, AppError> { ... }
-```
-
-### 14.5 エントリポイント（main.rs）
+#### 14.5 エントリポイント（main.rs）
 
 CLI 構造体（`Cli`, `ServeArgs`, `TokenCreateArgs` 等）の定義は §14.12 を参照。
 
@@ -3548,464 +2211,8 @@ async fn shutdown_signal() {
 }
 ```
 
-### 14.6 hrana 変換ロジック
 
-```rust
-// hrana/convert.rs
-
-pub fn to_pipeline_response(
-    results: Vec<Result<sqld::QueryResult, sqld::Error>>,
-) -> PipelineResponse {
-    PipelineResponse {
-        baton:    None,
-        base_url: None,
-        results:  results.into_iter().map(to_stream_result).collect(),
-    }
-}
-
-fn to_stream_result(r: Result<sqld::QueryResult, sqld::Error>) -> StreamResult {
-    match r {
-        Ok(qr)  => StreamResult::Ok {
-            response: StreamResponse::Execute { result: to_stmt_result(qr) },
-        },
-        Err(e) => StreamResult::Error {
-            error: HranaError {
-                message: e.to_string(),
-                code:    sqld_error_code(&e),
-            },
-        },
-    }
-}
-
-fn to_stmt_result(qr: sqld::QueryResult) -> StmtResult {
-    StmtResult {
-        cols: qr.columns.into_iter().map(|c| Col {
-            name:     c.name,
-            decltype: c.decl_type,
-        }).collect(),
-        rows: qr.rows.into_iter().map(|row| {
-            row.values.into_iter().map(sqld_val_to_hrana).collect()
-        }).collect(),
-        rows_affected:     qr.rows_affected as u64,
-        last_insert_rowid: qr.last_insert_rowid.map(|n| n.to_string()),
-    }
-}
-
-fn sqld_error_code(e: &sqld::Error) -> String {
-    // sqld のエラー型は実装時に確定する。典型的なマッピングを示す
-    if e.to_string().contains("UNIQUE constraint") {
-        "SQLITE_CONSTRAINT".into()
-    } else {
-        "SQLITE_ERROR".into()
-    }
-}
-
-fn sqld_val_to_hrana(v: sqld::Value) -> Value {
-    match v {
-        sqld::Value::Null       => Value::Null,
-        sqld::Value::Integer(n) => Value::Integer { value: n.to_string() },
-        sqld::Value::Real(f)    => Value::Real    { value: f },
-        sqld::Value::Text(s)    => Value::Text    { value: s },
-        sqld::Value::Blob(b)    => Value::Blob    {
-            value: base64::engine::general_purpose::STANDARD.encode(&b),
-        },
-    }
-}
-```
-
-### 14.7 DB 名バリデーション
-
-```rust
-// db/mod.rs
-use std::sync::LazyLock;
-use regex::Regex;
-
-static DB_NAME_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^[a-zA-Z0-9_-]{1,127}$").unwrap()
-});
-
-const RESERVED_NAMES: &[&str]  = &["meta", "admin"];
-const BRANCH_SEP:     &str     = "___";
-
-pub fn validate_db_name(name: &str) -> Result<(), AppError> {
-    if !DB_NAME_RE.is_match(name) {
-        return Err(AppError::InvalidDbName);
-    }
-    if RESERVED_NAMES.contains(&name) {
-        return Err(AppError::InvalidDbName);
-    }
-    if name.contains(BRANCH_SEP) {
-        return Err(AppError::DbReservedName);
-    }
-    Ok(())
-}
-
-/// ブランチ DB の内部名を生成する
-pub fn branch_db_name(source: &str, branch: &str) -> String {
-    format!("{}{}{}", source, BRANCH_SEP, branch)
-}
-```
-
-### 14.8 WAL アーカイブ処理（Phase 12〜13）
-
-チェックポイント前フックで WAL フレームを `wal-archive/` へコピーし、`manifest.json` をアトミックに更新する。
-
-```rust
-// wal/archive.rs
-use crc32fast::Hasher as Crc32Hasher;
-use tokio::io::AsyncWriteExt;
-
-pub async fn archive_frames(
-    db_name:    &str,
-    data_dir:   &std::path::Path,
-    new_frames: &[WalFrame],
-) -> anyhow::Result<()> {
-    let archive_dir   = data_dir.join("databases").join(db_name).join("wal-archive");
-    let manifest_path = archive_dir.join("manifest.json");
-
-    tokio::fs::create_dir_all(&archive_dir).await?;
-    let mut manifest = Manifest::load(&manifest_path).unwrap_or_default();
-
-    for frame in new_frames {
-        // CRC32 計算
-        let mut h = Crc32Hasher::new();
-        h.update(&frame.data);
-        let checksum = h.finalize();
-
-        let filename  = format!("frame-{:012}.bin", frame.frame_no);
-        let frame_path = archive_dir.join(&filename);
-
-        // 書き込み + fsync（I-4 保証）
-        let mut f = tokio::fs::File::create(&frame_path).await?;
-        f.write_all(&frame.data).await?;
-        f.sync_all().await?;
-
-        manifest.frames.push(FrameMeta {
-            frame_no:   frame.frame_no,
-            file:       filename,
-            size:       frame.data.len() as u64,
-            checksum,
-            created_at: chrono::Utc::now(),
-        });
-    }
-
-    // manifest をアトミック更新（tmp → fsync → rename）
-    manifest.save_atomic(&manifest_path)?;
-    Ok(())
-}
-
-/// manifest.json のアトミック保存
-impl Manifest {
-    pub fn save_atomic(&self, path: &std::path::Path) -> anyhow::Result<()> {
-        let tmp = path.with_extension("json.tmp");
-        let json = serde_json::to_vec_pretty(self)?;
-        std::fs::write(&tmp, &json)?;
-        // fsync → rename（POSIX アトミック）
-        let f = std::fs::File::open(&tmp)?;
-        f.sync_all()?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
-    }
-}
-```
-
-### 14.9 WebSocket セッション管理（Phase 8）
-
-```rust
-// ws/session.rs
-use std::collections::HashMap;
-
-pub struct WsSession {
-    db:      std::sync::Arc<sqld::Database>,
-    streams: HashMap<u32, WsStream>,  // stream_id → WsStream
-    auth:    Claims,
-}
-
-pub struct WsStream {
-    conn:    sqld::Connection,
-    tx_mode: TransactionMode,
-}
-
-#[derive(PartialEq)]
-pub enum TransactionMode { None, ReadOnly, ReadWrite }
-
-impl WsSession {
-    pub fn new(db: std::sync::Arc<sqld::Database>, auth: Claims) -> Self {
-        Self { db, streams: HashMap::new(), auth }
-    }
-
-    pub async fn handle_request(
-        &mut self,
-        stream_id: u32,
-        body: RequestBody,
-    ) -> Result<ResponseBody, AppError> {
-        match body {
-            RequestBody::OpenStream => {
-                let conn = self.db.connect()?;
-                self.streams.insert(stream_id, WsStream {
-                    conn,
-                    tx_mode: TransactionMode::None,
-                });
-                Ok(ResponseBody::OpenStream)
-            }
-            RequestBody::Execute { stmt } => {
-                let stream = self.streams.get_mut(&stream_id)
-                    .ok_or(AppError::InvalidRequest)?;
-                let result = stream.conn.execute(&stmt.sql, &stmt.args)?;
-                Ok(ResponseBody::Execute { result: to_stmt_result(result) })
-            }
-            RequestBody::CloseStream => {
-                self.streams.remove(&stream_id);
-                Ok(ResponseBody::CloseStream)
-            }
-        }
-    }
-}
-```
-
-### 14.10 WAL レプリケーション（Phase 10）
-
-**プライマリ側 WAL フレーム管理：**
-
-```rust
-// replication/primary.rs
-use tokio::sync::broadcast;
-
-pub struct ReplicationState {
-    /// 書き込みコミット時にフレームを broadcast する
-    pub frame_tx:      broadcast::Sender<WalFrame>,
-    pub current_frame: std::sync::atomic::AtomicU64,
-    pub replicas:      dashmap::DashMap<String, ReplicaStatus>,
-}
-
-#[derive(Clone, Debug)]
-pub struct WalFrame {
-    pub frame_no: u64,
-    pub db_name:  String,
-    pub data:     bytes::Bytes,
-    pub checksum: u32,  // CRC32
-}
-
-#[derive(Debug)]
-pub struct ReplicaStatus {
-    pub synced_frame: u64,
-    pub last_seen:    chrono::DateTime<chrono::Utc>,
-}
-```
-
-**レプリカ側フレーム受信・適用ループ：**
-
-```rust
-// replication/replica.rs
-pub async fn run_replica_loop(
-    primary_url:  url::Url,
-    db_mgr:       std::sync::Arc<DbManager>,
-    auth_token:   String,
-) {
-    let mut from_frame = db_mgr.current_max_frame().await;
-
-    loop {
-        match fetch_frames(&primary_url, from_frame, &auth_token).await {
-            Ok(frames) if frames.is_empty() => {
-                // フレームなし: バックオフして再試行
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            }
-            Ok(frames) => {
-                for frame in frames {
-                    // CRC32 検証
-                    let actual = crc32fast::hash(&frame.data);
-                    if actual != frame.checksum {
-                        tracing::error!(frame_no = frame.frame_no, "checksum mismatch, skipping");
-                        continue;
-                    }
-                    if let Err(e) = db_mgr.apply_wal_frame(&frame.db_name, &frame.data).await {
-                        tracing::error!(error = %e, "failed to apply WAL frame");
-                    }
-                    from_frame = frame.frame_no + 1;
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "replica fetch error, retrying in 1s");
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            }
-        }
-    }
-}
-```
-
-### 14.11 テスト実装パターン
-
-**ユニットテスト例（JWT 検証・全ケース）：**
-
-```rust
-// auth/mod.rs — #[cfg(test)] mod tests
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::{Duration, Utc};
-
-    fn secret() -> Vec<u8> { "a".repeat(32).into_bytes() }
-
-    fn make_auth() -> AuthState {
-        AuthState::load_with(&secret(), vec![])
-    }
-
-    #[tokio::test]
-    async fn valid_rw_token_passes() {
-        let auth  = make_auth();
-        let token = auth.issue_test_token(AccessLevel::Rw);
-        let c = auth.verify(&token).await.unwrap();
-        assert_eq!(c.a, AccessLevel::Rw);
-    }
-
-    #[tokio::test]
-    async fn expired_token_is_rejected() {
-        let auth  = make_auth();
-        let token = auth.issue_test_token_exp(AccessLevel::Rw, Some(Utc::now() - Duration::seconds(1)));
-        assert!(matches!(auth.verify(&token).await, Err(AppError::AuthExpired)));
-    }
-
-    #[tokio::test]
-    async fn wrong_signature_is_rejected() {
-        let auth = make_auth();
-        assert!(matches!(auth.verify("eyJ.eyJ.badsig").await, Err(AppError::AuthInvalid)));
-    }
-
-    #[tokio::test]
-    async fn revoked_token_is_rejected() {
-        let auth  = make_auth();
-        let token = auth.issue_test_token(AccessLevel::Rw);
-        let sub   = auth.verify(&token).await.unwrap().sub;
-        auth.revoke_sync(&sub);
-        assert!(matches!(auth.verify(&token).await, Err(AppError::AuthInvalid)));
-    }
-
-    #[test]
-    fn db_scope_rw_overrides_global_ro() {
-        let claims = Claims {
-            sub: "tok_x".into(),
-            a:   AccessLevel::Ro,
-            dbs: Some([("db_a".into(), AccessLevel::Rw)].into()),
-            iss: None, iat: 0, exp: None,
-        };
-        assert_eq!(claims.resolve_access("db_a"), AccessLevel::Rw);
-        assert_eq!(claims.resolve_access("db_b"), AccessLevel::Ro);
-    }
-}
-```
-
-**統合テスト例（TC-1）：**
-
-```rust
-// tests/integration/phase1.rs
-//! cargo test --test integration
-
-mod helpers;
-use helpers::TestServer;
-
-#[tokio::test]
-async fn tc1_sql_execution() {
-    let srv = TestServer::spawn(Default::default()).await;
-
-    let resp = srv.pipeline(serde_json::json!({
-        "baton": null,
-        "requests": [
-            {"type":"execute","stmt":{"sql":"CREATE TABLE t(id INT, v TEXT)","args":[],"want_rows":false}},
-            {"type":"execute","stmt":{"sql":"INSERT INTO t VALUES(1,'hello')","args":[],"want_rows":false}},
-            {"type":"execute","stmt":{"sql":"SELECT * FROM t","args":[],"want_rows":true}},
-            {"type":"close"}
-        ]
-    })).await;
-
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    let row = &body["results"][2]["response"]["result"]["rows"][0];
-    assert_eq!(row[0], serde_json::json!({"type":"integer","value":"1"}));
-    assert_eq!(row[1], serde_json::json!({"type":"text","value":"hello"}));
-}
-
-#[tokio::test]
-async fn tc2_health_check() {
-    let srv = TestServer::spawn(Default::default()).await;
-    let resp = srv.get("/v2/health").await;
-    assert_eq!(resp.status(), 200);
-    assert_eq!(resp.json::<serde_json::Value>().await.unwrap(), serde_json::json!({"status":"ok"}));
-}
-
-#[tokio::test]
-async fn tc3_jwt_auth() {
-    let secret = "test-secret-32bytes-minimum-len!";
-    let srv = TestServer::spawn(TestConfig {
-        jwt_secret: Some(secret.to_string()),
-        ..Default::default()
-    }).await;
-
-    let valid_token = srv.create_token(secret, "rw", None);
-
-    // (a) 有効トークン → 200
-    assert_eq!(srv.pipeline_with_token(&valid_token, minimal_select()).await.status(), 200);
-
-    // (b) Authorization ヘッダなし → 401 AUTH_REQUIRED
-    let no_auth = srv.pipeline_no_auth(minimal_select()).await;
-    assert_eq!(no_auth.status(), 401);
-    assert_eq!(no_auth.json::<serde_json::Value>().await.unwrap()["code"], "AUTH_REQUIRED");
-
-    // (c) 不正トークン → 401 AUTH_INVALID
-    let bad = srv.pipeline_with_token("eyJ.eyJ.badsig", minimal_select()).await;
-    assert_eq!(bad.status(), 401);
-    assert_eq!(bad.json::<serde_json::Value>().await.unwrap()["code"], "AUTH_INVALID");
-}
-```
-
----
-
-### 14.12 CLI 構造体
-
-```rust
-// main.rs
-#[derive(Parser)]
-#[command(name = "adlaire-db", version, about = "Self-hosted libSQL-compatible DB server")]
-pub struct Cli { #[command(subcommand)] pub command: CliCommand }
-
-#[derive(Subcommand)]
-pub enum CliCommand {
-    Serve(ServeArgs),
-    Token { #[command(subcommand)] cmd: TokenSubcommand },
-}
-
-#[derive(Subcommand)]
-pub enum TokenSubcommand { Create(TokenCreateArgs) }
-
-#[derive(Parser)]
-pub struct ServeArgs {
-    #[arg(long, required = true)] pub data:                    PathBuf,
-    #[arg(long)] pub port:                                     Option<u16>,
-    #[arg(long)] pub admin_port:                               Option<u16>,
-    #[arg(long)] pub config:                                   Option<PathBuf>,
-    #[arg(long)] pub auth_jwt_secret:                          Option<String>,
-    #[arg(long)] pub auth_jwt_secret_file:                     Option<PathBuf>,
-    #[arg(long)] pub admin_auth_token:                         Option<String>,
-    #[arg(long)] pub log_level:                                Option<String>,
-    #[arg(long, default_value_t = false)] pub skip_integrity_check: bool,
-    #[arg(long)] pub replication_write_mode:                   Option<String>,
-    #[arg(long)] pub busy_timeout:                             Option<u64>,
-    #[arg(long)] pub shutdown_timeout:                         Option<u64>,
-}
-
-#[derive(Parser)]
-pub struct TokenCreateArgs {
-    #[arg(long, required = true)] pub secret: String,
-    #[arg(long, default_value = "rw")] pub access: String,
-    #[arg(long)] pub expiry: Option<String>,
-    #[arg(long, value_name = "DB:ACCESS")] pub db: Vec<String>,
-}
-```
-
-`--data` のみ required。その他はすべて `Option<T>` にして 3-way マージで解決する。
-
----
-
-### 14.13 Config 解決ロジック
+#### 14.13 Config 解決ロジック
 
 ```rust
 // config.rs
@@ -4159,7 +2366,42 @@ fn parse_write_mode(s: &str) -> anyhow::Result<ReplicationWriteMode> {
 
 ---
 
-### 14.14 DataDir・ProcessLock 実装
+
+### Phase 2：データディレクトリ・sqld 統合
+
+**目標**：データディレクトリを初期化し、sqld でシングル DB を開ける状態にする
+
+**スコープ：**
+- `--data` パスのディレクトリ作成・パーミッション設定
+- flock による排他プロセスロック
+- sqld::Database::open()・WAL モード設定
+
+**実装タスク：**
+
+```
+T-3: データディレクトリ初期化
+  [ ] --data パスの作成（mkdir -p）
+  [ ] .lock ファイルによる排他ロック（flock）
+  [ ] databases/ meta/ サブディレクトリ作成
+  [ ] ディレクトリパーミッション警告（700 未満で WARN）
+  参照: §3.2, §8.1 Step 3〜4, §10.3
+
+T-4: sqld 統合・DB オープン
+  [ ] sqld::Database::open() でシングル DB を開く
+  [ ] PRAGMA journal_mode = WAL を起動時に適用
+  [ ] busy_timeout を設定
+  [ ] PRAGMA synchronous = NORMAL を設定
+  [ ] サーバーシャットダウン時に drop（WAL flush + close）
+  参照: §3.3.2, §13, §8.1 Step 6, §8.2 Step 3
+  検証: TC-5（データ永続性）
+```
+
+---
+
+
+#### 実装詳細
+
+#### 14.14 DataDir・ProcessLock 実装
 
 ```rust
 // data_dir.rs
@@ -4204,7 +2446,238 @@ impl ProcessLock {
 
 ---
 
-### 14.15 HTTP ハンドラ実装
+
+#### 14.19 SqldAdapter トレイト（db/sqld_adapter.rs）
+
+sqld の内部型への依存を 1 ファイルに集約し、アップストリーム変更の影響範囲を限定する。
+
+```rust
+// db/sqld_adapter.rs
+
+/// sqld::Database を薄くラップして Adlaire 内部で使用する抽象トレイト。
+/// sqld の型変更が生じた場合はこのファイルのみを修正すれば済む。
+pub trait SqldAdapter: Send + Sync {
+    /// SQL ステートメントを実行し、行列を返す
+    fn execute(
+        &self,
+        stmt: &sqld::hrana::proto::Stmt,
+    ) -> impl std::future::Future<Output = Result<sqld::hrana::proto::StmtResult, crate::error::AppError>> + Send;
+
+    /// パイプラインリクエストを実行する
+    fn execute_pipeline(
+        &self,
+        pipeline: &sqld::hrana::proto::PipelineReqBody,
+    ) -> impl std::future::Future<Output = Result<sqld::hrana::proto::PipelineRespBody, crate::error::AppError>> + Send;
+}
+
+/// 本番実装: sqld::Database を保持する newtype
+pub struct RealSqldAdapter(pub Arc<sqld::Database>);
+
+impl SqldAdapter for RealSqldAdapter {
+    async fn execute(
+        &self,
+        stmt: &sqld::hrana::proto::Stmt,
+    ) -> Result<sqld::hrana::proto::StmtResult, crate::error::AppError> {
+        self.0.execute(stmt).await.map_err(crate::error::AppError::Sqld)
+    }
+
+    async fn execute_pipeline(
+        &self,
+        pipeline: &sqld::hrana::proto::PipelineReqBody,
+    ) -> Result<sqld::hrana::proto::PipelineRespBody, crate::error::AppError> {
+        self.0.execute_pipeline(pipeline).await.map_err(crate::error::AppError::Sqld)
+    }
+}
+```
+
+> **設計メモ**: `db/manager.rs` の `DbManager` は `Arc<dyn SqldAdapter>` を保持する。
+> テストでは `MockSqldAdapter` を差し込んで sqld バイナリなしで単体テストが可能になる。
+
+### Phase 3：HTTP サーバー・hrana パイプライン
+
+**目標**：libSQL クライアント SDK が Adlaire DB に接続して SQL を実行できる最小構成
+
+**スコープ：**
+- axum HTTP サーバー起動・SIGINT/SIGTERM ハンドラ
+- GET `/v2/health`
+- POST `/v2/pipeline`（hrana-http v2 完全実装）
+
+**完了条件（テストケース）：**
+
+```
+TC-1: 認証なしモードで SQL 実行
+  $ ./adlaire-db serve --data ./testdb --port 8080
+  $ curl -s -X POST http://localhost:8080/v2/pipeline \
+      -H "Content-Type: application/json" \
+      -d '{"baton":null,"requests":[
+            {"type":"execute","stmt":{"sql":"CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, v TEXT)","args":[],"want_rows":false}},
+            {"type":"execute","stmt":{"sql":"INSERT INTO t VALUES (1, \"hello\")","args":[],"want_rows":false}},
+            {"type":"execute","stmt":{"sql":"SELECT * FROM t","args":[],"want_rows":true}},
+            {"type":"close"}
+          ]}'
+  期待: results に rows=[[[integer,"1"],[text,"hello"]]] が含まれる
+
+TC-2: ヘルスチェック
+  $ curl -s http://localhost:8080/v2/health
+  期待: {"status":"ok"}
+
+TC-6: 起動・停止
+  （a）./adlaire-db serve で起動 → "Adlaire DB listening on ..." ログ
+  （b）Ctrl+C でクリーンシャットダウン → .lock ファイルが解放される
+  （c）再起動できる（.lock がゾンビ残留しない）
+```
+
+**実装タスク：**
+
+```
+T-5: HTTP サーバー骨格（axum）
+  [ ] tokio ランタイム起動
+  [ ] axum Router: POST /v2/pipeline, GET /v2/health
+  [ ] --port でバインドアドレスを指定
+  [ ] SIGINT / SIGTERM ハンドラ登録（graceful shutdown）
+  [ ] "Adlaire DB listening" INFO ログ出力
+  参照: §6.1, §8.1 Step 7〜8, §8.2
+  検証: TC-2（ヘルスチェック）, TC-6（起動・停止）
+
+T-6: hrana-http v2 パイプライン実装
+  [ ] POST /v2/pipeline のリクエスト JSON デシリアライズ
+      （baton, requests[].type, requests[].stmt.sql/args/want_rows）
+  [ ] requests を sqld::Connection.execute_batch() に渡す
+  [ ] sqld::QueryResult を hrana-http v2 results[] 形式に変換
+      （cols, rows, rows_affected, last_insert_rowid）
+  [ ] SQL エラーを results[i].type="error" として返す（HTTP 200 のまま）
+  [ ] "close" type リクエストを正しく処理する
+  参照: §6.2, §3.3.3
+  検証: TC-1（SQL 実行）
+```
+
+---
+
+
+#### 実装詳細
+
+#### 14.4 axum Router 設計
+
+```rust
+// http/mod.rs
+pub fn build_router(state: SharedState) -> axum::Router {
+    axum::Router::new()
+        // Phase 1: シングル DB
+        .route("/v2/pipeline",           axum::routing::post(pipeline::handle))
+        .route("/v2/health",             axum::routing::get(health::handle))
+        // Phase 6: パスベース DB ルーティング
+        .route("/:db_name/v2/pipeline",  axum::routing::post(pipeline::handle_db))
+        // Phase 8: WebSocket
+        .route("/v3/baton",              axum::routing::get(ws::handle))
+        .route("/:db_name/v3/baton",     axum::routing::get(ws::handle_db))
+        .with_state(state)
+}
+
+pub fn build_admin_router(state: SharedState) -> axum::Router {
+    use axum::routing::{delete, get, post};
+    // AdminAuth は Layer ではなく各ハンドラの引数 Extractor として使用する
+    // （axum 0.7 では from_extractor_with_state が削除されたため）
+    axum::Router::new()
+        .nest("/admin/v1", axum::Router::new()
+            // Phase 6: DB CRUD
+            .route("/databases",
+                get(admin::databases::list).post(admin::databases::create))
+            .route("/databases/:name",
+                get(admin::databases::get).delete(admin::databases::delete))
+            // Phase 7: トークン CRUD
+            .route("/tokens",
+                get(admin::tokens::list).post(admin::tokens::create))
+            .route("/tokens/:id",
+                get(admin::tokens::get).delete(admin::tokens::revoke))
+            // Phase 9: メトリクス
+            .route("/metrics",           get(admin::metrics::get))
+            // Phase 12〜13: バックアップ・PITR
+            .route("/databases/:name/backup",                    get(admin::backup::backup))
+            .route("/databases/:name/restore",                   post(admin::backup::restore))
+            .route("/databases/:name/restore/point-in-time",     post(admin::backup::pitr))
+            // Phase 14: ブランチ
+            .route("/databases/:name/branches",
+                get(admin::branches::list).post(admin::branches::create))
+            .route("/databases/:name/branches/:branch",          delete(admin::branches::delete))
+        )
+        .with_state(state)
+}
+
+// 各管理ハンドラは先頭引数に _auth: AdminAuth を必須とする。例：
+// pub async fn list(
+//     _auth: AdminAuth,
+//     State(state): State<SharedState>,
+// ) -> Result<Json<...>, AppError> { ... }
+```
+
+
+#### 14.6 hrana 変換ロジック
+
+```rust
+// hrana/convert.rs
+
+pub fn to_pipeline_response(
+    results: Vec<Result<sqld::QueryResult, sqld::Error>>,
+) -> PipelineResponse {
+    PipelineResponse {
+        baton:    None,
+        base_url: None,
+        results:  results.into_iter().map(to_stream_result).collect(),
+    }
+}
+
+fn to_stream_result(r: Result<sqld::QueryResult, sqld::Error>) -> StreamResult {
+    match r {
+        Ok(qr)  => StreamResult::Ok {
+            response: StreamResponse::Execute { result: to_stmt_result(qr) },
+        },
+        Err(e) => StreamResult::Error {
+            error: HranaError {
+                message: e.to_string(),
+                code:    sqld_error_code(&e),
+            },
+        },
+    }
+}
+
+fn to_stmt_result(qr: sqld::QueryResult) -> StmtResult {
+    StmtResult {
+        cols: qr.columns.into_iter().map(|c| Col {
+            name:     c.name,
+            decltype: c.decl_type,
+        }).collect(),
+        rows: qr.rows.into_iter().map(|row| {
+            row.values.into_iter().map(sqld_val_to_hrana).collect()
+        }).collect(),
+        rows_affected:     qr.rows_affected as u64,
+        last_insert_rowid: qr.last_insert_rowid.map(|n| n.to_string()),
+    }
+}
+
+fn sqld_error_code(e: &sqld::Error) -> String {
+    // sqld のエラー型は実装時に確定する。典型的なマッピングを示す
+    if e.to_string().contains("UNIQUE constraint") {
+        "SQLITE_CONSTRAINT".into()
+    } else {
+        "SQLITE_ERROR".into()
+    }
+}
+
+fn sqld_val_to_hrana(v: sqld::Value) -> Value {
+    match v {
+        sqld::Value::Null       => Value::Null,
+        sqld::Value::Integer(n) => Value::Integer { value: n.to_string() },
+        sqld::Value::Real(f)    => Value::Real    { value: f },
+        sqld::Value::Text(s)    => Value::Text    { value: s },
+        sqld::Value::Blob(b)    => Value::Blob    {
+            value: base64::engine::general_purpose::STANDARD.encode(&b),
+        },
+    }
+}
+```
+
+
+#### 14.15 HTTP ハンドラ実装
 
 ```rust
 // handlers/pipeline.rs
@@ -4275,7 +2748,136 @@ pub async fn handle() -> Json<serde_json::Value> {
 
 ---
 
-### 14.16 AuthState 実装
+
+### Phase 4：JWT 認証・token コマンド
+
+**目標**：JWT HS256 認証と `adlaire-db token create` が動作する
+
+**スコープ：**
+- Authorization: Bearer ヘッダ抽出・6 ステップ検証フロー
+- tokens.json 読み込み・revoke リスト照合
+- `token create` サブコマンド（JWT 生成・stdout 出力）
+
+**完了条件（テストケース）：**
+
+```
+TC-3: JWT 認証ありモード
+  $ SECRET="test-secret"
+  $ TOKEN=$(./adlaire-db token create --secret "$SECRET")
+  $ ./adlaire-db serve --data ./testdb --port 8080 --auth-jwt-secret "$SECRET"
+  （a）有効なトークンで SQL 実行 → 200 OK
+  （b）Authorization ヘッダなし → 401 AUTH_REQUIRED
+  （c）不正なトークン → 401 AUTH_INVALID
+```
+
+**実装タスク：**
+
+```
+T-7: JWT 認証ミドルウェア
+  [ ] jsonwebtoken crate で HS256 検証
+  [ ] Authorization: Bearer <JWT> ヘッダ抽出
+  [ ] 6 ステップ検証フロー実装（§5.6）
+      ①ヘッダ有無, ②署名, ③exp, ④revoke リスト照合,
+      ⑤アクセスレベル, ⑥通過
+  [ ] --auth-jwt-secret 未設定時は認証をスキップ（WARN ログ）
+  [ ] 各エラーの HTTP ステータス・コード返却（§7.3）
+  参照: §5.1〜5.5, §7.3
+  検証: TC-3（JWT 認証）, ETC-1（認証エラー）, ETC-2（権限エラー）
+
+T-8: tokens.json 読み込み・revoke リスト
+  [ ] 起動時に meta/tokens.json をメモリに展開（§8.1 Step 5）
+  [ ] なければ空リストで初期化・書き出し
+  [ ] JWT 検証ステップ④での revoke 照合
+  [ ] Phase 1〜5 では tokens.json の更新は CLI のみ（管理 API は Phase 7）
+  参照: §5.6
+
+T-9: `token create` サブコマンド
+  [ ] --secret <VALUE>, --expiry <DURATION>, --access ro|rw フラグ
+  [ ] JWT を HS256 で署名して stdout に出力
+  [ ] tok_<random> 形式の token_id を生成（sub クレーム）
+  [ ] tokens.json に新規トークンを追記
+  参照: §4.1, §5.2, §5.5
+  検証: TC-3（TOKEN=$(./adlaire-db token create ...)）
+```
+
+---
+
+
+#### 実装詳細
+
+#### 14.3 axum 認証 Extractor
+
+```rust
+// auth/middleware.rs
+
+/// リクエストごとに JWT を検証し、Claims を抽出する axum Extractor
+pub struct Authenticated(pub Claims);
+// 利用側: Authenticated(claims): Authenticated
+
+impl<S> axum::extract::FromRequestParts<S> for Authenticated
+where
+    S: Send + Sync,
+    SharedState: axum::extract::FromRef<S>,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let state = SharedState::from_ref(state);
+
+        // 認証無効モード（jwt_secret 未設定）はスキップ
+        if state.auth.is_disabled() {
+            return Ok(Authenticated(Claims::unauthenticated()));
+        }
+
+        let header = parts.headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or(AppError::AuthRequired)?;
+
+        let token = header
+            .strip_prefix("Bearer ")
+            .ok_or(AppError::AuthInvalid)?;
+
+        let claims = state.auth.verify(token).await?;
+        Ok(Authenticated(claims))
+    }
+}
+
+/// 管理 API 専用 Extractor（Bearer 文字列完全一致）
+pub struct AdminAuth;
+
+impl<S> axum::extract::FromRequestParts<S> for AdminAuth
+where
+    S: Send + Sync,
+    SharedState: axum::extract::FromRef<S>,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let state = SharedState::from_ref(state);
+        let expected = match &state.config.admin_auth_token {
+            None    => return Ok(AdminAuth),  // 認証無効
+            Some(t) => t,
+        };
+        let header = parts.headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or(AppError::AuthRequired)?;
+        let token = header.strip_prefix("Bearer ").ok_or(AppError::AuthInvalid)?;
+        if token != expected { return Err(AppError::AuthInvalid); }
+        Ok(AdminAuth)
+    }
+}
+```
+
+
+#### 14.16 AuthState 実装
 
 ```rust
 // auth/state.rs
@@ -4406,53 +3008,8 @@ impl AuthState {
 
 ---
 
-### 14.17 db/meta.rs 実装
 
-```rust
-// db/meta.rs
-
-pub struct DatabasesMeta { pub databases: Vec<DbInfo> }
-pub struct TokensMeta    { pub tokens: Vec<TokenRecord> }
-
-pub fn load_databases(data_dir: &Path) -> anyhow::Result<DatabasesMeta> {
-    load_or_init(data_dir.join("meta").join("databases.json"))
-}
-
-pub fn load_tokens(data_dir: &Path) -> anyhow::Result<TokensMeta> {
-    load_or_init(data_dir.join("meta").join("tokens.json"))
-}
-
-fn load_or_init<T>(path: PathBuf) -> anyhow::Result<T>
-where
-    T: serde::de::DeserializeOwned + serde::Serialize + Default,
-{
-    if path.exists() {
-        let s = std::fs::read_to_string(&path)?;
-        Ok(serde_json::from_str(&s)?)
-    } else {
-        let val = T::default();
-        save_atomic(&path, &val)?;
-        Ok(val)
-    }
-}
-
-// tmp → fsync → rename によるアトミック保存（WAL マニフェストと同一パターン）
-pub fn save_atomic<T: serde::Serialize>(path: &Path, val: &T) -> anyhow::Result<()> {
-    let tmp = path.with_extension("tmp");
-    let mut f = std::fs::File::create(&tmp)?;
-    let json = serde_json::to_vec_pretty(val)?;
-    use std::io::Write;
-    f.write_all(&json)?;
-    f.sync_all()?;
-    drop(f);
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-```
-
----
-
-### 14.18 Expiry パース・トークン ID 生成
+#### 14.18 Expiry パース・トークン ID 生成
 
 ```rust
 // token/util.rs
@@ -4517,48 +3074,1546 @@ mod tests {
 
 ---
 
-### 14.19 SqldAdapter トレイト（db/sqld_adapter.rs）
 
-sqld の内部型への依存を 1 ファイルに集約し、アップストリーム変更の影響範囲を限定する。
+### Phase 5：ログ・統合テスト
+
+**目標**：構造化ログを整備し Phase 1〜5 全テストを完走させる
+
+**スコープ：**
+- tracing + JSON Lines 出力
+- HTTP リクエストログ
+- TC-4（TypeScript SDK）・TC-5（データ永続性）を含む全件完走
+
+**完了条件（テストケース）：**
+
+```
+TC-4: TypeScript SDK 互換性
+  const client = createClient({
+    url: "http://localhost:8080",
+    authToken: "<JWT>",          // 認証なしモードなら省略可
+  });
+  await client.execute("CREATE TABLE IF NOT EXISTS users (id INT, name TEXT)");
+  await client.execute("INSERT INTO users VALUES (1, 'Alice')");
+  const result = await client.execute("SELECT * FROM users");
+  期待: result.rows[0] = { id: 1, name: "Alice" }
+
+TC-5: データ永続性（I-4 検証）
+  （a）INSERT 後にサーバーを Ctrl+C で停止
+  （b）同じ --data で再起動
+  （c）SELECT で挿入したデータが返ること
+```
+
+**実装タスク：**
+
+```
+T-10: ログ実装
+  [ ] tracing crate + tracing-subscriber（JSON Lines 出力）
+  [ ] --log-level フラグ対応
+  [ ] HTTP リクエストごとの INFO ログ（method, path, status, duration_ms）
+  [ ] 起動・停止の INFO ログ
+  参照: §12
+
+T-11: 統合テスト・TC 完走確認
+  [ ] TC-1: curl で SQL 実行（CREATE / INSERT / SELECT）
+  [ ] TC-2: GET /v2/health → {"status":"ok"}
+  [ ] TC-3: JWT 認証（有効・ヘッダなし・不正トークン）
+  [ ] TC-4: TypeScript SDK (@libsql/client) による CRUD
+  [ ] TC-5: データ永続性（再起動後に SELECT）
+  [ ] TC-6: 起動・停止・.lock 解放
+```
+
+**タスク依存グラフ（Phase 1〜5）：**
+
+```
+T-1 → T-2 → T-3 → T-4 ─┐
+                          ├→ T-5 → T-6 → T-7 → T-8 → T-9 → T-10 → T-11
+                          └→ T-5（並行可）
+```
+
+T-4〜T-5 は並行実装可。T-6（hrana 変換）は T-4・T-5 の両方が揃った後。
+
+**対象外（Phase 6 以降）：**
+- マルチ DB・管理 API・WebSocket・レプリケーション
+
+---
+
+
+#### 実装詳細
+
+#### 14.11 テスト実装パターン
+
+**ユニットテスト例（JWT 検証・全ケース）：**
 
 ```rust
-// db/sqld_adapter.rs
+// auth/mod.rs — #[cfg(test)] mod tests
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
 
-/// sqld::Database を薄くラップして Adlaire 内部で使用する抽象トレイト。
-/// sqld の型変更が生じた場合はこのファイルのみを修正すれば済む。
-pub trait SqldAdapter: Send + Sync {
-    /// SQL ステートメントを実行し、行列を返す
-    fn execute(
-        &self,
-        stmt: &sqld::hrana::proto::Stmt,
-    ) -> impl std::future::Future<Output = Result<sqld::hrana::proto::StmtResult, crate::error::AppError>> + Send;
+    fn secret() -> Vec<u8> { "a".repeat(32).into_bytes() }
 
-    /// パイプラインリクエストを実行する
-    fn execute_pipeline(
-        &self,
-        pipeline: &sqld::hrana::proto::PipelineReqBody,
-    ) -> impl std::future::Future<Output = Result<sqld::hrana::proto::PipelineRespBody, crate::error::AppError>> + Send;
-}
-
-/// 本番実装: sqld::Database を保持する newtype
-pub struct RealSqldAdapter(pub Arc<sqld::Database>);
-
-impl SqldAdapter for RealSqldAdapter {
-    async fn execute(
-        &self,
-        stmt: &sqld::hrana::proto::Stmt,
-    ) -> Result<sqld::hrana::proto::StmtResult, crate::error::AppError> {
-        self.0.execute(stmt).await.map_err(crate::error::AppError::Sqld)
+    fn make_auth() -> AuthState {
+        AuthState::load_with(&secret(), vec![])
     }
 
-    async fn execute_pipeline(
-        &self,
-        pipeline: &sqld::hrana::proto::PipelineReqBody,
-    ) -> Result<sqld::hrana::proto::PipelineRespBody, crate::error::AppError> {
-        self.0.execute_pipeline(pipeline).await.map_err(crate::error::AppError::Sqld)
+    #[tokio::test]
+    async fn valid_rw_token_passes() {
+        let auth  = make_auth();
+        let token = auth.issue_test_token(AccessLevel::Rw);
+        let c = auth.verify(&token).await.unwrap();
+        assert_eq!(c.a, AccessLevel::Rw);
+    }
+
+    #[tokio::test]
+    async fn expired_token_is_rejected() {
+        let auth  = make_auth();
+        let token = auth.issue_test_token_exp(AccessLevel::Rw, Some(Utc::now() - Duration::seconds(1)));
+        assert!(matches!(auth.verify(&token).await, Err(AppError::AuthExpired)));
+    }
+
+    #[tokio::test]
+    async fn wrong_signature_is_rejected() {
+        let auth = make_auth();
+        assert!(matches!(auth.verify("eyJ.eyJ.badsig").await, Err(AppError::AuthInvalid)));
+    }
+
+    #[tokio::test]
+    async fn revoked_token_is_rejected() {
+        let auth  = make_auth();
+        let token = auth.issue_test_token(AccessLevel::Rw);
+        let sub   = auth.verify(&token).await.unwrap().sub;
+        auth.revoke_sync(&sub);
+        assert!(matches!(auth.verify(&token).await, Err(AppError::AuthInvalid)));
+    }
+
+    #[test]
+    fn db_scope_rw_overrides_global_ro() {
+        let claims = Claims {
+            sub: "tok_x".into(),
+            a:   AccessLevel::Ro,
+            dbs: Some([("db_a".into(), AccessLevel::Rw)].into()),
+            iss: None, iat: 0, exp: None,
+        };
+        assert_eq!(claims.resolve_access("db_a"), AccessLevel::Rw);
+        assert_eq!(claims.resolve_access("db_b"), AccessLevel::Ro);
     }
 }
 ```
 
-> **設計メモ**: `db/manager.rs` の `DbManager` は `Arc<dyn SqldAdapter>` を保持する。
-> テストでは `MockSqldAdapter` を差し込んで sqld バイナリなしで単体テストが可能になる。
+**統合テスト例（TC-1）：**
+
+```rust
+// tests/integration/phase1.rs
+//! cargo test --test integration
+
+mod helpers;
+use helpers::TestServer;
+
+#[tokio::test]
+async fn tc1_sql_execution() {
+    let srv = TestServer::spawn(Default::default()).await;
+
+    let resp = srv.pipeline(serde_json::json!({
+        "baton": null,
+        "requests": [
+            {"type":"execute","stmt":{"sql":"CREATE TABLE t(id INT, v TEXT)","args":[],"want_rows":false}},
+            {"type":"execute","stmt":{"sql":"INSERT INTO t VALUES(1,'hello')","args":[],"want_rows":false}},
+            {"type":"execute","stmt":{"sql":"SELECT * FROM t","args":[],"want_rows":true}},
+            {"type":"close"}
+        ]
+    })).await;
+
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let row = &body["results"][2]["response"]["result"]["rows"][0];
+    assert_eq!(row[0], serde_json::json!({"type":"integer","value":"1"}));
+    assert_eq!(row[1], serde_json::json!({"type":"text","value":"hello"}));
+}
+
+#[tokio::test]
+async fn tc2_health_check() {
+    let srv = TestServer::spawn(Default::default()).await;
+    let resp = srv.get("/v2/health").await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.json::<serde_json::Value>().await.unwrap(), serde_json::json!({"status":"ok"}));
+}
+
+#[tokio::test]
+async fn tc3_jwt_auth() {
+    let secret = "test-secret-32bytes-minimum-len!";
+    let srv = TestServer::spawn(TestConfig {
+        jwt_secret: Some(secret.to_string()),
+        ..Default::default()
+    }).await;
+
+    let valid_token = srv.create_token(secret, "rw", None);
+
+    // (a) 有効トークン → 200
+    assert_eq!(srv.pipeline_with_token(&valid_token, minimal_select()).await.status(), 200);
+
+    // (b) Authorization ヘッダなし → 401 AUTH_REQUIRED
+    let no_auth = srv.pipeline_no_auth(minimal_select()).await;
+    assert_eq!(no_auth.status(), 401);
+    assert_eq!(no_auth.json::<serde_json::Value>().await.unwrap()["code"], "AUTH_REQUIRED");
+
+    // (c) 不正トークン → 401 AUTH_INVALID
+    let bad = srv.pipeline_with_token("eyJ.eyJ.badsig", minimal_select()).await;
+    assert_eq!(bad.status(), 401);
+    assert_eq!(bad.json::<serde_json::Value>().await.unwrap()["code"], "AUTH_INVALID");
+}
+```
+
+---
+
+
+### Phase 6：マルチ DB ルーター・DB マネージャ
+
+**目標**：1インスタンスで複数 DB をルーティングできる
+
+- パスベース DB ルーティング（`/{db-name}/v2/pipeline`）
+- DB ごとのデータ分離
+
+**実装タスク：**
+
+```
+T2-1: パスベース DB ルーター
+  [ ] axum Router を /{db-name}/v2/pipeline にマッチするように拡張
+  [ ] パスセグメントから db-name を抽出し、DB 名バリデーションを適用
+  [ ] 存在しない db-name → 404 DB_NOT_FOUND
+  [ ] Phase 1〜5 の単一 DB ルート（/v2/pipeline）との共存（後方互換）
+  参照: §6.1, §3.4
+
+T2-2: マルチ DB マネージャ
+  [ ] 起動時に databases.json を読み込み、全 DB を sqld でオープン
+  [ ] DB 名 → sqld::Database のマップをメモリ上で管理（RwLock<HashMap>）
+  [ ] 新規 DB 作成時にマップへ追加・databases.json を更新
+  [ ] DB 削除時にマップから除去・ファイル削除・databases.json を更新
+  参照: §3.4, §8.1 Step 5〜6
+```
+
+---
+
+
+#### 実装詳細
+
+#### 14.7 DB 名バリデーション
+
+```rust
+// db/mod.rs
+use std::sync::LazyLock;
+use regex::Regex;
+
+static DB_NAME_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[a-zA-Z0-9_-]{1,127}$").unwrap()
+});
+
+const RESERVED_NAMES: &[&str]  = &["meta", "admin"];
+const BRANCH_SEP:     &str     = "___";
+
+pub fn validate_db_name(name: &str) -> Result<(), AppError> {
+    if !DB_NAME_RE.is_match(name) {
+        return Err(AppError::InvalidDbName);
+    }
+    if RESERVED_NAMES.contains(&name) {
+        return Err(AppError::InvalidDbName);
+    }
+    if name.contains(BRANCH_SEP) {
+        return Err(AppError::DbReservedName);
+    }
+    Ok(())
+}
+
+/// ブランチ DB の内部名を生成する
+pub fn branch_db_name(source: &str, branch: &str) -> String {
+    format!("{}{}{}", source, BRANCH_SEP, branch)
+}
+```
+
+
+#### 14.17 db/meta.rs 実装
+
+```rust
+// db/meta.rs
+
+pub struct DatabasesMeta { pub databases: Vec<DbInfo> }
+pub struct TokensMeta    { pub tokens: Vec<TokenRecord> }
+
+pub fn load_databases(data_dir: &Path) -> anyhow::Result<DatabasesMeta> {
+    load_or_init(data_dir.join("meta").join("databases.json"))
+}
+
+pub fn load_tokens(data_dir: &Path) -> anyhow::Result<TokensMeta> {
+    load_or_init(data_dir.join("meta").join("tokens.json"))
+}
+
+fn load_or_init<T>(path: PathBuf) -> anyhow::Result<T>
+where
+    T: serde::de::DeserializeOwned + serde::Serialize + Default,
+{
+    if path.exists() {
+        let s = std::fs::read_to_string(&path)?;
+        Ok(serde_json::from_str(&s)?)
+    } else {
+        let val = T::default();
+        save_atomic(&path, &val)?;
+        Ok(val)
+    }
+}
+
+// tmp → fsync → rename によるアトミック保存（WAL マニフェストと同一パターン）
+pub fn save_atomic<T: serde::Serialize>(path: &Path, val: &T) -> anyhow::Result<()> {
+    let tmp = path.with_extension("tmp");
+    let mut f = std::fs::File::create(&tmp)?;
+    let json = serde_json::to_vec_pretty(val)?;
+    use std::io::Write;
+    f.write_all(&json)?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+```
+
+---
+
+
+### Phase 7：管理 API・トークン CRUD・DB スコープ JWT
+
+**目標**：管理 API と DB スコープアクセス制御を実装する
+
+- 管理 API（DB CRUD・トークン CRUD）
+- DB 単位のアクセス制御（JWT クレーム拡張）
+
+**完了条件（テストケース）：**
+
+```
+TC-2-1: マルチ DB SQL 実行
+  （a）POST /admin/v1/databases {"name":"db_a"} → 201
+  （b）POST /admin/v1/databases {"name":"db_b"} → 201
+  （c）POST /db_a/v2/pipeline で db_a に CREATE TABLE t(v TEXT); INSERT
+  （d）POST /db_b/v2/pipeline で db_b に CREATE TABLE t(v TEXT); 別データ INSERT
+  （e）db_a の SELECT → db_a のデータのみ返る
+  （f）db_b の SELECT → db_b のデータのみ返る（db_a のデータは見えない）
+
+TC-2-2: 管理 API — DB CRUD
+  （a）GET /admin/v1/databases → [] （初期は空リスト）
+  （b）POST /admin/v1/databases {"name":"testdb"} → 201, {id,name,created_at}
+  （c）GET /admin/v1/databases → [testdb] がリストに含まれる
+  （d）GET /admin/v1/databases/testdb → 200, DB の詳細情報
+  （e）DELETE /admin/v1/databases/testdb → 204
+  （f）GET /admin/v1/databases/testdb → 404
+  （g）POST /testdb/v2/pipeline（削除後） → 404 DB_NOT_FOUND
+
+TC-2-3: DB 名バリデーション
+  （a）POST /admin/v1/databases {"name":""} → 400 INVALID_DB_NAME
+  （b）POST /admin/v1/databases {"name":"a b"} → 400 INVALID_DB_NAME（スペース不可）
+  （c）POST /admin/v1/databases {"name":"../evil"} → 400 INVALID_DB_NAME（パストラバーサル不可）
+  （d）POST /admin/v1/databases {"name":"validname"} → 201（英数字・ハイフン・アンダースコアは有効）
+  （e）同名 DB を再作成 → 409 DB_ALREADY_EXISTS
+
+TC-2-4: トークン CRUD
+  （a）POST /admin/v1/tokens {"access":"rw","expiry":"30d"} → 201, {id,token,access,expires_at}
+  （b）GET /admin/v1/tokens → 発行済みトークン一覧（secret は含まない）
+  （c）GET /admin/v1/tokens/{id} → トークン詳細（revoked フラグ含む）
+  （d）DELETE /admin/v1/tokens/{id} → 204（revoke 実行）
+  （e）GET /admin/v1/tokens/{id} → revoked:true になっている
+
+TC-2-5: トークン失効の即時反映
+  （a）有効トークン T で POST /v2/pipeline → 200
+  （b）DELETE /admin/v1/tokens/{T.id} で T を失効
+  （c）同じトークン T で POST /v2/pipeline → 401 AUTH_INVALID（失効反映が即時であること）
+  （d）新規トークン T2 で POST /v2/pipeline → 200（他のトークンは影響なし）
+
+TC-2-5b: DB スコープトークン
+  （a）POST /admin/v1/tokens {"access":"ro","dbs":{"db_a":"rw"}} → 201
+  （b）発行トークンで POST /db_a/v2/pipeline INSERT → 200（db_a は rw 許可）
+  （c）発行トークンで POST /db_b/v2/pipeline INSERT → 403 PERMISSION_DENIED
+       （db_b は dbs に含まれないため a="ro" が適用）
+  （d）発行トークンで POST /db_b/v2/pipeline SELECT → 200（読み取りは ro で許可）
+  （e）GET /admin/v1/tokens/{id} → dbs フィールドに {"db_a":"rw"} が含まれる
+
+TC-2-6: データディレクトリ永続化（マルチ DB）
+  （a）db_a / db_b を作成し各テーブルにデータ投入
+  （b）サーバーを停止・再起動（同じ --data ディレクトリ）
+  （c）db_a・db_b 両方のデータが復元されること
+  （d）{data-dir}/databases/ 以下に db_a/ db_b/ ディレクトリが存在すること
+  （e）{data-dir}/meta/databases.json に両 DB が記録されていること
+```
+
+**実装タスク：**
+
+```
+T2-3: 管理 API — DB CRUD
+  [ ] GET /admin/v1/databases → databases.json の一覧を返す
+  [ ] POST /admin/v1/databases — DB 名バリデーション・ディレクトリ作成・sqld オープン
+  [ ] GET /admin/v1/databases/{name} → 個別情報（name・created_at・size_bytes）
+  [ ] DELETE /admin/v1/databases/{name} — sqld クローズ・ディレクトリ削除
+  [ ] size_bytes は data.db のファイルサイズを返す
+  参照: §6.4（DB 管理）
+
+T2-4: 管理 API — トークン CRUD
+  [ ] POST /admin/v1/tokens — JWT 生成・tokens.json への追記・201 返却
+  [ ] GET /admin/v1/tokens / GET /admin/v1/tokens/{id} — tokens.json から読み込み
+  [ ] DELETE /admin/v1/tokens/{id} — tokens.json の revoked を true に更新（冪等）
+  [ ] expiry パース（30d / 24h / 3600s 等）→ JWT exp クレームへの変換
+  参照: §6.4（トークン管理）, §5.5, §5.6
+
+T2-5: DB スコープ JWT（dbs クレーム）
+  [ ] Phase 4 の JWT 検証を拡張（7 ステップフロー §5.4）
+  [ ] dbs クレームが存在する場合、対象 DB 名でアクセス権を解決
+  [ ] POST /admin/v1/tokens に dbs フィールドを追加
+  [ ] tokens.json の dbs フィールドを保存
+  参照: §5.4
+
+T2-6: 統合テスト TC-2-1〜TC-2-6（TC-2-5b 含む）
+  [ ] 各テストケースを実行し全て PASS することを確認
+  [ ] Phase 1〜6 の TC がリグレッションしないことを確認
+```
+
+---
+
+
+### Phase 8：WebSocket（hrana-ws v3）
+
+**目標**：Turso のインタラクティブトランザクション（hrana-ws v3）が動作する
+
+#### hrana-ws v3 プロトコル概要
+
+hrana-ws は libSQL / Turso の WebSocket ワイヤプロトコル。HTTP の hrana-http v2 と異なり、ステートフルな接続上でインタラクティブトランザクションを実現する。
+
+参照仕様: [libSQL/sqld/docs/HRANA_3_SPEC.md](https://github.com/tursodatabase/libsql/blob/main/libsql-server/docs/HRANA_3_SPEC.md)
+
+#### エンドポイント
+
+```
+ws://host:8080/v3/baton      ← hrana-ws v3
+wss://host:8080/v3/baton     ← TLS 経由（リバースプロキシ）
+```
+
+#### 接続フロー
+
+```
+Client                          Server
+  |                               |
+  |── WebSocket Upgrade ─────────>|
+  |<─ 101 Switching Protocols ───|
+  |                               |
+  |── ClientMsg: hello ──────────>|  jwt: "<JWT>"
+  |<─ ServerMsg: hello ──────────|  OK or error
+  |                               |
+  |── ClientMsg: request ────────>|  request_id, stream_id, body
+  |<─ ServerMsg: response_ok ────|  request_id, result
+  |    or response_error          |
+  |                               |
+  |── ClientMsg: close_stream ──>|
+  |── WebSocket Close ───────────>|
+```
+
+#### メッセージ型
+
+**ClientMsg（クライアント→サーバー）：**
+
+| type | 説明 |
+|------|------|
+| `hello` | 接続開始。`jwt` フィールドで認証 |
+| `request` | stream_id と body を持つリクエスト |
+| `close_stream` | ストリームのクローズ |
+
+**request body の種類：**
+
+| type | 説明 |
+|------|------|
+| `open_stream` | 新規ストリームを開く |
+| `close_stream` | ストリームを閉じる |
+| `execute` | 単一 SQL 文を実行（hrana-http の execute と同形式）|
+| `batch` | 複数 SQL 文をバッチ実行 |
+| `sequence` | テキスト形式の複数 SQL 文を順序実行 |
+| `describe` | SQL 文のパラメータ・カラム情報を返す |
+| `store_sql` / `close_sql` | SQL テキストを ID でキャッシュ（再利用） |
+
+**ServerMsg（サーバー→クライアント）：**
+
+| type | 説明 |
+|------|------|
+| `hello_ok` | 認証成功 |
+| `hello_error` | 認証失敗 |
+| `response_ok` | リクエスト成功。request_id + result |
+| `response_error` | リクエスト失敗。request_id + error |
+
+#### インタラクティブトランザクション
+
+ストリーム上でトランザクション状態を保持する。
+
+```
+open_stream(stream_id=1)
+execute(stream_id=1, sql="BEGIN")
+execute(stream_id=1, sql="INSERT INTO t VALUES (1)")
+execute(stream_id=1, sql="INSERT INTO t VALUES (2)")
+execute(stream_id=1, sql="COMMIT")
+close_stream(stream_id=1)
+```
+
+複数の stream を同一 WebSocket 接続上で多重化できる（stream_id で識別）。
+
+#### sqld との統合（Phase 8）
+
+Phase 1〜7 と同様、sqld の WebSocket サーバーループは起動しない。**Adlaire 独自の hrana-ws プロトコル変換レイヤーを実装する**（§3.3.3 の hrana-http 変換層と同じ設計方針）。
+
+採用理由：
+
+- sqld の WebSocket ハンドラはセッション管理・認証と密結合しており、ライブラリとして分離が困難
+- Phase 1〜7 で構築した hrana-http 変換レイヤー（§3.3.3）の延長として実装でき、アーキテクチャの一貫性を保てる
+- WebSocket コネクションのライフサイクル（hello / stream_id / baton 管理）を Adlaire が完全制御できる
+
+WebSocket フレームの受受信・送信には `tokio-tungstenite` クレートを使用する。クエリ実行は Phase 1〜7 と同じ `sqld::Connection::execute_batch()` を経由する（§3.3.2）。
+
+**完了条件（テストケース）：**
+
+```
+TC-3-1: インタラクティブトランザクション
+  TypeScript SDK:
+  const tx = await db.transaction("write");
+  await tx.execute("INSERT INTO t VALUES (1)");
+  await tx.execute("INSERT INTO t VALUES (2)");
+  await tx.commit();
+  const r = await db.execute("SELECT COUNT(*) FROM t");
+  期待: r.rows[0][0] = 2
+
+TC-3-2: トランザクションロールバック
+  const tx = await db.transaction("write");
+  await tx.execute("INSERT INTO t VALUES (99)");
+  await tx.rollback();
+  const r = await db.execute("SELECT * FROM t WHERE id = 99");
+  期待: r.rows.length = 0
+
+TC-3-3: 複数ストリームの多重化
+  stream_id=1 で BEGIN → INSERT (sleep)
+  stream_id=2 で SELECT（別トランザクション）→ 正常応答
+  stream_id=1 で COMMIT
+  期待: 2 ストリームが干渉しない
+
+TC-3-4: JWT 認証（WebSocket）
+  hello メッセージに有効 JWT → hello_ok
+  hello メッセージに不正 JWT → hello_error
+```
+
+---
+
+
+#### 実装詳細
+
+#### 14.9 WebSocket セッション管理（Phase 8）
+
+```rust
+// ws/session.rs
+use std::collections::HashMap;
+
+pub struct WsSession {
+    db:      std::sync::Arc<sqld::Database>,
+    streams: HashMap<u32, WsStream>,  // stream_id → WsStream
+    auth:    Claims,
+}
+
+pub struct WsStream {
+    conn:    sqld::Connection,
+    tx_mode: TransactionMode,
+}
+
+#[derive(PartialEq)]
+pub enum TransactionMode { None, ReadOnly, ReadWrite }
+
+impl WsSession {
+    pub fn new(db: std::sync::Arc<sqld::Database>, auth: Claims) -> Self {
+        Self { db, streams: HashMap::new(), auth }
+    }
+
+    pub async fn handle_request(
+        &mut self,
+        stream_id: u32,
+        body: RequestBody,
+    ) -> Result<ResponseBody, AppError> {
+        match body {
+            RequestBody::OpenStream => {
+                let conn = self.db.connect()?;
+                self.streams.insert(stream_id, WsStream {
+                    conn,
+                    tx_mode: TransactionMode::None,
+                });
+                Ok(ResponseBody::OpenStream)
+            }
+            RequestBody::Execute { stmt } => {
+                let stream = self.streams.get_mut(&stream_id)
+                    .ok_or(AppError::InvalidRequest)?;
+                let result = stream.conn.execute(&stmt.sql, &stmt.args)?;
+                Ok(ResponseBody::Execute { result: to_stmt_result(result) })
+            }
+            RequestBody::CloseStream => {
+                self.streams.remove(&stream_id);
+                Ok(ResponseBody::CloseStream)
+            }
+        }
+    }
+}
+```
+
+
+### Phase 9：ATTACH DB・メトリクス
+
+**目標**：クロス DB クエリとインメモリメトリクス API を実装する
+
+#### ATTACH DATABASE（クロス DB クエリ）
+
+Turso Cloud と同様に、Adlaire が管理する DB 間に限り `ATTACH DATABASE` を許可する。
+
+**セキュリティモデル：**
+- クライアントが `ATTACH DATABASE 'other-db' AS alias` を送信した場合、Adlaire は `'other-db'` を DB 名として解釈し、`databases/other-db/data.db` のパスを解決する
+- 任意のファイルパス（`/etc/passwd` 等）は DB 名バリデーション（`^[a-zA-Z0-9_-]{1,127}$`）で事前に拒否する
+- 存在しない DB 名の場合は `404 DB_NOT_FOUND` を返す
+
+**実装方針：**
+- hrana-http v2 の `execute` リクエストで ATTACH SQL を受け取った際、Adlaire 側でインターセプトして DB 名を解決する
+- sqld の Connection に対してパス解決済みの ATTACH を発行する
+- 対象 DB の接続が未オープンの場合はその場でオープンする
+
+**追加テストケース：**
+
+```
+TC-3-5: ATTACH DATABASE（クロス DB クエリ）
+  （a）db_a・db_b を作成し、それぞれにテーブルとデータを投入
+  （b）db_a への pipeline で:
+      ATTACH DATABASE 'db_b' AS b;
+      SELECT * FROM b.t;
+      期待: db_b のデータが返る
+  （c）ATTACH DATABASE '/etc/passwd' AS evil
+      → 400 INVALID_DB_NAME（バリデーション拒否）
+  （d）ATTACH DATABASE 'nonexistent' AS x
+      → 404 DB_NOT_FOUND
+```
+
+#### メトリクス API
+
+```
+GET /admin/v1/metrics
+```
+
+認証: 管理トークン必須（§6.4 管理 API 認証と同じ）
+
+**レスポンス（200 OK）：**
+
+```json
+{
+  "uptime_seconds": 3600,
+  "databases": [
+    {
+      "name": "mydb",
+      "size_bytes": 4096,
+      "wal_size_bytes": 1024,
+      "connections_active": 2,
+      "queries_total": 1500,
+      "rows_read_total": 8000,
+      "rows_written_total": 200
+    }
+  ],
+  "tokens_total": 5,
+  "tokens_revoked": 1
+}
+```
+
+カウンター（`queries_total` 等）はプロセス起動からの累積値。再起動でリセットされる（Phase 9 時点では永続化しない）。
+
+**追加テストケース：**
+
+```
+TC-3-6: メトリクス API
+  （a）GET /admin/v1/metrics（管理トークンあり）→ 200、databases 配列に管理下 DB が含まれる
+  （b）クエリ実行後に queries_total が増加していること
+  （c）GET /admin/v1/metrics（管理トークンなし）→ 401
+```
+
+**Phase 8 実装タスク：**
+
+```
+T3-1: WebSocket サーバー追加（axum の WebSocket upgrade）
+T3-2: hrana-ws v3 hello ハンドシェイク + JWT 認証
+T3-3: ストリーム多重化レイヤー実装（stream_id ごとの接続状態管理）
+T3-4: execute / batch / sequence / describe リクエスト処理（sqld 境界再利用）
+T3-5: インタラクティブトランザクション状態管理（BEGIN/COMMIT/ROLLBACK）
+```
+
+**Phase 9 実装タスク：**
+
+```
+T3-6: ATTACH DATABASE インターセプト・DB 名バリデーション・パス解決
+T3-7: メトリクス収集（インメモリカウンター）+ GET /admin/v1/metrics
+T3-8: 統合テスト TC-3-1〜TC-3-6
+```
+
+---
+
+
+### Phase 10：レプリケーション基盤（WAL ストリーム・スナップショット）
+
+**目標**：プライマリ・レプリカ構成での運用
+
+#### アーキテクチャ
+
+```
+クライアント
+  │
+  ├─ 書き込み → プライマリ（:8080）─ WAL 同期 ─→ レプリカ 1（:8080）
+  │                                             └→ レプリカ 2（:8080）
+  └─ 読み取り → レプリカ（ロードバランサー経由）
+```
+
+- プライマリとレプリカは同じバイナリ。起動フラグでロールを決定する
+- レプリカはプライマリの WAL フレームを HTTP ストリームで受信して自身の DB に適用する
+- レプリカへの書き込みは `307 Temporary Redirect` でプライマリへ転送する
+
+#### 起動フラグ（Phase 10 追加）
+
+```
+# プライマリとして起動
+adlaire-db serve --data ./data --role primary --primary-port 8082
+
+# レプリカとして起動
+adlaire-db serve --data ./data --role replica --primary-url http://primary:8082
+```
+
+| フラグ | 説明 |
+|--------|------|
+| `--role` | `standalone`（デフォルト）/ `primary` / `replica` |
+| `--primary-port` | プライマリが WAL ストリームを公開するポート（デフォルト: 8082）|
+| `--primary-url` | レプリカが接続するプライマリの URL |
+| `--replication-auth-token` | プライマリ・レプリカ間の認証トークン |
+
+#### レプリケーション API
+
+プライマリが `--primary-port`（デフォルト 8082）で公開する内部エンドポイント。クライアント SDK は直接使わない。すべてのリクエストに `Authorization: Bearer <replication-auth-token>` が必要。
+
+**GET /replication/v1/log?from_frame=\<N\>**
+
+WAL フレームを Server-Sent Events でストリーム配信する。
+
+```
+HTTP/1.1 200 OK
+Content-Type: text/event-stream
+Cache-Control: no-cache
+
+data: {"frame_no":0,"db":"mydb","data":"<base64 WAL frame>","checksum":3294921183}
+
+data: {"frame_no":1,"db":"mydb","data":"<base64 WAL frame>","checksum":1928374652}
+```
+
+- `frame_no`: WAL フレームの通し番号（0 始まり）
+- `db`: 対象 DB 名（Phase 10 はマルチ DB 対応）
+- `data`: WAL フレームのバイナリを Base64 エンコードしたもの
+- `checksum`: フレームの CRC32 チェックサム
+
+フレームが追いついた場合は接続を保持し、新しいフレームが来次第送信する（long-poll SSE）。
+
+**GET /replication/v1/snapshot**
+
+レプリカの初回参加時に全スナップショットを取得する。
+
+```
+HTTP/1.1 200 OK
+Content-Type: application/octet-stream
+X-Replication-Frame-No: 42
+X-Replication-Db: mydb
+
+<SQLite ページダンプ バイナリ>
+```
+
+`X-Replication-Frame-No` が示す frame_no 以降の差分を `/log?from_frame=43` で取得することで同期を完成させる。
+
+**POST /replication/v1/heartbeat**
+
+レプリカの生存確認と進捗報告。
+
+```json
+// リクエスト
+{"replica_id": "replica-1", "synced_frame": 42}
+
+// レスポンス 200 OK
+{"primary_frame": 42, "lag_frames": 0}
+```
+
+プライマリは `synced_frame` 以前の WAL フレームを将来的に GC できる（Phase 10 では GC は未実装・受付のみ）。
+
+**GET /replication/v1/status**
+
+プライマリの現在状態。
+
+```json
+// 200 OK
+{
+  "role": "primary",
+  "current_frame": 42,
+  "replicas": [
+    {"id": "replica-1", "synced_frame": 42, "lag_frames": 0, "last_seen": "2026-09-10T12:00:00Z"},
+    {"id": "replica-2", "synced_frame": 39, "lag_frames": 3, "last_seen": "2026-09-10T11:59:55Z"}
+  ]
+}
+```
+
+#### ヘルスチェック拡張
+
+Phase 11 から `GET /v2/health` のレスポンスにロール情報を追加する：
+
+```json
+{
+  "status": "ok",
+  "role": "primary",
+  "replication_lag_frames": 0
+}
+```
+
+レプリカの場合：
+
+```json
+{
+  "status": "ok",
+  "role": "replica",
+  "primary_url": "http://primary:8080",
+  "replication_lag_frames": 3
+}
+```
+
+#### 書き込みリダイレクト
+
+レプリカが書き込みリクエストを受信した場合：
+
+```
+HTTP/1.1 307 Temporary Redirect
+Location: http://primary:8080/{db-name}/v2/pipeline
+```
+
+クライアント（libSQL SDK）は自動的にプライマリへ再送する。
+
+---
+
+
+#### 実装詳細
+
+#### 14.10 WAL レプリケーション（Phase 10）
+
+**プライマリ側 WAL フレーム管理：**
+
+```rust
+// replication/primary.rs
+use tokio::sync::broadcast;
+
+pub struct ReplicationState {
+    /// 書き込みコミット時にフレームを broadcast する
+    pub frame_tx:      broadcast::Sender<WalFrame>,
+    pub current_frame: std::sync::atomic::AtomicU64,
+    pub replicas:      dashmap::DashMap<String, ReplicaStatus>,
+}
+
+#[derive(Clone, Debug)]
+pub struct WalFrame {
+    pub frame_no: u64,
+    pub db_name:  String,
+    pub data:     bytes::Bytes,
+    pub checksum: u32,  // CRC32
+}
+
+#[derive(Debug)]
+pub struct ReplicaStatus {
+    pub synced_frame: u64,
+    pub last_seen:    chrono::DateTime<chrono::Utc>,
+}
+```
+
+**レプリカ側フレーム受信・適用ループ：**
+
+```rust
+// replication/replica.rs
+pub async fn run_replica_loop(
+    primary_url:  url::Url,
+    db_mgr:       std::sync::Arc<DbManager>,
+    auth_token:   String,
+) {
+    let mut from_frame = db_mgr.current_max_frame().await;
+
+    loop {
+        match fetch_frames(&primary_url, from_frame, &auth_token).await {
+            Ok(frames) if frames.is_empty() => {
+                // フレームなし: バックオフして再試行
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            Ok(frames) => {
+                for frame in frames {
+                    // CRC32 検証
+                    let actual = crc32fast::hash(&frame.data);
+                    if actual != frame.checksum {
+                        tracing::error!(frame_no = frame.frame_no, "checksum mismatch, skipping");
+                        continue;
+                    }
+                    if let Err(e) = db_mgr.apply_wal_frame(&frame.db_name, &frame.data).await {
+                        tracing::error!(error = %e, "failed to apply WAL frame");
+                    }
+                    from_frame = frame.frame_no + 1;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "replica fetch error, retrying in 1s");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+```
+
+
+### Phase 11：レプリカ同期・書き込みリダイレクト
+
+**目標**：レプリカが WAL フレームを受信・適用し書き込みをプライマリへ転送する
+
+#### 完了条件（テストケース）
+
+```
+TC-4-1: WAL 同期（基本）
+  （a）プライマリで INSERT 実行
+  （b）レプリカで SELECT → プライマリのデータが反映されている
+  （c）GET /v2/health（レプリカ）→ replication_lag_frames = 0 または小さい値
+
+TC-4-2: 書き込みリダイレクト
+  （a）レプリカのエンドポイントに直接 POST /v2/pipeline（INSERT）を送信
+  （b）307 Redirect でプライマリへ転送される
+  （c）プライマリで SELECT → データが存在する
+
+TC-4-3: レプリカ障害・復帰
+  （a）レプリカを停止
+  （b）プライマリで INSERT を複数回実行
+  （c）レプリカを再起動（同じ --primary-url で）
+  （d）レプリカが差分 WAL フレームを取得して追いつく
+  （e）SELECT → 最新データが返る
+
+TC-4-4: プライマリ停止時のレプリカ挙動
+  （a）プライマリを停止
+  （b）レプリカへの SELECT → 200（既存データは返せる）
+  （c）レプリカへの INSERT → 503 または 307（プライマリ到達不能）
+  （d）GET /v2/health（レプリカ）→ status:"degraded" 等の警告
+
+TC-4-5: マルチレプリカ同期
+  プライマリ 1 台 + レプリカ 2 台の構成で TC-4-1 を実施
+  両レプリカで同じデータが返ること
+```
+
+**Phase 10 実装タスク：**
+
+```
+T4-1: --role フラグ対応（standalone / primary / replica の起動分岐）
+T4-2: WAL フレームストリーム API（GET /replication/v1/log SSE）
+T4-3: スナップショット API（GET /replication/v1/snapshot）
+```
+
+**Phase 11 実装タスク：**
+
+```
+T4-4: レプリカ側 WAL フレーム受信・適用ループ
+T4-5: 書き込みリダイレクト（307 → primary-url）
+T4-6: GET /v2/health にロール・ lag 情報を追加
+T4-7: 統合テスト TC-4-1〜TC-4-5
+```
+
+---
+
+
+### Phase 12：WAL アーカイブ・manifest 管理
+
+**目標**：WAL フレームのアーカイブと manifest.json による管理を実装する
+
+**スコープ：**
+- WAL アーカイブ書き込み（チェックポイント前フック）
+- manifest.json による WAL フレーム管理
+- `wal_retention_days` 設定によるアーカイブ保持期間の管理
+
+**完了条件（テストケース）：**
+
+```
+TC-5-8: 保持期間超過フレームのクリーンアップ
+  設定: wal_retention_days = 1
+  （a）2 日前のタイムスタンプを持つフレームを作成
+  （b）クリーンアップ実行（または 24h 経過後）
+  （c）該当フレームが削除され、manifest.json から除去されている
+```
+
+**Phase 12 実装タスク：**
+
+```
+T5-1: WAL フレームアーカイブ書き込み
+  [ ] sqld チェックポイント前フックで WAL フレームを wal-archive/ へコピー
+  [ ] フレームごとに CRC32 チェックサムを計算・付与
+  [ ] manifest.json へフレームメタデータを追記
+  参照: §3.2, §3.6.3, §6.4（PITR）
+
+T5-2: スナップショット保存
+  [ ] チェックポイント完了後に data.db を snapshot-{frame_no}.db へコピー
+  [ ] スナップショットは最新 1 件のみ保持（古い snapshot ファイルを削除）
+  [ ] manifest.json の base_frame / snapshot フィールドを更新
+  参照: §3.6.3
+
+T5-3: manifest.json 管理
+  [ ] manifest.json の読み込み・書き込みロジック（アトミック更新）
+  [ ] 整合性確認: frames[] と実ファイルの突合
+  [ ] manifest.json 破損時の起動エラー処理
+  参照: §3.2, §3.6.3, §3.6.6
+
+T5-4: クリーンアップスレッド
+  [ ] wal_retention_days 設定を config.toml から読み込み
+  [ ] 24h ごとに manifest.json をスキャンし期限超過フレームを削除
+  [ ] 削除後に manifest.json を更新
+  参照: §4.2, §3.6.6
+  検証: TC-5-8
+```
+
+---
+
+
+#### 実装詳細
+
+#### 14.8 WAL アーカイブ処理（Phase 12〜13）
+
+チェックポイント前フックで WAL フレームを `wal-archive/` へコピーし、`manifest.json` をアトミックに更新する。
+
+```rust
+// wal/archive.rs
+use crc32fast::Hasher as Crc32Hasher;
+use tokio::io::AsyncWriteExt;
+
+pub async fn archive_frames(
+    db_name:    &str,
+    data_dir:   &std::path::Path,
+    new_frames: &[WalFrame],
+) -> anyhow::Result<()> {
+    let archive_dir   = data_dir.join("databases").join(db_name).join("wal-archive");
+    let manifest_path = archive_dir.join("manifest.json");
+
+    tokio::fs::create_dir_all(&archive_dir).await?;
+    let mut manifest = Manifest::load(&manifest_path).unwrap_or_default();
+
+    for frame in new_frames {
+        // CRC32 計算
+        let mut h = Crc32Hasher::new();
+        h.update(&frame.data);
+        let checksum = h.finalize();
+
+        let filename  = format!("frame-{:012}.bin", frame.frame_no);
+        let frame_path = archive_dir.join(&filename);
+
+        // 書き込み + fsync（I-4 保証）
+        let mut f = tokio::fs::File::create(&frame_path).await?;
+        f.write_all(&frame.data).await?;
+        f.sync_all().await?;
+
+        manifest.frames.push(FrameMeta {
+            frame_no:   frame.frame_no,
+            file:       filename,
+            size:       frame.data.len() as u64,
+            checksum,
+            created_at: chrono::Utc::now(),
+        });
+    }
+
+    // manifest をアトミック更新（tmp → fsync → rename）
+    manifest.save_atomic(&manifest_path)?;
+    Ok(())
+}
+
+/// manifest.json のアトミック保存
+impl Manifest {
+    pub fn save_atomic(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let tmp = path.with_extension("json.tmp");
+        let json = serde_json::to_vec_pretty(self)?;
+        std::fs::write(&tmp, &json)?;
+        // fsync → rename（POSIX アトミック）
+        let f = std::fs::File::open(&tmp)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+}
+```
+
+
+### Phase 13：バックアップ・リストア・PITR API
+
+**目標**：WAL アーカイブからのオンラインバックアップと任意時点リストア（PITR）が動作する
+
+**スコープ：**
+- バックアップ API：`GET /admin/v1/databases/{name}/backup`
+- リストア API：`POST /admin/v1/databases/{name}/restore`
+- PITR API：`POST /admin/v1/databases/{name}/restore/point-in-time`
+
+**完了条件（テストケース）：**
+
+```
+TC-5-1: バックアップと同時書き込み
+  （a）GET /admin/v1/databases/{name}/backup を開始（大きな DB でストリーミング）
+  （b）バックアップ中に POST /{name}/v2/pipeline で INSERT を実行
+  （c）バックアップは整合性を保って完了し、書き込みリクエストも 200 で成功
+
+TC-5-2: バックアップからリストア
+  （a）GET /admin/v1/databases/{name}/backup でバックアップファイルを取得
+  （b）POST /admin/v1/databases/{name}/restore でリストア
+  （c）リストア後 SELECT → 元のデータが参照できる
+
+TC-5-3: 不正ファイルでリストア
+  （a）POST /admin/v1/databases/{name}/restore（不正な SQLite ファイルをアップロード）
+  期待: 409 RESTORE_INTEGRITY_FAILED
+
+TC-5-4: PITR 無効時の試行
+  設定: wal_retention_days = 0（または未設定）
+  （a）POST /admin/v1/databases/{name}/restore/point-in-time
+  期待: 503 PITR_NOT_ENABLED
+
+TC-5-5: タイムスタンプ指定 PITR
+  （a）t=T1 に INSERT A、t=T2 に INSERT B
+  （b）POST .../restore/point-in-time {"timestamp": "T1+1s"}
+  （c）SELECT → A が存在し B が存在しない
+
+TC-5-6: アーカイブ範囲外タイムスタンプ
+  （a）POST .../restore/point-in-time（アーカイブに存在しない timestamp）
+  期待: 404 FRAME_NOT_FOUND
+
+TC-5-7: CRC32 不一致フレームで PITR
+  （a）フレームファイルを手動で破壊
+  （b）POST .../restore/point-in-time
+  期待: 409 RESTORE_FRAME_CORRUPT、元 DB が復元されている
+```
+
+**対象外（Phase 14 以降）：**
+- ブランチ機能（Phase 14）
+- 外部ストレージへのアーカイブ転送
+
+**Phase 13 実装タスク：**
+
+```
+T5-5: バックアップ API
+  [ ] GET /admin/v1/databases/{name}/backup → sqlite3_backup_* API でオンラインバックアップ
+  [ ] バックアップ中の書き込みをブロックしない（Online Backup API の並行性保証）
+  [ ] レスポンス: SQLite ファイルをストリーミング送信（Content-Type: application/octet-stream）
+  参照: §6.4（バックアップ / PITR / ブランチ）
+  検証: TC-5-1, TC-5-2
+
+T5-6: リストア API
+  [ ] POST /admin/v1/databases/{name}/restore → アップロードされた SQLite ファイルを適用
+  [ ] PRAGMA integrity_check でファイル整合性検証
+  [ ] 検証失敗時: 元 DB を復元し 409 RESTORE_INTEGRITY_FAILED を返す
+  [ ] 成功時: sqld をリロードしてサービス再開
+  参照: §6.4, §7.3
+  検証: TC-5-2, TC-5-3
+
+T5-7: PITR API
+  [ ] POST /admin/v1/databases/{name}/restore/point-in-time（timestamp / frame_no 指定）
+  [ ] wal_retention_days = 0 の場合は即座に 503 PITR_NOT_ENABLED
+  [ ] manifest.json から対象フレームを特定
+  [ ] スナップショット + WAL フレームリプレイ処理を実装
+  [ ] CRC32 検証失敗時: 元 DB 復元 + 409 RESTORE_FRAME_CORRUPT
+  参照: §6.4, §7.3, §3.6.3
+  検証: TC-5-4〜TC-5-7
+
+T5-8: エラーハンドリング・冪等性
+  [ ] 各 API エラーコードを §7.3 の定義に沿って実装
+  [ ] リストア・PITR の中断時に元 DB を必ず復元すること（ロールバック保証）
+  [ ] 管理 API への Admin JWT 検証をバックアップ・リストアエンドポイントにも適用
+  参照: §7.3, §10
+
+T5-9: 統合テスト
+  [ ] TC-5-1〜TC-5-8 を全て実行し PASS することを確認
+  [ ] Phase 1〜11 の TC がリグレッションしないことを確認
+```
+
+---
+
+
+### Phase 14：ブランチ
+
+**目標**：DB の任意時点からブランチを作成し、独立した DB として読み書き可能にする
+
+**スコープ：**
+- ブランチ DB 作成 API（`from: "current"` / `from: {timestamp}` / `from: {frame_no}`）
+- ブランチ一覧・削除 API
+- ブランチ DB 命名規則と予約名バリデーション（`___`）
+- 再起動後のブランチ DB 自動復元
+
+**完了条件（テストケース）：**
+
+```
+TC-6-1: current から新規ブランチ作成
+  （a）POST /admin/v1/databases/my-db/branches {"branch_name":"feature-x","from":"current"} → 201
+  （b）GET /my-db___feature-x/v2/pipeline SELECT → 元 DB と同じデータが返る
+  （c）GET /admin/v1/databases/my-db/branches → feature-x が含まれる
+
+TC-6-2: ブランチ DB への独立書き込み
+  （a）ブランチ DB に INSERT A
+  （b）元 DB を SELECT → A が存在しない
+  （c）ブランチ DB を SELECT → A が存在する
+
+TC-6-3: タイムスタンプ指定でブランチ作成
+  （a）t=T1 に my-db へ INSERT A、t=T2 に INSERT B
+  （b）POST .../branches {"branch_name":"snap","from":"T1+1s"} → 201
+  （c）ブランチ DB を SELECT → A が存在し B が存在しない
+
+TC-6-4: ブランチ一覧取得
+  （a）feature-x・snap の 2 ブランチを作成
+  （b）GET /admin/v1/databases/my-db/branches → 両ブランチが含まれる
+
+TC-6-5: ブランチ削除
+  （a）DELETE /admin/v1/databases/my-db/branches/feature-x → 204
+  （b）GET /admin/v1/databases/my-db/branches → feature-x が含まれない
+  （c）/my-db___feature-x/v2/pipeline → 404 DB_NOT_FOUND
+  （d）{data-dir}/databases/my-db___feature-x/ ディレクトリが削除されている
+
+TC-6-6: 予約名バリデーション
+  （a）POST /admin/v1/databases {"name":"a___b"} → 400 DB_RESERVED_NAME
+
+TC-6-7: 再起動後のブランチ自動復元
+  （a）feature-x ブランチを作成
+  （b）サーバーを再起動（同じ --data）
+  （c）/my-db___feature-x/v2/pipeline SELECT → データが復元されている
+```
+
+**対象外（Phase 15 以降）：**
+- ブランチのマージ
+- ブランチ間 diff
+
+**Phase 14 実装タスク一覧：**
+
+```
+T6-1: branches.json 読み書きロジック
+  [ ] {data-dir}/meta/branches.json の読み込み・書き込み（アトミック更新）
+  [ ] 起動時に branches.json を読み込み（§8.1 Step 5-3）
+  [ ] branches.json がない場合は空で初期化
+  参照: §3.2, §8.1 Step 5-3
+
+T6-2: ブランチ DB 命名・バリデーション
+  [ ] `___` を含む DB 名を予約名として判定
+  [ ] POST /admin/v1/databases で `___` 含む名前 → 400 DB_RESERVED_NAME
+  [ ] ブランチ DB 内部名の生成: {source}___{branch-name}
+  参照: §7.3
+  検証: TC-6-6
+
+T6-3: `from: "current"` ブランチ作成
+  [ ] sqlite3_backup_* API で source DB のオンラインスナップショットを取得
+  [ ] {data-dir}/databases/{name}___{branch}/ ディレクトリ作成
+  [ ] スナップショットを data.db として配置
+  [ ] branches.json へメタデータを追加
+  [ ] 新 DB を sqld でオープン・マルチ DB マネージャへ登録
+  参照: §6.4（ブランチ）
+  検証: TC-6-1, TC-6-2
+
+T6-4: `from: {timestamp}/{frame_no}` ブランチ作成
+  [ ] wal_retention_days = 0 の場合は 503 PITR_NOT_ENABLED
+  [ ] T5-7 の PITR ロジックを再利用してブランチ DB を構築
+  [ ] 構築先: {data-dir}/databases/{name}___{branch}/data.db
+  [ ] branches.json へメタデータを追加（from_frame を記録）
+  参照: §6.4, T5-7
+  検証: TC-6-3
+
+T6-5: ブランチ一覧・削除 API
+  [ ] GET /admin/v1/databases/{name}/branches → branches.json からフィルタして返す
+  [ ] DELETE /admin/v1/databases/{name}/branches/{branch-name}
+        → sqld クローズ・ディレクトリ削除・branches.json 更新
+  参照: §6.4（ブランチ）
+  検証: TC-6-4, TC-6-5
+
+T6-6: 起動時ブランチ自動復元ロジック
+  [ ] branches.json を読み込み、各 db_name の DB ディレクトリが存在すれば sqld でオープン
+  [ ] ディレクトリが存在しないエントリは WARN ログを出力してスキップ
+  参照: §8.1 Step 5-3
+  検証: TC-6-7
+
+T6-7: 統合テスト
+  [ ] TC-6-1〜TC-6-7 を全て実行し PASS することを確認
+  [ ] Phase 1〜13 の TC がリグレッションしないことを確認
+```
+
+---
+
+
+### Phase 15：SQLite 拡張・内製化・HA
+
+Phase 14 完了後に計画する。候補（優先度未確定）：
+
+- SQLite 拡張機能ロード（`.so` / Wasm）
+- libSQL 内部コンポーネントの段階的内製化（§3.5.3 のロードマップに従う）
+- 高可用性・自動フェイルオーバー
+- メトリクス永続化・外部監視連携（Prometheus 等）
+
+---
+
+
+## 10. セキュリティ考慮事項
+
+### 10.1 JWT シークレット管理
+
+**優先順位：** `--auth-jwt-secret-file` > `--auth-jwt-secret` > 環境変数 `ADLAIRE_JWT_SECRET` > 設定ファイル `[auth] jwt_secret`
+
+| 方法 | 推奨度 | 用途 |
+|------|--------|------|
+| `--auth-jwt-secret-file <PATH>` | 本番推奨 | ファイルから読み込み。ファイルパーミッション 600 で保護 |
+| 環境変数 `ADLAIRE_JWT_SECRET` | 本番可 | コンテナ・systemd での秘密注入に適す |
+| `--auth-jwt-secret <VALUE>` | 開発のみ | プロセスリストに secret が露出するため本番不可 |
+| config.toml `jwt_secret` | 非推奨 | 設定ファイルが平文で読まれる。git に入れないこと |
+
+secret が未設定の場合は認証を完全に無効化する（起動時に `WARN` ログを出力する）。
+
+**シークレットの最小要件（実装で検証する）：**
+- 長さ 32 バイト以上
+- 未満の場合: 起動失敗 `Error: jwt_secret must be at least 32 bytes`
+
+**ローテーション方針（Phase 1 時点）：**
+- 旧 secret でのトークンは即時無効化される（新 secret で再発行が必要）
+- ローテーション手順: 新 secret で新トークン発行 → クライアント切り替え → 旧 secret 廃止
+- ゼロダウンタイムローテーション（複数 secret の同時受理）は Phase 1 対象外
+
+### 10.2 管理ポート（8081）のアクセス制御
+
+**デフォルト動作：**
+
+```
+bind: 127.0.0.1:8081   ← localhost のみ待機（Phase 1 固定）
+```
+
+Phase 1〜5 では管理ポートのバインドアドレスは `127.0.0.1` 固定であり、変更できない（`--admin-bind` フラグは Phase 6 以降で追加する）。
+外部ネットワークへの公開が必要な場合は Phase 6 以降でリバースプロキシ経由で行うこと。公開する場合は必ず `[admin] auth_token` を設定し、TLS ターミネーション（Nginx・Caddy 等）を前段に置くこと。
+
+**推奨構成（本番）：**
+
+```
+Internet → Reverse Proxy (TLS) → :8080 (API)
+                                → :8081 (Admin) ← VPN / internal network only
+```
+
+### 10.3 データディレクトリのファイルパーミッション
+
+起動時に `--data` で指定したディレクトリのパーミッションを検証・適用する。
+
+| パス | 推奨パーミッション | 内容 |
+|------|--------------------|------|
+| `{data-dir}/` | `700` | ルートディレクトリ |
+| `{data-dir}/meta/` | `700` | tokens.json・databases.json |
+| `{data-dir}/meta/tokens.json` | `600` | JWT secret と同等の機密 |
+| `{data-dir}/databases/{name}/` | `700` | DB ファイルディレクトリ |
+| `{data-dir}/databases/{name}/data.db` | `600` | SQLite 本体 |
+| `{data-dir}/databases/{name}/data.db-wal` | `600` | WAL ファイル |
+
+実装方針：
+- 起動時に `data-dir` が `700` 未満の場合は `WARN` ログを出力する（強制変更はしない）
+- 新規作成するファイル・ディレクトリは上記パーミッションで作成する
+
+### 10.4 TLS
+
+Phase 1〜7 では TLS をネイティブ実装しない。リバースプロキシ（Nginx・Caddy 等）による TLS ターミネーションを推奨する。
+
+```
+Client → [TLS] → Nginx/Caddy → [plain HTTP] → adlaire-db :8080
+```
+
+TLS ネイティブ対応は Phase 13 以降の検討事項とする。
+
+### 10.5 トークン情報の漏洩防止
+
+- `GET /admin/v1/tokens` および `GET /admin/v1/tokens/{id}` は JWT 文字列（`token` フィールド）を返さない（§6.4 参照）
+- JWT 文字列は `POST /admin/v1/tokens` の発行時レスポンスでのみ返す（以降は再取得不可）
+- `tokens.json` に JWT 文字列は保存しない（`id` と `access` と有効期限のみ保存）
+
+### 10.6 パストラバーサル対策
+
+DB 名・ファイルパス生成時に以下を必ず適用する：
+
+1. DB 名バリデーション（§6.4 の正規表現 `^[a-zA-Z0-9_-]{1,127}$`）
+2. `databases/{name}/` パス構築時に `Path::new(data_dir).join("databases").join(name)` を使用し、`..` を含む入力をバリデーションで事前排除する
+3. 予約語（`meta`・`admin`）のブロック
+
+---
+
+## 11. 配布・デプロイ
+
+- シングルバイナリ（`adlaire-db`）として配布
+- ターゲット：Linux x86_64 / aarch64
+- 静的リンク（musl）によるランタイム依存ゼロを目標（Phase 1 完了後に検討）
+- 配布チャネル：GitHub Releases
+- リリース成果物には SHA-256 チェックサムを添付する
+
+---
+
+## 12. ログ仕様
+
+### 12.1 フォーマット
+
+構造化 JSON Lines（1 行 1 イベント）。
+
+```json
+{"ts":"2024-01-01T00:00:00.123Z","level":"INFO","msg":"request completed","method":"POST","path":"/v2/pipeline","status":200,"duration_ms":3,"db":null,"error":null}
+```
+
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `ts` | string (RFC 3339, ms 精度) | ✓ | イベント発生時刻（UTC） |
+| `level` | string | ✓ | `TRACE` / `DEBUG` / `INFO` / `WARN` / `ERROR` |
+| `msg` | string | ✓ | 人間可読メッセージ |
+| `method` | string | HTTP リクエスト時 | HTTP メソッド |
+| `path` | string | HTTP リクエスト時 | リクエストパス |
+| `status` | integer | HTTP レスポンス時 | HTTP ステータスコード |
+| `duration_ms` | integer | HTTP リクエスト時 | 処理時間（ミリ秒） |
+| `db` | string \| null | マルチ DB 時 | 対象 DB 名（Phase 6〜） |
+| `error` | string \| null | エラー時 | エラーコードまたはメッセージ |
+
+### 12.2 ログレベル
+
+| レベル | 用途 |
+|---|---|
+| `ERROR` | リクエスト処理失敗・起動失敗・ファイル I/O エラー |
+| `WARN` | 認証失敗・存在しない DB へのアクセス・設定非推奨 |
+| `INFO` | 起動・停止・HTTP リクエスト完了（デフォルト） |
+| `DEBUG` | SQL 実行詳細・WAL チェックポイント |
+| `TRACE` | hrana プロトコル詳細・バイト列ダンプ |
+
+デフォルトレベル：`INFO`。`--log-level` フラグまたは環境変数 `ADLAIRE_LOG_LEVEL` で変更可。
+
+### 12.3 出力先
+
+- デフォルト：stdout（コンテナ・systemd との親和性）
+- `--log-file <PATH>` 指定時：ファイルへ書き出し（ローテーションは外部ツール任せ）
+- stdout とファイルの同時出力は非サポート（Phase 1 時点）
+
+### 12.4 起動・停止ログ例
+
+```
+{"ts":"...","level":"INFO","msg":"Adlaire DB starting","version":"0.1.0","data_dir":"/var/lib/adlaire","port":8080}
+{"ts":"...","level":"INFO","msg":"Adlaire DB listening","addr":"0.0.0.0:8080","admin_addr":"127.0.0.1:8081"}
+{"ts":"...","level":"INFO","msg":"shutdown signal received"}
+{"ts":"...","level":"INFO","msg":"Adlaire DB stopped"}
+```
+
+---
+
+## 13. WAL 設定
+
+### 13.1 WAL モード
+
+すべての SQLite DB は起動時に WAL モードを有効化する。
+
+```sql
+PRAGMA journal_mode = WAL;
+```
+
+- WAL により複数の同時読み取りと 1 書き込みが並行可能
+- クラッシュ後の自動リカバリは SQLite が保証
+
+### 13.2 設定パラメータ
+
+| パラメータ | デフォルト | CLI フラグ | config.toml キー | 説明 |
+|---|---|---|---|---|
+| busy timeout | 5000 ms | `--busy-timeout` | `[storage] busy_timeout_ms` | ロック待機タイムアウト。超過時 503 BUSY |
+| WAL checkpoint interval | 1000 pages | — | `[storage] wal_checkpoint_pages` | 自動チェックポイントのページ閾値 |
+| WAL checkpoint mode | `PASSIVE` | — | `[storage] wal_checkpoint_mode` | `PASSIVE` / `FULL` / `RESTART` |
+| synchronous | `NORMAL` | — | `[storage] synchronous` | `OFF` は非サポート（I-4 違反） |
+
+### 13.3 チェックポイント挙動
+
+- SQLite のデフォルト自動チェックポイント（1000 pages）をそのまま使用（Phase 1）
+- Phase 1 では手動チェックポイントの API は提供しない
+- Phase 10（レプリケーション）時に WAL チェックポイント制御を再設計する
+
+### 13.4 busy timeout エラー
+
+WAL ロック待機が `busy_timeout_ms` を超えた場合：
+
+```json
+{
+  "error": {
+    "message": "database is busy",
+    "code": "STORAGE_BUSY"
+  }
+}
+```
+
+HTTP ステータス：503
+
+---
+
+## 付録：用語定義
+
+| 用語 | 定義 |
+|------|------|
+| Turso Cloud | libSQL のマネージドホスティングサービス。Adlaire DB の hrana プロトコル互換の参照実装 |
+| libSQL | SQLite フォーク。HTTP API・WAL レプリケーション等を追加した OSS DB ライブラリ |
+| sqld | libSQL のサーバーコンポーネント。HTTP API・WebSocket API を提供する |
+| libSQL フォーク | Adlaire DB 専用に改変した libSQL（sqld 含む）。本プロジェクトの全体基盤 |
+| hrana | Turso / libSQL のワイヤプロトコル名。hrana-http（HTTP版）と hrana-ws（WebSocket版）がある |
+| baton | hrana プロトコルにおけるセッション継続識別子 |
+
+---
+
+## 将来の内製化方針
+
+### 基本方針
+- 内製化の単位はクレートとする
+- 外部クレートを内製クレートに段階的に差し替えることで内製化を進める
+- 既存の外部クレートで要件を満たせる場合は積極的に採用する
+- 既存クレートで不足する機能は、最初から内製クレートとして開発する
+- **外部クレートと内製クレートの併用パターンを初期段階から採用する**
+- 内製化の順序は実装難易度が低いものから優先する
+
+### 併用パターン
+
+初期段階から外部クレートと内製クレートを併用する。
+外部クレートで不足する機能を内製クレートで補い、
+成熟次第に外部クレートを内製クレートへ差し替える。
+
+### 内製化順序（難易度低い順）
+
+| 優先度 | 対象 | 現行クレート | 備考 |
+|--------|------|------------|------|
+| 1 | WAL チェックポイント制御 | libSQL | Phase 10 と直結 |
+| 2 | ストレージ層 | libSQL（SQLite ページャー）| WAL 内製後に着手 |
+| 3 | SQL パーサ | libSQL（SQLite）| 最難関・最後 |
+
+### 実施時期
+
+Phase 1〜7 と並行して着手可能なものから開始する。
+
+---
+
+## テストカバレッジ方針
+
+### 原則
+
+- **意味のあるテストのみ書く**：カバレッジ数値のためだけのテストは禁止
+- 各テストは「何が壊れたら検出できるか」を明確にする
+- テストのないコードより、誤ったテストのほうが危険
+
+### テスト種別と対象
+
+| 種別 | 対象 | 必須条件 |
+|------|------|---------|
+| **ユニットテスト** | フィルタ評価・JWT 検証・エラー処理 | 境界値・異常系を必ず含む |
+| **統合テスト** | TC-* 全件 | CI で全件通過必須。1件でも失敗はリリース不可 |
+| **プロパティテスト** | クエリ演算子・WAL 整合性 | 任意入力で不変条件が崩れないことを検証 |
+| **クラッシュテスト** | fsync 保証（I-4）・自動 ROLLBACK（I-5） | プロセス強制終了 → 再起動 → データ検証。WAL 内製時は必須 |
+
+### カバレッジ目標
+
+| 層 | 目標 | 備考 |
+|----|------|------|
+| WAL・ストレージ（内製クレート） | **95%以上** | データ整合性に直結。妥協しない |
+| API・認証層 | **85%以上** | TC-* で大部分をカバー |
+| エラーハンドリング | **100%** | 全エラーコードに対応するテストを必須とする |
+
+### CI ゲート（厳格）
+
+| チェック | 条件 |
+|---------|------|
+| 統合テスト（TC-*） | 全件グリーン必須。スキップ禁止 |
+| カバレッジ下限 | 内製クレート 95%・API 層 85% 未満でビルド失敗 |
+| クラッシュテスト | Phase 1 完了時点から CI 必須 |
+| プロパティテスト | 1000 ケース以上で回帰チェック |
+
+---
+
