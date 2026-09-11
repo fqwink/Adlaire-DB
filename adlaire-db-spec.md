@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.30  
+**バージョン：** 0.31  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-11  
 
@@ -243,6 +243,7 @@ tokio-tungstenite  = "0.21"                                # Phase 3: WebSocket
 toml            = "0.8"                                    # config.toml パース
 libc            = "0.2"                                    # flock による排他ロック
 base64          = "0.22"                                   # Blob フィールドの Base64 エンコード
+hex             = "0.4"                                    # generate_token_id() の tok_ プレフィックス生成
 
 [build-dependencies]
 # libsql-sys が SQLite をコンパイルするため cc が必要
@@ -325,6 +326,7 @@ sqld が独自の hrana 実装を持つ場合、その型をそのまま流用�
 | `toml` | 0.8 | `config.toml` デシリアライズ | 1 |
 | `libc` | 0.2 | `flock` による排他プロセスロック | 1 |
 | `base64` | 0.22 | Blob フィールドの Base64 エンコード | 1 |
+| `hex` | 0.4 | `generate_token_id()` の hex エンコード | 1 |
 | `dashmap` | 5 | `Metrics`・`ReplicationState` の並行マップ | 3 |
 | `url` | 2 | `ServerRole::Replica` の `primary_url` 型 | 4 |
 | `bytes` | 1 | WAL フレームバッファ（`WalFrame::data`） | 4 |
@@ -552,18 +554,27 @@ OPTIONS:
                          グレースフルシャットダウン最大待機時間（デフォルト: 5s）
 
 SUBCOMMANDS:
-  adlaire-db token create --secret <SECRET> [--db <NAME>] [--expiry <DURATION>]
+  adlaire-db token create --secret <SECRET> [--access ro|rw] [--expiry <DURATION>]
+                           [--db DB:ACCESS ...]
                            JWT トークンを生成して標準出力へ
 ```
+
+**Phase 1 シングル DB の固定パス：**
+
+Phase 1 では DB は `{data-dir}/databases/default/data.db` を固定で使用する。
+`/v2/pipeline` は常にこの `default` DB を対象とする。
+起動時に `databases/default/` が存在しなければ自動作成する。
+Phase 2 移行後も `/v2/pipeline`（DB 名なし）は `default` DB にフォールバックする（後方互換）。
 
 ### 4.2 設定ファイル（config.toml）
 
 ```toml
 [server]
-port       = 8080          # HTTP API ポート
-admin_port = 8081          # 管理 API ポート
-log_level  = "info"        # trace / debug / info / warn / error
-log_file   = ""            # 空 = stdout。パス指定でファイル出力
+port            = 8080     # HTTP API ポート
+admin_port      = 8081     # 管理 API ポート（Phase 1 は 127.0.0.1 固定。--admin-bind は Phase 2 以降）
+log_level       = "info"   # trace / debug / info / warn / error
+log_file        = ""       # 空 = stdout。パス指定でファイル出力
+shutdown_timeout = 30      # グレースフルシャットダウン最大待機秒数
 
 [auth]
 jwt_secret      = ""       # 空文字列 = 認証無効（開発用）
@@ -1446,13 +1457,21 @@ Step 5: メタデータ読み込み（Phase 1 はシングル DB のためスキ
   5-3. {data-dir}/meta/branches.json が存在すれば読み込みメモリに展開（Phase 6〜）
        なければ空のリスト `{"branches":[]}` として初期化し書き出す
 
-Step 6: DB オープン（Phase 1 はシングル DB）
-  6-1. {data-dir}/databases/ 以下の各 DB ディレクトリを列挙
-  6-2. 各 DB の data.db を sqld::Database::open()
+Step 6: DB オープン
+  【Phase 1 — シングル DB 固定】
+  6-1. {data-dir}/databases/default/ が存在しなければ作成（初回起動時）
+  6-2. {data-dir}/databases/default/data.db を sqld::Database::open()
   6-3. WAL モードを設定（PRAGMA journal_mode = WAL）
   6-4. busy timeout を設定（busy_timeout_ms）
   6-5. synchronous を設定（PRAGMA synchronous = NORMAL）
-  ※ いずれかで失敗した場合は Error: failed to open database '{name}': {err} で終了
+  6-6. skip_integrity_check フラグが false の場合は PRAGMA integrity_check を実行
+       → ok 以外の場合は Error: database integrity check failed で終了
+  ※ いずれかで失敗した場合は Error: failed to open database 'default': {err} で終了
+
+  【Phase 2 以降 — マルチ DB】
+  6-1. {data-dir}/databases/ 以下の各 DB ディレクトリを列挙
+  6-2. 各 DB の data.db を sqld::Database::open()（整合性チェック含む）
+  ※ databases/default/ が存在しない場合も自動作成して後方互換を維持
 
 Step 7: HTTP サーバー起動
   7-1. API ポート（デフォルト 0.0.0.0:8080）でソケットを bind
@@ -2468,10 +2487,11 @@ secret が未設定の場合は認証を完全に無効化する（起動時に 
 **デフォルト動作：**
 
 ```
-bind: 127.0.0.1:8081   ← localhost のみ待機（Phase 1 デフォルト）
+bind: 127.0.0.1:8081   ← localhost のみ待機（Phase 1 固定）
 ```
 
-外部ネットワークへの公開には `--admin-bind 0.0.0.0:8081` が必要。公開する場合は必ず `[admin] auth_token` を設定し、TLS ターミネーション（リバースプロキシ）を前段に置くこと。
+Phase 1 では管理ポートのバインドアドレスは `127.0.0.1` 固定であり、変更できない（`--admin-bind` フラグは Phase 2 以降で追加する）。
+外部ネットワークへの公開が必要な場合は Phase 2 以降でリバースプロキシ経由で行うこと。公開する場合は必ず `[admin] auth_token` を設定し、TLS ターミネーション（Nginx・Caddy 等）を前段に置くこと。
 
 **推奨構成（本番）：**
 
@@ -2786,24 +2806,14 @@ pub enum ServerRole {
 // config.rs
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub data_dir:    PathBuf,
-    pub port:        u16,              // デフォルト 8080
-    pub admin_port:  u16,              // デフォルト 8081
-    pub log_level:   tracing::Level,
-    pub auth:        AuthConfig,
-    pub admin:       AdminConfig,
-    pub storage:     StorageConfig,
-    pub replication: ReplicationConfig,
-}
-
-#[derive(Debug, Clone)]
-pub struct AuthConfig {
-    pub jwt_secret: Option<Vec<u8>>,  // 32 バイト以上。None = 認証無効
-}
-
-#[derive(Debug, Clone)]
-pub struct AdminConfig {
-    pub auth_token: Option<String>,   // None = 認証無効（開発用）
+    pub data_dir:          PathBuf,
+    pub port:              u16,              // デフォルト 8080
+    pub admin_port:        u16,              // デフォルト 8081
+    pub log_level:         String,           // "trace" | "debug" | "info" | "warn" | "error"
+    pub admin_auth_token:  Option<String>,   // None = 認証無効（開発用）
+    pub jwt_secret_bytes:  Option<Vec<u8>>, // 32 バイト以上。None = 認証無効
+    pub storage:           StorageConfig,
+    pub replication:       ReplicationConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -2918,8 +2928,11 @@ impl AuthState {
     /// 起動時: tokens.json からメモリへ展開
     pub fn load(config: &Config, tokens: Vec<TokenRecord>) -> Self;
 
+    /// テスト用: バイト列シークレットを直接受け取って生成
+    pub fn load_with(secret_bytes: &[u8], tokens: Vec<TokenRecord>) -> Self;
+
     /// JWT 検証（6 ステップフロー §5.6）
-    pub fn verify(&self, raw_token: &str) -> Result<Claims, AppError>;
+    pub async fn verify(&self, raw_token: &str) -> Result<Claims, AppError>;
 
     /// トークン発行: JWT 生成 + tokens.json 追記
     pub async fn issue(&self, req: IssueTokenRequest, secret: &[u8]) -> Result<TokenIssued, AppError>;
@@ -3166,9 +3179,8 @@ pub struct DbMetrics {
 // auth/middleware.rs
 
 /// リクエストごとに JWT を検証し、Claims を抽出する axum Extractor
-pub struct Authenticated {
-    pub claims: Claims,
-}
+pub struct Authenticated(pub Claims);
+// 利用側: Authenticated(claims): Authenticated
 
 impl<S> axum::extract::FromRequestParts<S> for Authenticated
 where
@@ -3185,7 +3197,7 @@ where
 
         // 認証無効モード（jwt_secret 未設定）はスキップ
         if state.auth.is_disabled() {
-            return Ok(Authenticated { claims: Claims::unauthenticated() });
+            return Ok(Authenticated(Claims::unauthenticated()));
         }
 
         let header = parts.headers
@@ -3197,8 +3209,8 @@ where
             .strip_prefix("Bearer ")
             .ok_or(AppError::AuthInvalid)?;
 
-        let claims = state.auth.verify(token)?;
-        Ok(Authenticated { claims })
+        let claims = state.auth.verify(token).await?;
+        Ok(Authenticated(claims))
     }
 }
 
@@ -3217,7 +3229,7 @@ where
         state: &S,
     ) -> Result<Self, Self::Rejection> {
         let state = SharedState::from_ref(state);
-        let expected = match &state.config.admin.auth_token {
+        let expected = match &state.config.admin_auth_token {
             None    => return Ok(AdminAuth),  // 認証無効
             Some(t) => t,
         };
@@ -3251,7 +3263,8 @@ pub fn build_router(state: SharedState) -> axum::Router {
 
 pub fn build_admin_router(state: SharedState) -> axum::Router {
     use axum::routing::{delete, get, post};
-    // AdminAuth Layer を nest 全体に適用し、全管理エンドポイントで Bearer 検証を行う
+    // AdminAuth は Layer ではなく各ハンドラの引数 Extractor として使用する
+    // （axum 0.7 では from_extractor_with_state が削除されたため）
     axum::Router::new()
         .nest("/admin/v1", axum::Router::new()
             // Phase 2: DB CRUD
@@ -3274,11 +3287,15 @@ pub fn build_admin_router(state: SharedState) -> axum::Router {
             .route("/databases/:name/branches",
                 get(admin::branches::list).post(admin::branches::create))
             .route("/databases/:name/branches/:branch",          delete(admin::branches::delete))
-            // AdminAuth を Layer として nest 全体に適用（各ハンドラから除外）
-            .layer(axum::middleware::from_extractor_with_state::<AdminAuth, _>(state.clone()))
         )
         .with_state(state)
 }
+
+// 各管理ハンドラは先頭引数に _auth: AdminAuth を必須とする。例：
+// pub async fn list(
+//     _auth: AdminAuth,
+//     State(state): State<SharedState>,
+// ) -> Result<Json<...>, AppError> { ... }
 ```
 
 ### 14.5 エントリポイント（main.rs）
@@ -3287,29 +3304,39 @@ pub fn build_admin_router(state: SharedState) -> axum::Router {
 // main.rs
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Step 1: CLI パース（clap derive）
     let cli = Cli::parse();
+    match cli.command {
+        CliCommand::Serve(args) => run_serve(args).await,
+        CliCommand::Token { cmd: TokenSubcommand::Create(args) } => run_token_create(args),
+    }
+}
 
-    // Step 2: 設定マージ（CLI > config.toml > デフォルト）
-    let config = Config::resolve(&cli)?;
+async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
+    // Step 1: 設定マージ（CLI > config.toml > デフォルト）
+    let config = Arc::new(Config::resolve(&args)?);
 
-    // Step 3: ログ初期化（tracing + tracing-subscriber JSON）
+    // Step 2: ログ初期化（tracing + tracing-subscriber JSON）
     init_tracing(&config.log_level);
 
-    // Step 4: データディレクトリ初期化
+    // Step 3: データディレクトリ初期化
     DataDir::init(&config.data_dir)?;
 
-    // Step 5: プロセス排他ロック（flock LOCK_EX | LOCK_NB）
+    // Step 4: プロセス排他ロック（flock LOCK_EX | LOCK_NB）
     let _lock = ProcessLock::acquire(&config.data_dir)?;
 
-    // Step 6: メタデータ読み込み + AuthState 初期化
+    // Step 5: メタデータ読み込み + AuthState 初期化
     let token_records = meta::load_tokens(&config.data_dir)?;
-    let auth = Arc::new(AuthState::load(&config, token_records));
+    let auth = Arc::new(AuthState::load_with(
+        config.jwt_secret_bytes.as_deref().unwrap_or(&[]),
+        token_records,
+    ));
 
-    // Step 7: DB 全件オープン（起動時整合性チェック込み）
-    let db_mgr = Arc::new(DbManager::open_all(&config.data_dir, Arc::new(config.storage.clone())).await?);
+    // Step 6: DB 全件オープン（起動時整合性チェック込み）
+    let db_mgr = Arc::new(
+        DbManager::open_all(&config.data_dir, Arc::new(config.storage.clone())).await?
+    );
 
-    // Step 8: AppState 構築
+    // Step 7: AppState 構築
     let state: SharedState = Arc::new(AppState {
         config:  Arc::clone(&config),
         db_mgr,
@@ -3318,13 +3345,13 @@ async fn main() -> anyhow::Result<()> {
         role:    ServerRole::Standalone,
     });
 
-    // Step 9: TCP ソケット bind
+    // Step 8: TCP ソケット bind
     let api_listener   = tokio::net::TcpListener::bind(("0.0.0.0",       config.port)).await?;
     let admin_listener = tokio::net::TcpListener::bind(("127.0.0.1", config.admin_port)).await?;
 
     tracing::info!(port = config.port, admin_port = config.admin_port, "Adlaire DB listening");
 
-    // Step 10: サーバー起動 + グレースフルシャットダウン
+    // Step 9: サーバー起動 + グレースフルシャットダウン
     let shutdown = shutdown_signal();
     tokio::select! {
         r = axum::serve(api_listener,   build_router(Arc::clone(&state)))       => r?,
@@ -3332,7 +3359,7 @@ async fn main() -> anyhow::Result<()> {
         _ = shutdown => { tracing::info!("shutdown signal received"); }
     }
 
-    // Step 11: DB クローズ（WAL flush + checkpoint）
+    // Step 10: DB クローズ（WAL flush + checkpoint）
     Arc::try_unwrap(state).ok()
         .map(|s| Arc::try_unwrap(s.db_mgr).ok())
         .flatten()
@@ -3341,6 +3368,17 @@ async fn main() -> anyhow::Result<()> {
         .await;
 
     tracing::info!("Adlaire DB stopped");
+    Ok(())
+}
+
+fn run_token_create(args: TokenCreateArgs) -> anyhow::Result<()> {
+    let secret = hex::decode(&args.secret)
+        .context("--secret は hex エンコードされた 32 バイト以上のバイト列")?;
+    let auth = AuthState::load_with(&secret, vec![]);
+    let access = args.access.unwrap_or(AccessLevel::Rw);
+    let exp = args.expiry.map(|d| Utc::now() + d);
+    let token = auth.issue_test_token_exp(access, exp);
+    println!("{}", token);
     Ok(())
 }
 
@@ -3654,37 +3692,37 @@ mod tests {
     fn secret() -> Vec<u8> { "a".repeat(32).into_bytes() }
 
     fn make_auth() -> AuthState {
-        AuthState::load_with(Some(secret()), vec![])
+        AuthState::load_with(&secret(), vec![])
     }
 
-    #[test]
-    fn valid_rw_token_passes() {
+    #[tokio::test]
+    async fn valid_rw_token_passes() {
         let auth  = make_auth();
-        let token = auth.issue_test_token(AccessLevel::Rw, None);
-        let c = auth.verify(&token).unwrap();
+        let token = auth.issue_test_token(AccessLevel::Rw);
+        let c = auth.verify(&token).await.unwrap();
         assert_eq!(c.a, AccessLevel::Rw);
     }
 
-    #[test]
-    fn expired_token_is_rejected() {
+    #[tokio::test]
+    async fn expired_token_is_rejected() {
         let auth  = make_auth();
-        let token = auth.issue_test_token_exp(AccessLevel::Rw, Utc::now() - Duration::seconds(1));
-        assert!(matches!(auth.verify(&token), Err(AppError::AuthExpired)));
+        let token = auth.issue_test_token_exp(AccessLevel::Rw, Some(Utc::now() - Duration::seconds(1)));
+        assert!(matches!(auth.verify(&token).await, Err(AppError::AuthExpired)));
     }
 
-    #[test]
-    fn wrong_signature_is_rejected() {
+    #[tokio::test]
+    async fn wrong_signature_is_rejected() {
         let auth = make_auth();
-        assert!(matches!(auth.verify("eyJ.eyJ.badsig"), Err(AppError::AuthInvalid)));
+        assert!(matches!(auth.verify("eyJ.eyJ.badsig").await, Err(AppError::AuthInvalid)));
     }
 
-    #[test]
-    fn revoked_token_is_rejected() {
+    #[tokio::test]
+    async fn revoked_token_is_rejected() {
         let auth  = make_auth();
-        let token = auth.issue_test_token(AccessLevel::Rw, None);
-        let sub   = auth.verify(&token).unwrap().sub;
+        let token = auth.issue_test_token(AccessLevel::Rw);
+        let sub   = auth.verify(&token).await.unwrap().sub;
         auth.revoke_sync(&sub);
-        assert!(matches!(auth.verify(&token), Err(AppError::AuthInvalid)));
+        assert!(matches!(auth.verify(&token).await, Err(AppError::AuthInvalid)));
     }
 
     #[test]
@@ -3829,6 +3867,7 @@ pub struct TomlConfig {
 #[derive(Debug, serde::Deserialize, Default)]
 pub struct TomlServer {
     pub port:             Option<u16>,
+    pub admin_port:       Option<u16>,
     pub log_level:        Option<String>,
     pub busy_timeout_ms:  Option<u64>,
     pub shutdown_timeout: Option<u64>,
@@ -3842,7 +3881,7 @@ pub struct TomlAuth {
 
 #[derive(Debug, serde::Deserialize, Default)]
 pub struct TomlAdmin {
-    pub port: Option<u16>,
+    pub auth_token: Option<String>,  // None = 認証無効（開発用）
 }
 
 #[derive(Debug, serde::Deserialize, Default)]
@@ -3869,7 +3908,7 @@ impl Config {
         };
         let srv  = toml.server.unwrap_or_default();
         let auth = toml.auth.unwrap_or_default();
-        let adm  = toml.admin.unwrap_or_default();
+        let adm  = toml.admin.unwrap_or_default();   // auth_token のみ
         let sto  = toml.storage.unwrap_or_default();
         let rep  = toml.replication.unwrap_or_default();
 
@@ -3898,7 +3937,7 @@ impl Config {
 
         // 4. 3-way マージ（CLI > TOML > デフォルト）
         let port       = args.port.or(srv.port).unwrap_or(8080);
-        let admin_port = args.admin_port.or(adm.port).unwrap_or(9090);
+        let admin_port = args.admin_port.or(srv.admin_port).unwrap_or(8081);
         let log_level  = args.log_level.as_deref()
             .or(srv.log_level.as_deref())
             .unwrap_or("info")
@@ -3920,11 +3959,28 @@ impl Config {
                            .unwrap_or(ReplicationWriteMode::Primary),
         };
 
+        let admin_auth_token = args.admin_token.clone()
+            .or(adm.auth_token)
+            .or_else(|| std::env::var("ADLAIRE_ADMIN_TOKEN").ok());
+
         Ok(Arc::new(Config {
-            data_dir: args.data.clone(),
-            port, admin_port, log_level, busy_timeout, shutdown_timeout,
-            skip_integrity_check, wal_mode, write_mode,
-            jwt_secret_bytes: raw_secret,
+            data_dir:          args.data.clone(),
+            port,
+            admin_port,
+            log_level,
+            admin_auth_token,
+            jwt_secret_bytes:  raw_secret,
+            storage: StorageConfig {
+                busy_timeout_ms:              busy_timeout.as_millis() as u64,
+                wal_checkpoint_pages:         1000,
+                wal_checkpoint_mode:          wal_mode,
+                wal_retention_days:           0,
+                integrity_check_interval_hrs: 0,
+            },
+            replication: ReplicationConfig {
+                write_mode,
+                sync_timeout_ms: 5000,
+            },
         }))
     }
 }
@@ -4088,7 +4144,7 @@ impl AuthState {
         }
     }
 
-    pub fn verify(&self, raw_token: &str) -> Result<Claims, AppError> {
+    pub async fn verify(&self, raw_token: &str) -> Result<Claims, AppError> {
         let key = self.secret.as_ref().ok_or(AppError::AuthDisabled)?;
         let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
         validation.validate_exp = false;  // 手動で exp を検証する
@@ -4104,8 +4160,8 @@ impl AuthState {
             }
         }
 
-        // 失効チェック
-        let revoked = self.revoked.blocking_read();
+        // 失効チェック（tokio RwLock: read().await）
+        let revoked = self.revoked.read().await;
         if let Some(ref jti) = claims.jti {
             if revoked.contains(jti) {
                 return Err(AppError::AuthRevoked);
@@ -4132,8 +4188,8 @@ impl AuthState {
 
     // テスト用ヘルパー（#[cfg(test)]）
     #[cfg(test)]
-    pub fn load_with(secret: &str, tokens: Vec<TokenRecord>) -> Self {
-        let b = secret.as_bytes().to_vec();
+    pub fn load_with(secret_bytes: &[u8], tokens: Vec<TokenRecord>) -> Self {
+        let b = secret_bytes.to_vec();
         let key = jsonwebtoken::DecodingKey::from_secret(&b);
         Self {
             secret_bytes: Some(b),
@@ -4144,20 +4200,22 @@ impl AuthState {
     }
 
     #[cfg(test)]
-    pub fn issue_test_token(&self, access: &str) -> String {
+    pub fn issue_test_token(&self, access: AccessLevel) -> String {
         self.issue_test_token_exp(access, None)
     }
 
     #[cfg(test)]
-    pub fn issue_test_token_exp(&self, access: &str, exp: Option<i64>) -> String {
+    pub fn issue_test_token_exp(&self, access: AccessLevel, exp: Option<chrono::DateTime<Utc>>) -> String {
         let bytes = self.secret_bytes.as_ref().expect("secret not set");
         let key = jsonwebtoken::EncodingKey::from_secret(bytes);
         let claims = Claims {
             sub: "test".into(),
-            access: access.into(),
+            a:   access,
             jti: Some(generate_token_id()),
-            exp,
+            exp: exp.map(|t| t.timestamp()),
             dbs: None,
+            iss: None,
+            iat: Utc::now().timestamp(),
         };
         jsonwebtoken::encode(&jsonwebtoken::Header::default(), &claims, &key).unwrap()
     }
@@ -4279,3 +4337,51 @@ mod tests {
     }
 }
 ```
+
+---
+
+### 14.19 SqldAdapter トレイト（db/sqld_adapter.rs）
+
+sqld の内部型への依存を 1 ファイルに集約し、アップストリーム変更の影響範囲を限定する。
+
+```rust
+// db/sqld_adapter.rs
+
+/// sqld::Database を薄くラップして Adlaire 内部で使用する抽象トレイト。
+/// sqld の型変更が生じた場合はこのファイルのみを修正すれば済む。
+pub trait SqldAdapter: Send + Sync {
+    /// SQL ステートメントを実行し、行列を返す
+    fn execute(
+        &self,
+        stmt: &sqld::hrana::proto::Stmt,
+    ) -> impl std::future::Future<Output = Result<sqld::hrana::proto::StmtResult, crate::error::AppError>> + Send;
+
+    /// パイプラインリクエストを実行する
+    fn execute_pipeline(
+        &self,
+        pipeline: &sqld::hrana::proto::PipelineReqBody,
+    ) -> impl std::future::Future<Output = Result<sqld::hrana::proto::PipelineRespBody, crate::error::AppError>> + Send;
+}
+
+/// 本番実装: sqld::Database を保持する newtype
+pub struct RealSqldAdapter(pub Arc<sqld::Database>);
+
+impl SqldAdapter for RealSqldAdapter {
+    async fn execute(
+        &self,
+        stmt: &sqld::hrana::proto::Stmt,
+    ) -> Result<sqld::hrana::proto::StmtResult, crate::error::AppError> {
+        self.0.execute(stmt).await.map_err(crate::error::AppError::Sqld)
+    }
+
+    async fn execute_pipeline(
+        &self,
+        pipeline: &sqld::hrana::proto::PipelineReqBody,
+    ) -> Result<sqld::hrana::proto::PipelineRespBody, crate::error::AppError> {
+        self.0.execute_pipeline(pipeline).await.map_err(crate::error::AppError::Sqld)
+    }
+}
+```
+
+> **設計メモ**: `db/manager.rs` の `DbManager` は `Arc<dyn SqldAdapter>` を保持する。
+> テストでは `MockSqldAdapter` を差し込んで sqld バイナリなしで単体テストが可能になる。
