@@ -1,0 +1,27 @@
+[package]
+name    = "adlaire-server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "adlaire-db"
+path = "src/main.rs"
+
+[dependencies]
+anyhow             = { workspace = true }
+async-trait        = { workspace = true }
+base64             = { workspace = true }
+axum               = { workspace = true }
+chrono             = { workspace = true }
+clap               = { workspace = true }
+libc               = { workspace = true }
+libsql             = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+thiserror          = { workspace = true }
+tokio              = { workspace = true }
+toml               = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid               = { workspace = true }
+regex              = { workspace = true }

@@ -1,0 +1,175 @@
+use std::sync::Arc;
+
+use axum::{Json, extract::State};
+
+use crate::{
+    auth::{AccessLevel, middleware::Authenticated},
+    db::sqld_adapter::SqldAdapter,
+    error::AppError,
+    hrana::{
+        convert::{hrana_to_sql, sql_to_stmt_result},
+        types::{HranaError, PipelineRequest, PipelineResponse, StreamRequest, StreamResponse, StreamResult},
+    },
+    state::SharedState,
+};
+
+// ── カスタム JSON エクストラクター ────────────────────────────────────────────
+// axum::Json は JSON パースエラーを 422 で返すが、仕様は 400 INVALID_REQUEST を要求する
+
+pub struct JsonPayload<T>(pub T);
+
+#[async_trait::async_trait]
+impl<T, S> axum::extract::FromRequest<S> for JsonPayload<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request(
+        req:   axum::extract::Request,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let bytes = axum::body::Bytes::from_request(req, state)
+            .await
+            .map_err(|_| AppError::InvalidRequest)?;
+        serde_json::from_slice::<T>(&bytes)
+            .map(JsonPayload)
+            .map_err(|_| AppError::InvalidRequest)
+    }
+}
+
+// ── シングル DB ハンドラ（Phase 3） ───────────────────────────────────────────
+
+pub async fn handle(
+    State(state):          State<SharedState>,
+    Authenticated(claims): Authenticated,
+    JsonPayload(req):      JsonPayload<PipelineRequest>,
+) -> Result<Json<PipelineResponse>, AppError> {
+    let db = state
+        .db_mgr
+        .get("default")
+        .await
+        .ok_or_else(|| AppError::DbNotFound("default".to_string()))?;
+    let results = execute_pipeline(&db, &claims, &req.requests, "default").await?;
+    Ok(Json(PipelineResponse { baton: None, base_url: None, results }))
+}
+
+// ── マルチ DB ハンドラ（Phase 6 用スタブ） ────────────────────────────────────
+
+pub async fn handle_db(
+    State(state):          State<SharedState>,
+    Authenticated(claims): Authenticated,
+    axum::extract::Path(db_name): axum::extract::Path<String>,
+    JsonPayload(req):      JsonPayload<PipelineRequest>,
+) -> Result<Json<PipelineResponse>, AppError> {
+    let db = state
+        .db_mgr
+        .get(&db_name)
+        .await
+        .ok_or_else(|| AppError::DbNotFound(db_name.clone()))?;
+    let results = execute_pipeline(&db, &claims, &req.requests, &db_name).await?;
+    Ok(Json(PipelineResponse { baton: None, base_url: None, results }))
+}
+
+// ── パイプライン実行コア ──────────────────────────────────────────────────────
+
+async fn execute_pipeline(
+    db:       &Arc<dyn SqldAdapter>,
+    claims:   &crate::auth::Claims,
+    requests: &[StreamRequest],
+    db_name:  &str,
+) -> Result<Vec<StreamResult>, AppError> {
+    let mut results = Vec::with_capacity(requests.len());
+
+    for req in requests {
+        match req {
+            StreamRequest::Execute { stmt } => {
+                if is_write_stmt(&stmt.sql)
+                    && claims.resolve_access(db_name) != AccessLevel::Rw
+                {
+                    results.push(StreamResult::Error {
+                        error: HranaError {
+                            message: "write not permitted".into(),
+                            code:    "PERMISSION_DENIED".into(),
+                        },
+                    });
+                    continue;
+                }
+
+                let sql_args: Result<Vec<_>, _> = stmt.args.iter().map(hrana_to_sql).collect();
+                let sql_args = match sql_args {
+                    Ok(a) => a,
+                    Err(_) => {
+                        results.push(StreamResult::Error {
+                            error: HranaError {
+                                message: "invalid argument value".into(),
+                                code:    "SQLITE_ERROR".into(),
+                            },
+                        });
+                        continue;
+                    }
+                };
+                match db.execute(&stmt.sql, sql_args, stmt.want_rows).await {
+                    Ok(r) => results.push(StreamResult::Ok {
+                        response: StreamResponse::Execute {
+                            result: sql_to_stmt_result(r),
+                        },
+                    }),
+                    Err(AppError::Sqld(msg)) => results.push(StreamResult::Error {
+                        error: HranaError {
+                            message: msg.clone(),
+                            code:    sqld_error_code(&msg),
+                        },
+                    }),
+                    Err(e) => return Err(e),
+                }
+            }
+
+            StreamRequest::Sequence { sql } => {
+                // execute_batch に丸ごと渡すことで文字列リテラル内のセミコロンを
+                // 誤分割しない。結果は hrana プロトコル上 1 件のみ返す。
+                match db.execute_batch(sql).await {
+                    Ok(()) => results.push(StreamResult::Ok {
+                        response: StreamResponse::Sequence,
+                    }),
+                    Err(AppError::Sqld(msg)) => results.push(StreamResult::Error {
+                        error: HranaError {
+                            message: msg.clone(),
+                            code:    sqld_error_code(&msg),
+                        },
+                    }),
+                    Err(e) => return Err(e),
+                }
+            }
+
+            StreamRequest::Close => {
+                results.push(StreamResult::Ok {
+                    response: StreamResponse::Close,
+                });
+                break;
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+// ── ヘルパー ──────────────────────────────────────────────────────────────────
+
+fn is_write_stmt(sql: &str) -> bool {
+    let upper = sql.trim_start().to_ascii_uppercase();
+    matches!(
+        upper.split_whitespace().next().unwrap_or(""),
+        "INSERT" | "UPDATE" | "DELETE" | "CREATE" | "DROP"
+            | "ALTER" | "REPLACE" | "PRAGMA"
+    )
+}
+
+fn sqld_error_code(msg: &str) -> String {
+    if msg.contains("UNIQUE constraint") {
+        "SQLITE_CONSTRAINT".into()
+    } else {
+        "SQLITE_ERROR".into()
+    }
+}
