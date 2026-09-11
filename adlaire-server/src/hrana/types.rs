@@ -61,7 +61,8 @@ pub enum StreamResult {
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamResponse {
-    Execute { result: StmtResult },
+    Execute  { result: StmtResult },
+    Sequence,
     Close,
 }
 

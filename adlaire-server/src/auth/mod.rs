@@ -46,8 +46,9 @@ impl Claims {
         }
     }
 
-    pub fn can_write(&self) -> bool {
-        matches!(self.a, AccessLevel::Rw)
+    /// DB 名を考慮した書き込み権限チェック（per-DB レベル優先）
+    pub fn can_write_db(&self, db_name: &str) -> bool {
+        self.resolve_access(db_name) == AccessLevel::Rw
     }
 }
 
@@ -67,6 +68,7 @@ impl AuthState {
     }
 
     /// JWT 検証（Phase 4 で完全実装）
+    /// is_auth_enabled() == true の場合、起動時に bail! されるためここには到達しない
     pub async fn verify(&self, _raw_token: &str) -> Result<Claims, AppError> {
         Err(AppError::AuthInvalid)
     }

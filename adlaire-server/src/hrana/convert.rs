@@ -1,21 +1,26 @@
-use crate::db::sqld_adapter::{SqlResult, SqlValue};
+use crate::{db::sqld_adapter::{SqlResult, SqlValue}, error::AppError};
 use super::types::{Col, StmtResult, Value};
 
 /// hrana `Value` → SQL 実行用 `SqlValue`
-pub fn hrana_to_sql(v: &Value) -> SqlValue {
-    match v {
+pub fn hrana_to_sql(v: &Value) -> Result<SqlValue, AppError> {
+    Ok(match v {
         Value::Null             => SqlValue::Null,
-        Value::Integer { value } => SqlValue::Integer(value.parse().unwrap_or(0)),
+        Value::Integer { value } => {
+            let n = value.parse::<i64>().map_err(|_| {
+                AppError::InvalidRequest
+            })?;
+            SqlValue::Integer(n)
+        }
         Value::Real    { value } => SqlValue::Real(*value),
         Value::Text    { value } => SqlValue::Text(value.clone()),
         Value::Blob    { value } => {
             use base64::Engine as _;
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(value)
-                .unwrap_or_default();
+                .map_err(|_| AppError::InvalidRequest)?;
             SqlValue::Blob(bytes)
         }
-    }
+    })
 }
 
 /// `SqlResult` → hrana `StmtResult`

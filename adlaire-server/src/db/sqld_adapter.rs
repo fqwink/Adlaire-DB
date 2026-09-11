@@ -33,6 +33,11 @@ pub trait SqldAdapter: Send + Sync {
         args:      Vec<SqlValue>,
         want_rows: bool,
     ) -> Result<SqlResult, AppError>;
+
+    /// 複数ステートメントを一括実行する（Sequence リクエスト用）
+    /// 注意: execute() は呼び出しごとに新規 Connection を生成するため、
+    /// BEGIN/COMMIT をまたぐトランザクションは保証されない（Phase 5 で設計変更予定）
+    async fn execute_batch(&self, sql: &str) -> Result<(), AppError>;
 }
 
 // ── RealSqldAdapter（libsql embedded） ────────────────────────────────────────
@@ -63,12 +68,22 @@ impl RealSqldAdapter {
 
 #[async_trait::async_trait]
 impl SqldAdapter for RealSqldAdapter {
+    async fn execute_batch(&self, sql: &str) -> Result<(), AppError> {
+        let conn = self.db.connect().map_err(|e| AppError::Sqld(e.to_string()))?;
+        conn.execute_batch(sql)
+            .await
+            .map(|_| ())
+            .map_err(|e| AppError::Sqld(e.to_string()))
+    }
+
     async fn execute(
         &self,
         sql:       &str,
         args:      Vec<SqlValue>,
         want_rows: bool,
     ) -> Result<SqlResult, AppError> {
+        // 注意: Connection は呼び出しごとに生成される。
+        // BEGIN/COMMIT をまたぐトランザクションは Phase 5 で Connection 共有に変更する。
         let conn   = self.db.connect().map_err(|e| AppError::Sqld(e.to_string()))?;
         let params = to_libsql_params(args);
 
@@ -115,7 +130,7 @@ impl SqldAdapter for RealSqldAdapter {
                 cols:              vec![],
                 rows:              vec![],
                 rows_affected,
-                last_insert_rowid: if last_insert_rowid != 0 { Some(last_insert_rowid) } else { None },
+                last_insert_rowid: Some(last_insert_rowid),
             })
         }
     }
@@ -149,6 +164,10 @@ pub struct MockSqldAdapter;
 
 #[async_trait::async_trait]
 impl SqldAdapter for MockSqldAdapter {
+    async fn execute_batch(&self, _sql: &str) -> Result<(), AppError> {
+        Ok(())
+    }
+
     async fn execute(
         &self,
         _sql:       &str,

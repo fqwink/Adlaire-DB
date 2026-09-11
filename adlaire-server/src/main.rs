@@ -53,6 +53,12 @@ async fn run_serve(args: crate::cli::ServeArgs) -> anyhow::Result<()> {
     if !auth.is_auth_enabled() {
         tracing::warn!("JWT auth is disabled — all requests are unauthenticated");
     }
+    // Phase 4 未実装のため JWT 設定時は起動を拒否する（verify() が常に失敗するため）
+    anyhow::ensure!(
+        !auth.is_auth_enabled(),
+        "JWT auth is configured but not yet implemented (Phase 4). \
+         Unset jwt_secret to start in unauthenticated mode."
+    );
 
     // Step 6: DB 全件オープン
     let db_mgr = Arc::new(
@@ -92,10 +98,18 @@ async fn run_serve(args: crate::cli::ServeArgs) -> anyhow::Result<()> {
     }
 
     // Step 10: DB クローズ
-    if let Ok(s) = Arc::try_unwrap(state) {
-        if let Ok(mgr) = Arc::try_unwrap(s.db_mgr) {
-            mgr.close_all().await;
-        }
+    match Arc::try_unwrap(state) {
+        Ok(s) => match Arc::try_unwrap(s.db_mgr) {
+            Ok(mgr) => mgr.close_all().await,
+            Err(arc) => tracing::warn!(
+                refs = Arc::strong_count(&arc),
+                "db_mgr still referenced at shutdown — skipping close_all"
+            ),
+        },
+        Err(arc) => tracing::warn!(
+            refs = Arc::strong_count(&arc),
+            "state still referenced at shutdown — skipping close_all"
+        ),
     }
 
     tracing::info!("Adlaire DB stopped");

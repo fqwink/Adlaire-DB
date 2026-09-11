@@ -10,7 +10,7 @@ use crate::{
         convert::{hrana_to_sql, sql_to_stmt_result},
         types::{HranaError, PipelineRequest, PipelineResponse, StreamRequest, StreamResponse, StreamResult},
     },
-    state::{AppState, SharedState},
+    state::SharedState,
 };
 
 // ── シングル DB ハンドラ（Phase 3） ───────────────────────────────────────────
@@ -71,7 +71,19 @@ async fn execute_pipeline(
                     continue;
                 }
 
-                let sql_args: Vec<_> = stmt.args.iter().map(hrana_to_sql).collect();
+                let sql_args: Result<Vec<_>, _> = stmt.args.iter().map(hrana_to_sql).collect();
+                let sql_args = match sql_args {
+                    Ok(a) => a,
+                    Err(_) => {
+                        results.push(StreamResult::Error {
+                            error: HranaError {
+                                message: "invalid argument value".into(),
+                                code:    "SQLITE_ERROR".into(),
+                            },
+                        });
+                        continue;
+                    }
+                };
                 match db.execute(&stmt.sql, sql_args, stmt.want_rows).await {
                     Ok(r) => results.push(StreamResult::Ok {
                         response: StreamResponse::Execute {
@@ -89,21 +101,19 @@ async fn execute_pipeline(
             }
 
             StreamRequest::Sequence { sql } => {
-                for stmt_sql in split_sql_statements(sql) {
-                    match db.execute(&stmt_sql, vec![], false).await {
-                        Ok(r) => results.push(StreamResult::Ok {
-                            response: StreamResponse::Execute {
-                                result: sql_to_stmt_result(r),
-                            },
-                        }),
-                        Err(AppError::Sqld(msg)) => results.push(StreamResult::Error {
-                            error: HranaError {
-                                message: msg.clone(),
-                                code:    sqld_error_code(&msg),
-                            },
-                        }),
-                        Err(e) => return Err(e),
-                    }
+                // execute_batch に丸ごと渡すことで文字列リテラル内のセミコロンを
+                // 誤分割しない。結果は hrana プロトコル上 1 件のみ返す。
+                match db.execute_batch(sql).await {
+                    Ok(()) => results.push(StreamResult::Ok {
+                        response: StreamResponse::Sequence,
+                    }),
+                    Err(AppError::Sqld(msg)) => results.push(StreamResult::Error {
+                        error: HranaError {
+                            message: msg.clone(),
+                            code:    sqld_error_code(&msg),
+                        },
+                    }),
+                    Err(e) => return Err(e),
                 }
             }
 
@@ -128,13 +138,6 @@ fn is_write_stmt(sql: &str) -> bool {
         "INSERT" | "UPDATE" | "DELETE" | "CREATE" | "DROP"
             | "ALTER" | "REPLACE" | "PRAGMA"
     )
-}
-
-fn split_sql_statements(sql: &str) -> Vec<String> {
-    sql.split(';')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
 }
 
 fn sqld_error_code(msg: &str) -> String {
