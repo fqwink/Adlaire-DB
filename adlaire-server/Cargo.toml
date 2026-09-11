@@ -10,10 +10,12 @@ path = "src/main.rs"
 [dependencies]
 anyhow             = { workspace = true }
 async-trait        = { workspace = true }
+base64             = { workspace = true }
 axum               = { workspace = true }
 chrono             = { workspace = true }
 clap               = { workspace = true }
 libc               = { workspace = true }
+libsql             = { workspace = true }
 serde              = { workspace = true }
 serde_json         = { workspace = true }
 thiserror          = { workspace = true }

@@ -4,17 +4,24 @@ mod config;
 mod data_dir;
 mod db;
 mod error;
+mod hrana;
+mod http;
+mod metrics;
+mod state;
 
 use std::sync::Arc;
 
 use clap::Parser;
 
 use crate::{
-    auth::AccessLevel,
+    auth::{AuthState, AccessLevel},
     cli::{Cli, CliCommand, TokenSubcommand},
     config::Config,
     data_dir::{DataDir, ProcessLock},
     db::DbManager,
+    http::{build_admin_router, build_router},
+    metrics::Metrics,
+    state::{AppState, ServerRole},
 };
 
 // ── エントリポイント ──────────────────────────────────────────────────────────
@@ -23,8 +30,8 @@ use crate::{
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        CliCommand::Serve(args) => run_serve(args).await,
-        CliCommand::Token { cmd: TokenSubcommand::Create(args) } => run_token_create(args),
+        CliCommand::Serve(args)                                    => run_serve(args).await,
+        CliCommand::Token { cmd: TokenSubcommand::Create(args) }   => run_token_create(args),
     }
 }
 
@@ -41,21 +48,58 @@ async fn run_serve(args: crate::cli::ServeArgs) -> anyhow::Result<()> {
     // Step 4: プロセス排他ロック
     let _lock = ProcessLock::acquire(&config.data_dir)?;
 
+    // Step 5: AuthState 初期化
+    let auth = Arc::new(AuthState::new(&config));
+    if !auth.is_auth_enabled() {
+        tracing::warn!("JWT auth is disabled — all requests are unauthenticated");
+    }
+
     // Step 6: DB 全件オープン
     let db_mgr = Arc::new(
         DbManager::open_all(&config.data_dir, Arc::new(config.storage.clone())).await?
     );
 
+    // Step 7: AppState 構築
+    let state: crate::state::SharedState = Arc::new(AppState {
+        config:      Arc::clone(&config),
+        db_mgr,
+        auth,
+        metrics:     Arc::new(Metrics::new()),
+        role:        ServerRole::Standalone,
+        replication: None,
+    });
+
+    // Step 8: TCP ソケット bind
+    let api_listener   = tokio::net::TcpListener::bind(("0.0.0.0",       config.port)).await?;
+    let admin_listener = tokio::net::TcpListener::bind(("127.0.0.1", config.admin_port)).await?;
+
     tracing::info!(
         port       = config.port,
         admin_port = config.admin_port,
-        "Adlaire DB Phase 2 ready (HTTP server not yet implemented)"
+        "Adlaire DB listening"
     );
 
-    // Phase 3 でここに axum サーバー起動を追加する
-    drop(db_mgr);
+    // Step 9: サーバー起動 + グレースフルシャットダウン
+    let api_router   = build_router(Arc::clone(&state));
+    let admin_router = build_admin_router(Arc::clone(&state));
 
-    anyhow::bail!("HTTP server not yet implemented (Phase 3 stub)")
+    tokio::select! {
+        r = axum::serve(api_listener,   api_router)   => r?,
+        r = axum::serve(admin_listener, admin_router) => r?,
+        _ = shutdown_signal() => {
+            tracing::info!("shutdown signal received");
+        }
+    }
+
+    // Step 10: DB クローズ
+    if let Ok(s) = Arc::try_unwrap(state) {
+        if let Ok(mgr) = Arc::try_unwrap(s.db_mgr) {
+            mgr.close_all().await;
+        }
+    }
+
+    tracing::info!("Adlaire DB stopped");
+    Ok(())
 }
 
 // ── token create ─────────────────────────────────────────────────────────────
@@ -91,7 +135,6 @@ fn init_tracing(log_level: &str) {
 
 // ── shutdown signal ───────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 async fn shutdown_signal() {
     use tokio::signal::unix::{signal, SignalKind};
     let mut sigint  = signal(SignalKind::interrupt()).unwrap();
