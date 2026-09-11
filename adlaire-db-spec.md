@@ -551,7 +551,7 @@ OPTIONS:
                          レプリケーション書き込みモード: async / sync（デフォルト: async）
   --busy-timeout <MS>    WAL ロック待機タイムアウト（ミリ秒、デフォルト: 5000）
   --shutdown-timeout <SECS>
-                         グレースフルシャットダウン最大待機時間（デフォルト: 5s）
+                         グレースフルシャットダウン最大待機時間（デフォルト: 30）
 
 SUBCOMMANDS:
   adlaire-db token create --secret <SECRET> [--access ro|rw] [--expiry <DURATION>]
@@ -1490,7 +1490,7 @@ Step 1: シャットダウン開始
   INFO {"msg":"shutdown signal received","signal":"SIGTERM"}
 
 Step 2: 新規リクエスト受付を停止
-  HTTP リスナーを閉じる。処理中のリクエストは最大 --shutdown-timeout（デフォルト 5s）待機する。
+  HTTP リスナーを閉じる。処理中のリクエストは最大 --shutdown-timeout（デフォルト 30s）待機する。
   タイムアウト超過の場合は強制終了する（WARN ログを出力）。
 
 Step 3: DB クローズ
@@ -2597,7 +2597,7 @@ DB 名・ファイルパス生成時に以下を必ず適用する：
 
 ```
 {"ts":"...","level":"INFO","msg":"Adlaire DB starting","version":"0.1.0","data_dir":"/var/lib/adlaire","port":8080}
-{"ts":"...","level":"INFO","msg":"Adlaire DB listening","addr":"0.0.0.0:8080","admin_addr":"0.0.0.0:8081"}
+{"ts":"...","level":"INFO","msg":"Adlaire DB listening","addr":"0.0.0.0:8080","admin_addr":"127.0.0.1:8081"}
 {"ts":"...","level":"INFO","msg":"shutdown signal received"}
 {"ts":"...","level":"INFO","msg":"Adlaire DB stopped"}
 ```
@@ -2741,7 +2741,8 @@ crates/adlaire-server/src/
 ├── db/
 │   ├── mod.rs           ← DB 名バリデーション・DbInfo 型
 │   ├── manager.rs       ← DbManager struct・open/close/create/delete ロジック
-│   └── meta.rs          ← databases.json / tokens.json / branches.json 読み書き
+│   ├── meta.rs          ← databases.json / tokens.json / branches.json 読み書き
+│   └── sqld_adapter.rs  ← SqldAdapter トレイト・RealSqldAdapter 実装（§14.19）
 ├── auth/
 │   ├── mod.rs           ← JWT 検証ロジック・Claims / AuthState struct
 │   └── middleware.rs    ← axum extractor: Authenticated
@@ -2812,6 +2813,8 @@ pub struct Config {
     pub log_level:         String,           // "trace" | "debug" | "info" | "warn" | "error"
     pub admin_auth_token:  Option<String>,   // None = 認証無効（開発用）
     pub jwt_secret_bytes:  Option<Vec<u8>>, // 32 バイト以上。None = 認証無効
+    pub shutdown_timeout:  u64,             // グレースフルシャットダウン最大秒数（デフォルト 30）
+    pub skip_integrity_check: bool,         // 起動時整合性チェックをスキップ（デフォルト false）
     pub storage:           StorageConfig,
     pub replication:       ReplicationConfig,
 }
@@ -2991,6 +2994,10 @@ pub enum AppError {
     RestoreIntegrityFailed,
     #[error("WAL frame corrupt")]
     RestoreFrameCorrupt,
+    #[error("authentication is disabled")]
+    AuthDisabled,
+    #[error("config error: {0}")]
+    ConfigError(String),
     #[error("internal error: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -3015,6 +3022,8 @@ impl axum::response::IntoResponse for AppError {
             Self::FrameNotFound         => (StatusCode::NOT_FOUND,               "FRAME_NOT_FOUND"),
             Self::RestoreIntegrityFailed=> (StatusCode::CONFLICT,                "RESTORE_INTEGRITY_FAILED"),
             Self::RestoreFrameCorrupt   => (StatusCode::CONFLICT,                "RESTORE_FRAME_CORRUPT"),
+            Self::AuthDisabled          => (StatusCode::UNAUTHORIZED,            "AUTH_DISABLED"),
+            Self::ConfigError(_)        => (StatusCode::INTERNAL_SERVER_ERROR,   "CONFIG_ERROR"),
             Self::Internal(_)           => (StatusCode::INTERNAL_SERVER_ERROR,   "INTERNAL_ERROR"),
         };
         let body = axum::Json(serde_json::json!({
@@ -3164,6 +3173,17 @@ pub struct Metrics {
     pub tokens_revoked:  std::sync::atomic::AtomicU64,
 }
 
+impl Metrics {
+    pub fn new() -> Self {
+        Self {
+            started_at:     std::time::Instant::now(),
+            databases:      dashmap::DashMap::new(),
+            tokens_total:   std::sync::atomic::AtomicU64::new(0),
+            tokens_revoked: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct DbMetrics {
     pub queries_total:      std::sync::atomic::AtomicU64,
@@ -3300,6 +3320,8 @@ pub fn build_admin_router(state: SharedState) -> axum::Router {
 
 ### 14.5 エントリポイント（main.rs）
 
+CLI 構造体（`Cli`, `ServeArgs`, `TokenCreateArgs` 等）の定義は §14.12 を参照。
+
 ```rust
 // main.rs
 #[tokio::main]
@@ -3325,11 +3347,8 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
     let _lock = ProcessLock::acquire(&config.data_dir)?;
 
     // Step 5: メタデータ読み込み + AuthState 初期化
-    let token_records = meta::load_tokens(&config.data_dir)?;
-    let auth = Arc::new(AuthState::load_with(
-        config.jwt_secret_bytes.as_deref().unwrap_or(&[]),
-        token_records,
-    ));
+    let tokens_meta = meta::load_tokens(&config.data_dir)?;
+    let auth = Arc::new(AuthState::load(&config, tokens_meta.tokens));
 
     // Step 6: DB 全件オープン（起動時整合性チェック込み）
     let db_mgr = Arc::new(
@@ -3374,11 +3393,19 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
 fn run_token_create(args: TokenCreateArgs) -> anyhow::Result<()> {
     let secret = hex::decode(&args.secret)
         .context("--secret は hex エンコードされた 32 バイト以上のバイト列")?;
+    anyhow::ensure!(secret.len() >= 32, "jwt_secret must be at least 32 bytes");
+    let access: AccessLevel = match args.access.as_str() {
+        "rw" => AccessLevel::Rw,
+        "ro" => AccessLevel::Ro,
+        other => anyhow::bail!("unknown access level: {other}. Use 'rw' or 'ro'"),
+    };
+    let exp = args.expiry.as_deref()
+        .map(parse_expiry)
+        .transpose()?
+        .map(|d| chrono::Utc::now() + d);
     let auth = AuthState::load_with(&secret, vec![]);
-    let access = args.access.unwrap_or(AccessLevel::Rw);
-    let exp = args.expiry.map(|d| Utc::now() + d);
-    let token = auth.issue_test_token_exp(access, exp);
-    println!("{}", token);
+    let token = auth.issue(access, exp)?;
+    println!("{token}");
     Ok(())
 }
 
@@ -3829,6 +3856,7 @@ pub struct ServeArgs {
     #[arg(long)] pub config:                                   Option<PathBuf>,
     #[arg(long)] pub auth_jwt_secret:                          Option<String>,
     #[arg(long)] pub auth_jwt_secret_file:                     Option<PathBuf>,
+    #[arg(long)] pub admin_auth_token:                         Option<String>,
     #[arg(long)] pub log_level:                                Option<String>,
     #[arg(long, default_value_t = false)] pub skip_integrity_check: bool,
     #[arg(long)] pub replication_write_mode:                   Option<String>,
@@ -3942,12 +3970,8 @@ impl Config {
             .or(srv.log_level.as_deref())
             .unwrap_or("info")
             .to_string();
-        let busy_timeout = Duration::from_millis(
-            args.busy_timeout.or(srv.busy_timeout_ms).unwrap_or(5000),
-        );
-        let shutdown_timeout = Duration::from_secs(
-            args.shutdown_timeout.or(srv.shutdown_timeout).unwrap_or(30),
-        );
+        let busy_timeout_ms: u64  = args.busy_timeout.or(srv.busy_timeout_ms).unwrap_or(5000);
+        let shutdown_timeout: u64 = args.shutdown_timeout.or(srv.shutdown_timeout).unwrap_or(30);
         let skip_integrity_check = args.skip_integrity_check
             || sto.skip_integrity_check.unwrap_or(false);
         let wal_mode  = parse_wal_mode(sto.wal_mode.as_deref())?;
@@ -3956,22 +3980,24 @@ impl Config {
             None    => rep.write_mode.as_deref()
                            .map(parse_write_mode)
                            .transpose()?
-                           .unwrap_or(ReplicationWriteMode::Primary),
+                           .unwrap_or(ReplicationWriteMode::Async),
         };
 
-        let admin_auth_token = args.admin_token.clone()
+        let admin_auth_token = args.admin_auth_token.clone()
             .or(adm.auth_token)
             .or_else(|| std::env::var("ADLAIRE_ADMIN_TOKEN").ok());
 
         Ok(Arc::new(Config {
-            data_dir:          args.data.clone(),
+            data_dir:             args.data.clone(),
             port,
             admin_port,
             log_level,
             admin_auth_token,
-            jwt_secret_bytes:  raw_secret,
+            jwt_secret_bytes:     raw_secret,
+            shutdown_timeout,
+            skip_integrity_check,
             storage: StorageConfig {
-                busy_timeout_ms:              busy_timeout.as_millis() as u64,
+                busy_timeout_ms:              busy_timeout_ms,
                 wal_checkpoint_pages:         1000,
                 wal_checkpoint_mode:          wal_mode,
                 wal_retention_days:           0,
@@ -3986,18 +4012,19 @@ impl Config {
 }
 
 fn parse_wal_mode(s: Option<&str>) -> anyhow::Result<WalCheckpointMode> {
-    match s.unwrap_or("wal2") {
-        "wal"  => Ok(WalCheckpointMode::Wal),
-        "wal2" => Ok(WalCheckpointMode::Wal2),
-        other  => anyhow::bail!("unknown wal_mode: {other}"),
+    match s.unwrap_or("passive") {
+        "passive" => Ok(WalCheckpointMode::Passive),
+        "full"    => Ok(WalCheckpointMode::Full),
+        "restart" => Ok(WalCheckpointMode::Restart),
+        other     => anyhow::bail!("unknown wal_mode: {other}. Use 'passive', 'full', or 'restart'"),
     }
 }
 
 fn parse_write_mode(s: &str) -> anyhow::Result<ReplicationWriteMode> {
     match s {
-        "primary" => Ok(ReplicationWriteMode::Primary),
-        "replica" => Ok(ReplicationWriteMode::Replica),
-        other     => anyhow::bail!("unknown replication write_mode: {other}"),
+        "async" => Ok(ReplicationWriteMode::Async),
+        "sync"  => Ok(ReplicationWriteMode::Sync),
+        other   => anyhow::bail!("unknown replication write_mode: {other}. Use 'async' or 'sync'"),
     }
 }
 ```
@@ -4162,10 +4189,8 @@ impl AuthState {
 
         // 失効チェック（tokio RwLock: read().await）
         let revoked = self.revoked.read().await;
-        if let Some(ref jti) = claims.jti {
-            if revoked.contains(jti) {
-                return Err(AppError::AuthRevoked);
-            }
+        if revoked.contains(&claims.sub) {
+            return Err(AppError::AuthInvalid);
         }
 
         Ok(claims)
@@ -4186,8 +4211,24 @@ impl AuthState {
         Ok(())
     }
 
+    pub fn issue(&self, access: AccessLevel, exp: Option<chrono::DateTime<chrono::Utc>>) -> Result<String, AppError> {
+        let secret = self.secret_bytes.as_ref().ok_or(AppError::AuthDisabled)?;
+        let claims = Claims {
+            iss: Some("adlaire-db".into()),
+            sub: generate_token_id(),
+            iat: chrono::Utc::now().timestamp(),
+            exp: exp.map(|e| e.timestamp()),
+            a:   access,
+            dbs: None,
+        };
+        jsonwebtoken::encode(
+            &jsonwebtoken::Header::default(),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(secret),
+        ).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))
+    }
+
     // テスト用ヘルパー（#[cfg(test)]）
-    #[cfg(test)]
     pub fn load_with(secret_bytes: &[u8], tokens: Vec<TokenRecord>) -> Self {
         let b = secret_bytes.to_vec();
         let key = jsonwebtoken::DecodingKey::from_secret(&b);
