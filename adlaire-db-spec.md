@@ -1584,7 +1584,7 @@ crates/adlaire-server/src/
 │   ├── pipeline.rs      ← POST /v2/pipeline ハンドラ
 │   ├── health.rs        ← GET /v2/health ハンドラ
 │   └── admin/
-│       ├── mod.rs       ← 管理 API Router・AdminAuth extractor
+│       ├── mod.rs       ← 管理 API Router・admin_auth_middleware
 │       ├── databases.rs ← DB CRUD ハンドラ（Phase 6）
 │       ├── tokens.rs    ← トークン CRUD ハンドラ（Phase 7）
 │       ├── metrics.rs   ← GET /admin/v1/metrics（Phase 9）
@@ -1661,6 +1661,7 @@ pub struct StorageConfig {
     pub wal_checkpoint_mode:          WalCheckpointMode,
     pub wal_retention_days:           u32,  // 0 = PITR 無効
     pub integrity_check_interval_hrs: u64,  // 0 = 無効
+    pub skip_integrity_check:         bool, // 起動時整合性チェックをスキップ（デフォルト false）
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1865,7 +1866,7 @@ pub enum AppError {
     #[error("config error: {0}")]
     ConfigError(String),
     #[error("sqld error: {0}")]
-    Sqld(sqld::Error),
+    Sqld(String),
     #[error("internal error: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -1968,7 +1969,8 @@ pub enum StreamResult {
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamResponse {
-    Execute { result: StmtResult },
+    Execute  { result: StmtResult },
+    Sequence,
     Close,
 }
 
@@ -2381,6 +2383,7 @@ impl Config {
                 wal_checkpoint_mode:          wal_mode,
                 wal_retention_days:           0,
                 integrity_check_interval_hrs: 0,
+                skip_integrity_check,
             },
             replication: ReplicationConfig {
                 write_mode,
@@ -2619,8 +2622,6 @@ pub fn build_router(state: SharedState) -> axum::Router {
 
 pub fn build_admin_router(state: SharedState) -> axum::Router {
     use axum::routing::{delete, get, post};
-    // AdminAuth は Layer ではなく各ハンドラの引数 Extractor として使用する
-    // （axum 0.7 では from_extractor_with_state が削除されたため）
     axum::Router::new()
         .nest("/admin/v1", axum::Router::new()
             // Phase 6: DB CRUD
@@ -2644,14 +2645,12 @@ pub fn build_admin_router(state: SharedState) -> axum::Router {
                 get(admin::branches::list).post(admin::branches::create))
             .route("/databases/:name/branches/:branch",          delete(admin::branches::delete))
         )
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            admin::admin_auth_middleware,
+        ))
         .with_state(state)
 }
-
-// 各管理ハンドラは先頭引数に _auth: AdminAuth を必須とする。例：
-// pub async fn list(
-//     _auth: AdminAuth,
-//     State(state): State<SharedState>,
-// ) -> Result<Json<...>, AppError> { ... }
 ```
 
 
@@ -2757,7 +2756,7 @@ async fn execute_pipeline(
     requests: &[StreamRequest],
     db_name: &str,
 ) -> Result<Vec<StreamResult>, AppError> {
-    let conn = db.connect().map_err(|e| AppError::Sqld(e))?;
+    let conn = db.connect().map_err(|e| AppError::Sqld(e.to_string()))?;
     let mut results = Vec::with_capacity(requests.len());
     for req in requests {
         match req {
@@ -2769,20 +2768,22 @@ async fn execute_pipeline(
                 } else {
                     let params = hrana_values_to_params(&stmt.args);
                     let result = conn.execute(&stmt.sql, params).await
-                        .map_err(|e| AppError::Sqld(e))?;
+                        .map_err(|e| AppError::Sqld(e.to_string()))?;
                     results.push(StreamResult::Ok {
                         response: StreamResponse::Execute { result: to_stmt_result(result) },
                     });
                 }
             }
             StreamRequest::Sequence { sql } => {
-                // セミコロン分割して逐次実行（いずれかが失敗したら即座に返す）
-                for stmt_sql in split_sql_statements(sql) {
-                    let result = conn.execute(&stmt_sql, libsql::params![]).await
-                        .map_err(|e| AppError::Sqld(e))?;
-                    results.push(StreamResult::Ok {
-                        response: StreamResponse::Execute { result: to_stmt_result(result) },
-                    });
+                // execute_batch に丸ごと渡すことで文字列リテラル内のセミコロンを誤分割しない
+                match db.execute_batch(sql).await {
+                    Ok(()) => results.push(StreamResult::Ok {
+                        response: StreamResponse::Sequence,
+                    }),
+                    Err(AppError::Sqld(msg)) => results.push(StreamResult::Error {
+                        error: HranaError { message: msg.clone(), code: sqld_error_code(&msg) },
+                    }),
+                    Err(e) => return Err(e),
                 }
             }
             StreamRequest::Close => break,
@@ -2791,30 +2792,26 @@ async fn execute_pipeline(
     Ok(results)
 }
 
-/// hrana Value 列を libsql Params へ変換する（hrana/convert.rs に定義し ws/session.rs からも use する）
-pub fn hrana_values_to_params(args: &[Value]) -> libsql::Params {
-    let values: Vec<libsql::Value> = args.iter().map(|v| match v {
-        Value::Null                => libsql::Value::Null,
-        Value::Integer { value }   => libsql::Value::Integer(value.parse().unwrap_or(0)),
-        Value::Real    { value }   => libsql::Value::Real(*value),
-        Value::Text    { value }   => libsql::Value::Text(value.clone()),
-        Value::Blob    { value }   => {
+/// hrana `Value` → SQL 実行用 `SqlValue`（整数パース失敗は InvalidRequest を返す）
+pub fn hrana_to_sql(v: &Value) -> Result<SqlValue, AppError> {
+    Ok(match v {
+        Value::Null             => SqlValue::Null,
+        Value::Integer { value } => {
+            let n = value.parse::<i64>().map_err(|_| AppError::InvalidRequest)?;
+            SqlValue::Integer(n)
+        }
+        Value::Real    { value } => SqlValue::Real(*value),
+        Value::Text    { value } => SqlValue::Text(value.clone()),
+        Value::Blob    { value } => {
             use base64::Engine as _;
             let bytes = base64::engine::general_purpose::STANDARD
-                .decode(value).unwrap_or_default();
-            libsql::Value::Blob(bytes)
+                .decode(value)
+                .map_err(|_| AppError::InvalidRequest)?;
+            SqlValue::Blob(bytes)
         }
-    }).collect();
-    libsql::Params::Positional(values)
+    })
 }
 
-/// SQL 文字列をセミコロンで分割し、空文字列を除去する
-fn split_sql_statements(sql: &str) -> Vec<String> {
-    sql.split(';')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
 
 // 書き込み文プレフィックス判定
 // 注意: CTE を使った書き込み（WITH ... INSERT）は検出できない。
@@ -2933,33 +2930,34 @@ where
     }
 }
 
-/// 管理 API 専用 Extractor（Bearer 文字列完全一致）
-pub struct AdminAuth;
-
-impl<S> axum::extract::FromRequestParts<S> for AdminAuth
-where
-    S: Send + Sync,
-    SharedState: axum::extract::FromRef<S>,
-{
-    type Rejection = AppError;
-
-    async fn from_request_parts(
-        parts: &mut http::request::Parts,
-        state: &S,
-    ) -> Result<Self, Self::Rejection> {
-        let state = SharedState::from_ref(state);
-        let expected = match &state.config.admin_auth_token {
-            None    => return Ok(AdminAuth),  // 認証無効
-            Some(t) => t,
-        };
-        let header = parts.headers
-            .get(http::header::AUTHORIZATION)
+/// 管理 API 認証ミドルウェア（Bearer 文字列完全一致）
+/// build_admin_router で layer として適用するため、全ハンドラに自動適用される
+pub async fn admin_auth_middleware(
+    State(state): State<SharedState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if let Some(expected) = &state.config.admin_auth_token {
+        let provided = req
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .ok_or(AppError::AuthRequired)?;
-        let token = header.strip_prefix("Bearer ").ok_or(AppError::AuthInvalid)?;
-        if token != expected { return Err(AppError::AuthInvalid); }
-        Ok(AdminAuth)
+            .and_then(|s| s.strip_prefix("Bearer "));
+
+        match provided {
+            Some(token) if token == expected.as_str() => {}
+            _ => {
+                return (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    axum::Json(serde_json::json!({
+                        "error": "admin authentication required",
+                        "code":  "AUTH_REQUIRED"
+                    })),
+                ).into_response();
+            }
+        }
     }
+    next.run(req).await
 }
 ```
 
@@ -4019,7 +4017,7 @@ impl WsSession {
                 }
                 let params = hrana_values_to_params(&stmt.args);
                 let result = stream.conn.execute(&stmt.sql, params).await
-                    .map_err(|e| AppError::Sqld(e))?;
+                    .map_err(|e| AppError::Sqld(e.to_string()))?;
                 Ok(ResponseBody::Execute { result: to_stmt_result(result) })
             }
             RequestBody::CloseStream => {
@@ -4030,13 +4028,13 @@ impl WsSession {
                 let stream = self.streams.get_mut(&stream_id).ok_or(AppError::InvalidRequest)?;
                 for stmt_sql in split_sql_statements(&sql) {
                     stream.conn.execute(&stmt_sql, libsql::params![]).await
-                        .map_err(|e| AppError::Sqld(e))?;
+                        .map_err(|e| AppError::Sqld(e.to_string()))?;
                 }
                 Ok(ResponseBody::Sequence)
             }
             RequestBody::Describe { stmt } => {
                 let stream = self.streams.get_mut(&stream_id).ok_or(AppError::InvalidRequest)?;
-                let desc = stream.conn.prepare(&stmt.sql).await.map_err(|e| AppError::Sqld(e))?;
+                let desc = stream.conn.prepare(&stmt.sql).await.map_err(|e| AppError::Sqld(e.to_string()))?;
                 let cols = desc.columns().iter().map(|c| Col {
                     name:     c.name().map(str::to_string),
                     decltype: c.decl_type().map(str::to_string),
