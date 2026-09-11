@@ -244,6 +244,11 @@ toml            = "0.8"                                    # config.toml パー�
 libc            = "0.2"                                    # flock による排他ロック
 base64          = "0.22"                                   # Blob フィールドの Base64 エンコード
 hex             = "0.4"                                    # generate_token_id() の tok_ プレフィックス生成
+uuid            = { version = "1", features = ["v4"] }     # DbInfo::id 生成
+
+[dev-dependencies]
+reqwest         = { version = "0.12", features = ["json"] } # TestServer HTTP クライアント
+tempfile        = "3"                                       # TestServer 一時ディレクトリ
 
 [build-dependencies]
 # libsql-sys が SQLite をコンパイルするため cc が必要
@@ -1028,6 +1033,7 @@ DELETE /admin/v1/databases/{name}        DB 削除
 
 ```json
 {
+  "id": "550e8400-e29b-41d4-a716-446655440000",
   "name": "my-db",
   "created_at": "2026-09-10T12:00:00Z"
 }
@@ -1039,6 +1045,7 @@ DELETE /admin/v1/databases/{name}        DB 削除
 {
   "databases": [
     {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
       "name": "my-db",
       "created_at": "2026-09-10T12:00:00Z",
       "size_bytes": 4096
@@ -1051,6 +1058,7 @@ DELETE /admin/v1/databases/{name}        DB 削除
 
 ```json
 {
+  "id": "550e8400-e29b-41d4-a716-446655440000",
   "name": "my-db",
   "created_at": "2026-09-10T12:00:00Z",
   "size_bytes": 4096
@@ -1263,11 +1271,11 @@ GET /admin/v1/metrics     全 DB のメトリクス取得
     {
       "name": "my-db",
       "queries_total": 1234,
-      "rows_read": 5678,
-      "rows_written": 91,
+      "rows_read_total": 5678,
+      "rows_written_total": 91,
       "connections_active": 2,
       "size_bytes": 4096,
-      "integrity_errors": 0
+      "wal_size_bytes": 1024
     }
   ]
 }
@@ -1695,12 +1703,25 @@ impl DbManager {
     /// DB 一覧（size_bytes は data.db のファイルサイズ）
     pub async fn list(&self) -> Vec<DbInfo>;
 
+    /// DB 名で DbInfo を返す（存在しない場合は DbNotFound、size_bytes はファイルから動的取得）
+    pub async fn get_info(&self, name: &str) -> Result<DbInfo, AppError> {
+        let meta = self.meta.read().await;
+        let info = meta.databases.iter()
+            .find(|d| d.name == name)
+            .cloned()
+            .ok_or_else(|| AppError::DbNotFound(name.to_string()))?;
+        let db_path = self.data_dir.join("databases").join(name).join("data.db");
+        let size_bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+        Ok(DbInfo { size_bytes, ..info })
+    }
+
     /// シャットダウン時: 全 sqld::Database を drop
     pub async fn close_all(self);
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DbInfo {
+    pub id:         String,  // UUID v4（作成時に uuid::Uuid::new_v4().to_string() で生成）
     pub name:       String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub size_bytes: u64,
@@ -2164,11 +2185,12 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
 
     // Step 7: AppState 構築
     let state: SharedState = Arc::new(AppState {
-        config:  Arc::clone(&config),
+        config:      Arc::clone(&config),
         db_mgr,
         auth,
-        metrics: Arc::new(Metrics::new()),
-        role:    ServerRole::Standalone,
+        metrics:     Arc::new(Metrics::new()),
+        role:        ServerRole::Standalone,
+        replication: None,  // Phase 10 で Some(Arc::new(ReplicationState::new())) に更新
     });
 
     // Step 8: TCP ソケット bind
@@ -2710,7 +2732,9 @@ pub async fn handle(
     Authenticated(claims): Authenticated,
     Json(req): Json<PipelineRequest>,
 ) -> Result<Json<PipelineResponse>, AppError> {
-    let results = execute_pipeline(&state.db, &claims, &req.requests).await?;
+    let db = state.db_mgr.get("default").await
+        .ok_or_else(|| AppError::DbNotFound("default".to_string()))?;
+    let results = execute_pipeline(&db, &claims, &req.requests, "default").await?;
     Ok(Json(PipelineResponse { baton: None, base_url: None, results }))
 }
 
@@ -2723,7 +2747,7 @@ pub async fn handle_db(
 ) -> Result<Json<PipelineResponse>, AppError> {
     let db = state.db_mgr.get(&db_name).await
         .ok_or_else(|| AppError::DbNotFound(db_name.clone()))?;
-    let results = execute_pipeline(&db, &claims, &req.requests).await?;
+    let results = execute_pipeline(&db, &claims, &req.requests, &db_name).await?;
     Ok(Json(PipelineResponse { baton: None, base_url: None, results }))
 }
 
@@ -2731,19 +2755,24 @@ async fn execute_pipeline(
     db: &sqld::Database,
     claims: &Claims,
     requests: &[StreamRequest],
+    db_name: &str,
 ) -> Result<Vec<StreamResult>, AppError> {
     let conn = db.connect().map_err(|e| AppError::Sqld(e))?;
     let mut results = Vec::with_capacity(requests.len());
     for req in requests {
         match req {
             StreamRequest::Execute { stmt } => {
-                if is_write_stmt(&stmt.sql) && !claims.can_write() {
-                    results.push(StreamResult::error("PERMISSION_DENIED", "write not permitted"));
+                if is_write_stmt(&stmt.sql) && claims.resolve_access(db_name) != AccessLevel::Rw {
+                    results.push(StreamResult::Error {
+                        error: HranaError { message: "write not permitted".into(), code: "PERMISSION_DENIED".into() },
+                    });
                 } else {
                     let params = hrana_values_to_params(&stmt.args);
                     let result = conn.execute(&stmt.sql, params).await
                         .map_err(|e| AppError::Sqld(e))?;
-                    results.push(StreamResult::Execute(to_stmt_result(result)));
+                    results.push(StreamResult::Ok {
+                        response: StreamResponse::Execute { result: to_stmt_result(result) },
+                    });
                 }
             }
             StreamRequest::Sequence { sql } => {
@@ -2751,7 +2780,9 @@ async fn execute_pipeline(
                 for stmt_sql in split_sql_statements(sql) {
                     let result = conn.execute(&stmt_sql, libsql::params![]).await
                         .map_err(|e| AppError::Sqld(e))?;
-                    results.push(StreamResult::Execute(to_stmt_result(result)));
+                    results.push(StreamResult::Ok {
+                        response: StreamResponse::Execute { result: to_stmt_result(result) },
+                    });
                 }
             }
             StreamRequest::Close => break,
@@ -2760,8 +2791,8 @@ async fn execute_pipeline(
     Ok(results)
 }
 
-/// hrana Value 列を libsql Params へ変換する
-fn hrana_values_to_params(args: &[Value]) -> libsql::Params {
+/// hrana Value 列を libsql Params へ変換する（hrana/convert.rs に定義し ws/session.rs からも use する）
+pub fn hrana_values_to_params(args: &[Value]) -> libsql::Params {
     let values: Vec<libsql::Value> = args.iter().map(|v| match v {
         Value::Null                => libsql::Value::Null,
         Value::Integer { value }   => libsql::Value::Integer(value.parse().unwrap_or(0)),
@@ -3277,6 +3308,118 @@ mod tests {
 }
 ```
 
+**テストヘルパー（`tests/helpers.rs`）：**
+
+```rust
+// tests/helpers.rs
+
+pub struct TestConfig {
+    pub jwt_secret:  Option<String>,
+    pub admin_token: Option<String>,
+}
+
+impl Default for TestConfig {
+    fn default() -> Self { Self { jwt_secret: None, admin_token: None } }
+}
+
+pub struct TestServer {
+    pub base_url:  String,
+    pub admin_url: String,
+    client:        reqwest::Client,
+    _dir:          tempfile::TempDir,
+    _handle:       tokio::task::AbortHandle,
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) { self._handle.abort(); }
+}
+
+impl TestServer {
+    pub async fn spawn(cfg: TestConfig) -> Self {
+        let dir   = tempfile::TempDir::new().unwrap();
+        let port  = pick_unused_port();
+        let aport = pick_unused_port();
+        let args = ServeArgs {
+            data:              dir.path().to_path_buf(),
+            port:              Some(port),
+            admin_port:        Some(aport),
+            auth_jwt_secret:   cfg.jwt_secret,
+            admin_auth_token:  cfg.admin_token,
+            ..Default::default()
+        };
+        let handle = tokio::spawn(async move { run_serve(args).await.unwrap() });
+        wait_for_ready(&format!("http://127.0.0.1:{port}/v2/health")).await;
+        Self {
+            base_url:  format!("http://127.0.0.1:{port}"),
+            admin_url: format!("http://127.0.0.1:{aport}"),
+            client:    reqwest::Client::new(),
+            _dir:      dir,
+            _handle:   handle.abort_handle(),
+        }
+    }
+
+    pub async fn pipeline(&self, body: serde_json::Value) -> reqwest::Response {
+        self.client.post(format!("{}/v2/pipeline", self.base_url))
+            .json(&body).send().await.unwrap()
+    }
+
+    pub async fn get(&self, path: &str) -> reqwest::Response {
+        self.client.get(format!("{}{path}", self.base_url)).send().await.unwrap()
+    }
+
+    pub async fn admin_post(&self, path: &str, body: serde_json::Value) -> reqwest::Response {
+        self.client.post(format!("{}{path}", self.admin_url))
+            .json(&body).send().await.unwrap()
+    }
+
+    pub async fn admin_delete(&self, path: &str) -> reqwest::Response {
+        self.client.delete(format!("{}{path}", self.admin_url)).send().await.unwrap()
+    }
+
+    pub async fn admin_get(&self, path: &str) -> reqwest::Response {
+        self.client.get(format!("{}{path}", self.admin_url)).send().await.unwrap()
+    }
+
+    /// 管理トークンを発行して JWT 文字列を返す
+    pub async fn create_token(&self, access: &str) -> String {
+        let resp = self.admin_post("/admin/v1/tokens",
+            serde_json::json!({"access": access})).await;
+        resp.json::<serde_json::Value>().await.unwrap()["token"]
+            .as_str().unwrap().to_string()
+    }
+
+    /// Bearer トークン付きで /v2/pipeline を呼ぶ
+    pub async fn pipeline_with_token(&self, token: &str, body: serde_json::Value) -> reqwest::Response {
+        self.client.post(format!("{}/v2/pipeline", self.base_url))
+            .bearer_auth(token)
+            .json(&body).send().await.unwrap()
+    }
+}
+
+fn minimal_select() -> serde_json::Value {
+    serde_json::json!({"baton":null,"requests":[
+        {"type":"execute","stmt":{"sql":"SELECT 1","args":[],"want_rows":true}},
+        {"type":"close"}
+    ]})
+}
+
+fn pick_unused_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap()
+        .local_addr().unwrap().port()
+}
+
+async fn wait_for_ready(url: &str) {
+    let client = reqwest::Client::new();
+    for _ in 0..100 {
+        if client.get(url).send().await.map(|r| r.status().is_success()).unwrap_or(false) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("TestServer did not become ready at {url}");
+}
+```
+
 **統合テスト例（TC-1）：**
 
 ```rust
@@ -3319,17 +3462,19 @@ async fn tc2_health_check() {
 async fn tc3_jwt_auth() {
     let secret = "test-secret-32bytes-minimum-len!";
     let srv = TestServer::spawn(TestConfig {
-        jwt_secret: Some(secret.to_string()),
-        ..Default::default()
+        jwt_secret:  Some(secret.to_string()),
+        admin_token: Some("admin-tok".to_string()),
     }).await;
 
-    let valid_token = srv.create_token(secret, "rw", None);
+    // 管理 API でトークン発行（Phase 7 以降で有効）
+    let valid_token = srv.create_token("rw").await;
 
     // (a) 有効トークン → 200
     assert_eq!(srv.pipeline_with_token(&valid_token, minimal_select()).await.status(), 200);
 
     // (b) Authorization ヘッダなし → 401 AUTH_REQUIRED
-    let no_auth = srv.pipeline_no_auth(minimal_select()).await;
+    // pipeline() は Bearer ヘッダを付けないので認証エラーになる
+    let no_auth = srv.pipeline(minimal_select()).await;
     assert_eq!(no_auth.status(), 401);
     assert_eq!(no_auth.json::<serde_json::Value>().await.unwrap()["code"], "AUTH_REQUIRED");
 
@@ -3568,7 +3713,7 @@ pub async fn list_dbs(
     State(state): State<Arc<AppState>>,
     _auth: AdminAuth,
 ) -> Result<Json<Vec<DbInfo>>, AppError> {
-    Ok(Json(state.db_mgr.list().await?))
+    Ok(Json(state.db_mgr.list().await))
 }
 
 /// GET /admin/v1/databases/:name  → DB 詳細
@@ -3790,8 +3935,42 @@ TC-3-4: JWT 認証（WebSocket）
 #### 14.9 WebSocket セッション管理（Phase 8）
 
 ```rust
+// ws/types.rs  ─ hrana-ws v3 メッセージ型定義
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RequestBody {
+    OpenStream,
+    CloseStream,
+    Execute   { stmt: Stmt },
+    Batch     { batch: Vec<Stmt> },
+    Sequence  { sql: String },
+    Describe  { stmt: Stmt },
+    StoreSql  { sql_id: u32, sql: String },
+    CloseSql  { sql_id: u32 },
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseBody {
+    OpenStream,
+    CloseStream,
+    Execute   { result: StmtResult },
+    Batch     { step_results: Vec<Option<StmtResult>>, step_errors: Vec<Option<HranaError>> },
+    Sequence,
+    Describe  { cols: Vec<Col>, params: Vec<DescribeParam> },
+    StoreSql,
+    CloseSql,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct DescribeParam { pub name: Option<String> }
+```
+
+```rust
 // ws/session.rs
 use std::collections::HashMap;
+use crate::hrana::convert::hrana_values_to_params;
 
 pub struct WsSession {
     db:      std::sync::Arc<sqld::Database>,
@@ -3831,12 +4010,12 @@ impl WsSession {
                     .ok_or(AppError::InvalidRequest)?;
                 // BEGIN/COMMIT/ROLLBACK でトランザクション状態を更新
                 let sql_upper = stmt.sql.trim_start().to_ascii_uppercase();
-                let first_word = sql_upper.split_whitespace().next().unwrap_or("");
-                match first_word {
-                    "BEGIN"    => { stream.tx_mode = TransactionMode::ReadWrite; }
-                    "BEGIN READ ONLY" => { stream.tx_mode = TransactionMode::ReadOnly; }
-                    "COMMIT" | "ROLLBACK" => { stream.tx_mode = TransactionMode::None; }
-                    _ => {}
+                if sql_upper.starts_with("BEGIN") && sql_upper.contains("READ ONLY") {
+                    stream.tx_mode = TransactionMode::ReadOnly;
+                } else if sql_upper.starts_with("BEGIN") {
+                    stream.tx_mode = TransactionMode::ReadWrite;
+                } else if sql_upper.starts_with("COMMIT") || sql_upper.starts_with("ROLLBACK") {
+                    stream.tx_mode = TransactionMode::None;
                 }
                 let params = hrana_values_to_params(&stmt.args);
                 let result = stream.conn.execute(&stmt.sql, params).await
@@ -3846,6 +4025,40 @@ impl WsSession {
             RequestBody::CloseStream => {
                 self.streams.remove(&stream_id);
                 Ok(ResponseBody::CloseStream)
+            }
+            RequestBody::Sequence { sql } => {
+                let stream = self.streams.get_mut(&stream_id).ok_or(AppError::InvalidRequest)?;
+                for stmt_sql in split_sql_statements(&sql) {
+                    stream.conn.execute(&stmt_sql, libsql::params![]).await
+                        .map_err(|e| AppError::Sqld(e))?;
+                }
+                Ok(ResponseBody::Sequence)
+            }
+            RequestBody::Describe { stmt } => {
+                let stream = self.streams.get_mut(&stream_id).ok_or(AppError::InvalidRequest)?;
+                let desc = stream.conn.prepare(&stmt.sql).await.map_err(|e| AppError::Sqld(e))?;
+                let cols = desc.columns().iter().map(|c| Col {
+                    name:     c.name().map(str::to_string),
+                    decltype: c.decl_type().map(str::to_string),
+                }).collect();
+                Ok(ResponseBody::Describe { cols, params: vec![] })
+            }
+            RequestBody::Batch { batch } => {
+                let stream = self.streams.get_mut(&stream_id).ok_or(AppError::InvalidRequest)?;
+                let mut step_results = Vec::with_capacity(batch.len());
+                let mut step_errors  = Vec::with_capacity(batch.len());
+                for stmt in &batch {
+                    let params = hrana_values_to_params(&stmt.args);
+                    match stream.conn.execute(&stmt.sql, params).await {
+                        Ok(r)  => { step_results.push(Some(to_stmt_result(r))); step_errors.push(None); }
+                        Err(e) => { step_results.push(None); step_errors.push(Some(HranaError { message: e.to_string(), code: "SQLITE_ERROR".into() })); }
+                    }
+                }
+                Ok(ResponseBody::Batch { step_results, step_errors })
+            }
+            // store_sql / close_sql（SQL テキストキャッシュ）は Phase 8 未実装
+            RequestBody::StoreSql { .. } | RequestBody::CloseSql { .. } => {
+                Err(AppError::InvalidRequest)
             }
         }
     }
@@ -3986,8 +4199,8 @@ use std::sync::atomic::Ordering;
 pub fn record_metrics(metrics: &DbMetrics, results: &[StreamResult]) {
     metrics.queries_total.fetch_add(results.len() as u64, Ordering::Relaxed);
     for r in results {
-        if let StreamResult::Execute(ref row) = r {
-            metrics.rows_read_total.fetch_add(row.rows_read, Ordering::Relaxed);
+        if let StreamResult::Ok { response: StreamResponse::Execute { result: ref row } } = r {
+            metrics.rows_read_total.fetch_add(row.rows.len() as u64, Ordering::Relaxed);
             metrics.rows_written_total.fetch_add(row.rows_affected, Ordering::Relaxed);
         }
     }
@@ -4479,7 +4692,12 @@ impl Manifest {
     pub async fn save_atomic(&self, path: &std::path::Path) -> anyhow::Result<()> {
         let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_vec_pretty(self)?;
-        tokio::fs::write(&tmp, &json).await?;
+        {
+            let mut f = tokio::fs::File::create(&tmp).await?;
+            use tokio::io::AsyncWriteExt;
+            f.write_all(&json).await?;
+            f.sync_all().await?;
+        }
         tokio::fs::rename(&tmp, path).await?;
         Ok(())
     }
