@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.33  
+**バージョン：** 0.35  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-11  
 
@@ -1623,7 +1623,7 @@ pub struct AppState {
     pub auth:        Arc<AuthState>,
     pub metrics:     Arc<Metrics>,                    // Phase 9～
     pub role:        ServerRole,                      // Phase 10～（デフォルト Standalone）
-    pub replication: Option<Arc<ReplicationState>>,   // Phase 10～（Replica のみ Some）
+    pub replication: Option<Arc<()>>,  // Phase 10 で ReplicationState に差し替え
 }
 
 pub type SharedState = Arc<AppState>;
@@ -1632,7 +1632,7 @@ pub type SharedState = Arc<AppState>;
 pub enum ServerRole {
     Standalone,
     Primary { primary_port: u16 },
-    Replica { primary_url: url::Url },
+    // Phase 10: Replica { primary_url: url::Url },
 }
 ```
 
@@ -1657,15 +1657,15 @@ pub struct Config {
 #[derive(Debug, Clone)]
 pub struct StorageConfig {
     pub busy_timeout_ms:              u64,  // デフォルト 5000
-    pub wal_checkpoint_pages:         u32,  // デフォルト 1000
+    pub wal_checkpoint_pages:         u64,  // デフォルト 1000
     pub wal_checkpoint_mode:          WalCheckpointMode,
-    pub wal_retention_days:           u32,  // 0 = PITR 無効
+    pub wal_retention_days:           u64,  // 0 = PITR 無効
     pub integrity_check_interval_hrs: u64,  // 0 = 無効
     pub skip_integrity_check:         bool, // 起動時整合性チェックをスキップ（デフォルト false）
 }
 
-#[derive(Debug, Clone, Default)]
-pub enum WalCheckpointMode { #[default] Passive, Full, Restart }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalCheckpointMode { Passive, Full, Restart }
 
 #[derive(Debug, Clone)]
 pub struct ReplicationConfig {
@@ -1673,8 +1673,8 @@ pub struct ReplicationConfig {
     pub sync_timeout_ms: u64,  // デフォルト 5000
 }
 
-#[derive(Debug, Clone, Default)]
-pub enum ReplicationWriteMode { #[default] Async, Sync }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplicationWriteMode { Async, Sync }
 ```
 
 #### DbManager
@@ -1683,26 +1683,129 @@ pub enum ReplicationWriteMode { #[default] Async, Sync }
 // db/manager.rs
 pub struct DbManager {
     data_dir: PathBuf,
-    dbs:      tokio::sync::RwLock<HashMap<String, Arc<sqld::Database>>>,
+    dbs:      tokio::sync::RwLock<HashMap<String, Arc<dyn SqldAdapter>>>,
     meta:     tokio::sync::RwLock<DatabasesMeta>,
     config:   Arc<StorageConfig>,
 }
 
 impl DbManager {
-    /// 起動時: databases/ 以下を全件オープン
-    pub async fn open_all(data_dir: &Path, config: Arc<StorageConfig>) -> anyhow::Result<Self>;
+    /// 起動時: databases.json を読み込み、各 DB を RealSqldAdapter::open() でオープン
+    /// Phase 3 シングル DB モード: "default" が存在しなければ自動作成する
+    pub async fn open_all(data_dir: &Path, config: Arc<StorageConfig>) -> anyhow::Result<Self> {
+        let mut meta = DatabasesMeta::load(data_dir)?;
 
-    /// DB 名 → sqld::Database を返す（存在しない場合 None）
-    pub async fn get(&self, name: &str) -> Option<Arc<sqld::Database>>;
+        // "default" DB が存在しなければ作成する（Phase 3 シングル DB モード）
+        if !meta.databases.iter().any(|d| d.name == "default") {
+            let info = DbInfo {
+                id:         uuid::Uuid::new_v4().to_string(),
+                name:       "default".to_string(),
+                created_at: chrono::Utc::now(),
+                size_bytes: 0,
+            };
+            let db_path = data_dir.join("databases").join("default");
+            std::fs::create_dir_all(&db_path)?;
+            meta.databases.push(info);
+            meta.save(data_dir)?;
+        }
 
-    /// DB 作成: ディレクトリ作成 → sqld オープン → meta 更新
-    pub async fn create(&self, name: &str) -> Result<DbInfo, AppError>;
+        let mut dbs: HashMap<String, Arc<dyn SqldAdapter>> = HashMap::new();
+        for db in &meta.databases {
+            let db_file = data_dir.join("databases").join(&db.name).join("data.db");
+            match RealSqldAdapter::open(&db_file, config.busy_timeout_ms, !config.skip_integrity_check).await {
+                Ok(adapter) => {
+                    dbs.insert(db.name.clone(), Arc::new(adapter));
+                    tracing::info!(db = %db.name, "opened database");
+                }
+                Err(e) => {
+                    tracing::error!(db = %db.name, err = %e, "failed to open database");
+                }
+            }
+        }
 
-    /// DB 削除: sqld クローズ → ディレクトリ削除 → meta 更新
-    pub async fn delete(&self, name: &str) -> Result<(), AppError>;
+        tracing::info!(count = dbs.len(), "DbManager ready");
+        Ok(Self {
+            data_dir: data_dir.to_path_buf(),
+            dbs:      tokio::sync::RwLock::new(dbs),
+            meta:     tokio::sync::RwLock::new(meta),
+            config,
+        })
+    }
 
-    /// DB 一覧（size_bytes は data.db のファイルサイズ）
-    pub async fn list(&self) -> Vec<DbInfo>;
+    /// DB 名 → SqldAdapter を返す（存在しない場合 None）
+    pub async fn get(&self, name: &str) -> Option<Arc<dyn SqldAdapter>> {
+        self.dbs.read().await.get(name).cloned()
+    }
+
+    /// DB 作成: 存在チェック（読み取りロック）→ ディレクトリ作成 → アダプタ生成 → meta 更新（書き込みロック）
+    pub async fn create(&self, name: &str) -> Result<DbInfo, AppError> {
+        {
+            let meta = self.meta.read().await;
+            if meta.databases.iter().any(|d| d.name == name) {
+                return Err(AppError::DbAlreadyExists(name.to_string()));
+            }
+        }
+
+        let db_path = self.data_dir.join("databases").join(name);
+        std::fs::create_dir_all(&db_path).map_err(|e| AppError::Internal(e.into()))?;
+
+        let db_file = db_path.join("data.db");
+        let adapter = RealSqldAdapter::open(&db_file, self.config.busy_timeout_ms, !self.config.skip_integrity_check)
+            .await
+            .map_err(|e| AppError::Internal(e))?;
+
+        let info = DbInfo {
+            id:         uuid::Uuid::new_v4().to_string(),
+            name:       name.to_string(),
+            created_at: chrono::Utc::now(),
+            size_bytes: 0,
+        };
+
+        {
+            let mut meta = self.meta.write().await;
+            meta.databases.push(info.clone());
+            meta.save(&self.data_dir).map_err(|e| AppError::Internal(e))?;
+        }
+
+        self.dbs.write().await.insert(name.to_string(), Arc::new(adapter));
+        tracing::info!(db = name, id = %info.id, "created database");
+        Ok(info)
+    }
+
+    /// DB 削除: 存在チェック（読み取りロック）→ アダプタ削除 → ディレクトリ削除 → meta 更新（書き込みロック）
+    pub async fn delete(&self, name: &str) -> Result<(), AppError> {
+        {
+            let meta = self.meta.read().await;
+            if !meta.databases.iter().any(|d| d.name == name) {
+                return Err(AppError::DbNotFound(name.to_string()));
+            }
+        }
+
+        self.dbs.write().await.remove(name);
+
+        let db_path = self.data_dir.join("databases").join(name);
+        if db_path.exists() {
+            std::fs::remove_dir_all(&db_path).map_err(|e| AppError::Internal(e.into()))?;
+        }
+
+        {
+            let mut meta = self.meta.write().await;
+            meta.databases.retain(|d| d.name != name);
+            meta.save(&self.data_dir).map_err(|e| AppError::Internal(e))?;
+        }
+
+        tracing::info!(db = name, "deleted database");
+        Ok(())
+    }
+
+    /// DB 一覧（size_bytes は data.db のファイルサイズを動的取得）
+    pub async fn list(&self) -> Vec<DbInfo> {
+        let meta = self.meta.read().await;
+        meta.databases.iter().map(|info| {
+            let db_path = self.data_dir.join("databases").join(&info.name).join("data.db");
+            let size_bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+            DbInfo { size_bytes, ..info.clone() }
+        }).collect()
+    }
 
     /// DB 名で DbInfo を返す（存在しない場合は DbNotFound、size_bytes はファイルから動的取得）
     pub async fn get_info(&self, name: &str) -> Result<DbInfo, AppError> {
@@ -1716,8 +1819,11 @@ impl DbManager {
         Ok(DbInfo { size_bytes, ..info })
     }
 
-    /// シャットダウン時: 全 sqld::Database を drop
-    pub async fn close_all(self);
+    /// シャットダウン時: ログのみ（Arc<dyn SqldAdapter> のドロップは Drop に委ねる）
+    pub async fn close_all(self) {
+        let count = self.dbs.read().await.len();
+        tracing::info!(count, "closing all databases");
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1733,7 +1839,7 @@ pub struct DbInfo {
 
 ```rust
 // auth/mod.rs
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Claims {
     pub iss: Option<String>,
     pub sub: String,                             // token_id（tok_xxx）
@@ -1756,9 +1862,9 @@ impl Claims {
         }
     }
 
-    /// 書き込み権限の有無を返す（AccessLevel::Rw の場合のみ true）
-    pub fn can_write(&self) -> bool {
-        matches!(self.a, AccessLevel::Rw)
+    /// DB 名に対する書き込み権限の有無を返す（per-DB アクセスレベルを優先）
+    pub fn can_write_db(&self, db_name: &str) -> bool {
+        self.resolve_access(db_name) == AccessLevel::Rw
     }
 
     /// 認証無効モード用（jwt_secret 未設定時のみ使用）
@@ -1774,41 +1880,24 @@ impl Claims {
     }
 }
 
+/// Phase 3 スタブ。Phase 4 で full 実装（jsonwebtoken / revoke リスト）に差し替える。
 pub struct AuthState {
-    secret_bytes: Option<Vec<u8>>,                                    // 発行・テスト用生バイト
-    secret:       Option<jsonwebtoken::DecodingKey>,
-    revoked:      tokio::sync::RwLock<std::collections::HashSet<String>>,  // token_id
-    tokens:       tokio::sync::RwLock<Vec<TokenRecord>>,
+    pub(crate) secret_bytes: Option<Vec<u8>>,
 }
 
 impl AuthState {
-    /// 起動時: tokens.json からメモリへ展開
-    pub fn load(config: &Config, tokens: Vec<TokenRecord>) -> Self;
+    /// 設定から生成する（Phase 3 スタブ）
+    pub fn new(config: &Config) -> Self {
+        Self { secret_bytes: config.jwt_secret_bytes.clone() }
+    }
 
-    /// テスト用: バイト列シークレットを直接受け取って生成
-    pub fn load_with(secret_bytes: &[u8], tokens: Vec<TokenRecord>) -> Self;
+    /// JWT 認証が有効かどうか（secret が設定されていれば true）
+    pub fn is_auth_enabled(&self) -> bool { self.secret_bytes.is_some() }
 
-    /// JWT 検証（6 ステップフロー §5.6）
-    pub async fn verify(&self, raw_token: &str) -> Result<Claims, AppError>;
-
-    /// トークン発行: JWT 生成 + tokens.json 追記
-    /// dbs: None = 全 DB アクセス、Some = DB スコープ付き
-    /// 戻り値: (token_id, jwt_string)
-    pub async fn issue(
-        &self,
-        access: AccessLevel,
-        exp:    Option<chrono::DateTime<chrono::Utc>>,
-        dbs:    Option<HashMap<String, AccessLevel>>,
-    ) -> Result<(String, String), AppError>;
-
-    /// トークン失効: revoked フラグ更新 + tokens.json 書き直し
-    pub async fn revoke(&self, token_id: &str, meta_path: &Path) -> Result<(), AppError>;
-
-    /// 発行済みトークン一覧（JWT シークレット値は含まない）
-    pub async fn list_tokens(&self) -> Vec<TokenRecord>;
-
-    /// 指定 ID のトークンを返す（存在しない場合は TokenNotFound）
-    pub async fn get_token(&self, token_id: &str) -> Result<TokenRecord, AppError>;
+    /// JWT 検証（Phase 4 で実装。Phase 3 では常に AuthInvalid を返す）
+    pub async fn verify(&self, _raw_token: &str) -> Result<Claims, AppError> {
+        Err(AppError::AuthInvalid)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1935,7 +2024,7 @@ pub struct Stmt {
     pub want_rows:  bool,
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Value {
     Integer { value: String },     // 整数を文字列で表現（i64 の範囲）
@@ -2033,26 +2122,27 @@ impl Manifest {
 }
 ```
 
-#### Metrics（Phase 9）
+#### Metrics（Phase 9 スタブ）
 
 ```rust
 // metrics.rs
+// Phase 9 で AtomicU64 カウンター・DashMap に拡張する
+#[derive(Default)]
+pub struct Metrics;
+
+impl Metrics {
+    pub fn new() -> Self { Self }
+}
+```
+
+Phase 9 実装時の完全版（参考）：
+```rust
+// Phase 9 で以下に差し替える
 pub struct Metrics {
     pub started_at:      std::time::Instant,
     pub databases:       dashmap::DashMap<String, DbMetrics>,
     pub tokens_total:    std::sync::atomic::AtomicU64,
     pub tokens_revoked:  std::sync::atomic::AtomicU64,
-}
-
-impl Metrics {
-    pub fn new() -> Self {
-        Self {
-            started_at:     std::time::Instant::now(),
-            databases:      dashmap::DashMap::new(),
-            tokens_total:   std::sync::atomic::AtomicU64::new(0),
-            tokens_revoked: std::sync::atomic::AtomicU64::new(0),
-        }
-    }
 }
 
 #[derive(Default)]
@@ -2062,7 +2152,7 @@ pub struct DbMetrics {
     pub rows_written_total: std::sync::atomic::AtomicU64,
     pub connections_active: std::sync::atomic::AtomicI64,
     pub integrity_errors:   std::sync::atomic::AtomicU64,
-    pub wal_size_bytes:     std::sync::atomic::AtomicU64,  // WAL ファイルサイズ（バイト）
+    pub wal_size_bytes:     std::sync::atomic::AtomicU64,
 }
 ```
 
@@ -2165,10 +2255,16 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
     // Step 1: 設定マージ（CLI > config.toml > デフォルト）
-    let config = Arc::new(Config::resolve(&args)?);
+    let config = Config::resolve(&args)?;
 
     // Step 2: ログ初期化（tracing + tracing-subscriber JSON）
     init_tracing(&config.log_level);
+
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "Adlaire DB starting");
+
+    if config.skip_integrity_check {
+        tracing::warn!("--skip-integrity-check is set; startup integrity check disabled");
+    }
 
     // Step 3: データディレクトリ初期化
     DataDir::init(&config.data_dir)?;
@@ -2176,9 +2272,17 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
     // Step 4: プロセス排他ロック（flock LOCK_EX | LOCK_NB）
     let _lock = ProcessLock::acquire(&config.data_dir)?;
 
-    // Step 5: メタデータ読み込み + AuthState 初期化
-    let tokens_meta = meta::load_tokens(&config.data_dir)?;
-    let auth = Arc::new(AuthState::load(&config, tokens_meta.tokens));
+    // Step 5: AuthState 初期化（Phase 3 スタブ。Phase 4 で tokens.json 読み込みを追加）
+    let auth = Arc::new(AuthState::new(&config));
+    if !auth.is_auth_enabled() {
+        tracing::warn!("JWT auth is disabled — all requests are unauthenticated");
+    }
+    // Phase 4 未実装のため JWT 設定時は起動を拒否する（verify() が常に失敗するため）
+    anyhow::ensure!(
+        !auth.is_auth_enabled(),
+        "JWT auth is configured but not yet implemented (Phase 4). \
+         Unset jwt_secret to start in unauthenticated mode."
+    );
 
     // Step 6: DB 全件オープン（起動時整合性チェック込み）
     let db_mgr = Arc::new(
@@ -2192,30 +2296,65 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
         auth,
         metrics:     Arc::new(Metrics::new()),
         role:        ServerRole::Standalone,
-        replication: None,  // Phase 10 で Some(Arc::new(ReplicationState::new())) に更新
+        replication: None,
     });
 
     // Step 8: TCP ソケット bind
     let api_listener   = tokio::net::TcpListener::bind(("0.0.0.0",       config.port)).await?;
     let admin_listener = tokio::net::TcpListener::bind(("127.0.0.1", config.admin_port)).await?;
 
-    tracing::info!(port = config.port, admin_port = config.admin_port, "Adlaire DB listening");
+    tracing::info!(
+        port       = config.port,
+        admin_port = config.admin_port,
+        "Adlaire DB listening"
+    );
 
-    // Step 9: サーバー起動 + グレースフルシャットダウン
-    let shutdown = shutdown_signal();
+    // Step 9: グレースフルシャットダウン付きでサーバー起動
+    let api_router   = build_router(Arc::clone(&state));
+    let admin_router = build_admin_router(Arc::clone(&state));
+    let shutdown_timeout = config.shutdown_timeout;
+
+    let (sd_tx, mut sd_rx) = tokio::sync::watch::channel(false);
+    let mut sd_rx2 = sd_rx.clone();
+
+    let api_task = tokio::spawn(async move {
+        axum::serve(api_listener, api_router)
+            .with_graceful_shutdown(async move { sd_rx.changed().await.ok(); })
+            .await
+            .ok();
+    });
+    let admin_task = tokio::spawn(async move {
+        axum::serve(admin_listener, admin_router)
+            .with_graceful_shutdown(async move { sd_rx2.changed().await.ok(); })
+            .await
+            .ok();
+    });
+
+    let sig_name = shutdown_signal_named().await;
+    tracing::info!(signal = sig_name, "shutdown signal received");
+    let _ = sd_tx.send(true);
+
     tokio::select! {
-        r = axum::serve(api_listener,   build_router(Arc::clone(&state)))       => r?,
-        r = axum::serve(admin_listener, build_admin_router(Arc::clone(&state))) => r?,
-        _ = shutdown => { tracing::info!("shutdown signal received"); }
+        _ = async { let _ = tokio::join!(api_task, admin_task); } => {},
+        _ = tokio::time::sleep(std::time::Duration::from_secs(shutdown_timeout)) => {
+            tracing::warn!(timeout_secs = shutdown_timeout, "graceful shutdown timed out, forcing exit");
+        }
     }
 
     // Step 10: DB クローズ（WAL flush + checkpoint）
-    Arc::try_unwrap(state).ok()
-        .map(|s| Arc::try_unwrap(s.db_mgr).ok())
-        .flatten()
-        .expect("db_mgr still referenced")
-        .close_all()
-        .await;
+    match Arc::try_unwrap(state) {
+        Ok(s) => match Arc::try_unwrap(s.db_mgr) {
+            Ok(mgr) => mgr.close_all().await,
+            Err(arc) => tracing::warn!(
+                refs = Arc::strong_count(&arc),
+                "db_mgr still referenced at shutdown — skipping close_all"
+            ),
+        },
+        Err(arc) => tracing::warn!(
+            refs = Arc::strong_count(&arc),
+            "state still referenced at shutdown — skipping close_all"
+        ),
+    }
 
     tracing::info!("Adlaire DB stopped");
     Ok(())
@@ -2224,30 +2363,25 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
 fn run_token_create(args: TokenCreateArgs) -> anyhow::Result<()> {
     let secret = args.secret.as_bytes().to_vec();
     anyhow::ensure!(secret.len() >= 32, "--secret は 32 バイト以上の文字列を指定してください");
-    let access: AccessLevel = match args.access.as_str() {
+
+    let _access: AccessLevel = match args.access.as_str() {
         "rw" => AccessLevel::Rw,
         "ro" => AccessLevel::Ro,
         other => anyhow::bail!("unknown access level: {other}. Use 'rw' or 'ro'"),
     };
-    let exp = args.expiry.as_deref()
-        .map(parse_expiry)
-        .transpose()?
-        .map(|d| chrono::Utc::now() + d);
-    let auth = AuthState::load_with(&secret, vec![]);
-    // dbs は token create サブコマンドでは None（全 DB アクセス）
-    let (_token_id, jwt) = tokio::runtime::Handle::current()
-        .block_on(auth.issue(access, exp, None))?;
-    println!("{jwt}");
+
+    // Phase 4 で JWT 発行を実装する
+    println!("(Phase 4 stub) token create — secret len={}", secret.len());
     Ok(())
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal_named() -> &'static str {
     use tokio::signal::unix::{signal, SignalKind};
     let mut sigint  = signal(SignalKind::interrupt()).unwrap();
     let mut sigterm = signal(SignalKind::terminate()).unwrap();
     tokio::select! {
-        _ = sigint.recv()  => {},
-        _ = sigterm.recv() => {},
+        _ = sigint.recv()  => "SIGINT",
+        _ = sigterm.recv() => "SIGTERM",
     }
 }
 ```
@@ -2456,17 +2590,26 @@ T-4: sqld 統合・DB オープン
 impl DataDir {
     pub fn init(data_dir: &Path) -> anyhow::Result<()> {
         for sub in &["", "databases", "meta"] {
-            let p = data_dir.join(sub);
+            let p = if sub.is_empty() { data_dir.to_path_buf() } else { data_dir.join(sub) };
             std::fs::create_dir_all(&p)?;
-            std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700))?;
 
-            // 実際のモードを確認し、0o700 より広ければ警告
             let mode = std::fs::metadata(&p)?.permissions().mode() & 0o777;
             if mode > 0o700 {
-                tracing::warn!(path = %p.display(), mode = format!("{:04o}", mode),
-                    "data directory permissions are broader than 0700");
+                tracing::warn!(
+                    path = %p.display(),
+                    mode = format!("{:04o}", mode),
+                    "data directory permissions are broader than 0700"
+                );
             }
         }
+        // §8.1 Step 5-2: tokens.json が存在しなければ空で初期化する
+        let tokens_path = data_dir.join("meta").join("tokens.json");
+        if !tokens_path.exists() {
+            std::fs::write(&tokens_path, r#"{"tokens":[]}"#)?;
+        }
+
+        tracing::info!(path = %data_dir.display(), "DataDir initialized");
         Ok(())
     }
 }
@@ -2496,49 +2639,154 @@ impl ProcessLock {
 
 #### 14.19 SqldAdapter トレイト（db/sqld_adapter.rs）
 
-sqld の内部型への依存を 1 ファイルに集約し、アップストリーム変更の影響範囲を限定する。
+libsql への依存を 1 ファイルに集約し、アップストリーム変更の影響範囲を限定する。
 
 ```rust
 // db/sqld_adapter.rs
 
-/// sqld::Database を薄くラップして Adlaire 内部で使用する抽象トレイト。
-/// sqld の型変更が生じた場合はこのファイルのみを修正すれば済む。
-pub trait SqldAdapter: Send + Sync {
-    /// SQL ステートメントを実行し、行列を返す
-    fn execute(
-        &self,
-        stmt: &sqld::hrana::proto::Stmt,
-    ) -> impl std::future::Future<Output = Result<sqld::hrana::proto::StmtResult, crate::error::AppError>> + Send;
+// ── SQL 値型 ──────────────────────────────────────────────────────────────────
 
-    /// パイプラインリクエストを実行する
-    fn execute_pipeline(
-        &self,
-        pipeline: &sqld::hrana::proto::PipelineReqBody,
-    ) -> impl std::future::Future<Output = Result<sqld::hrana::proto::PipelineRespBody, crate::error::AppError>> + Send;
+#[derive(Debug, Clone)]
+pub enum SqlValue {
+    Null,
+    Integer(i64),
+    Real(f64),
+    Text(String),
+    Blob(Vec<u8>),
 }
 
-/// 本番実装: sqld::Database を保持する newtype
-pub struct RealSqldAdapter(pub Arc<sqld::Database>);
+// ── 実行結果 ──────────────────────────────────────────────────────────────────
 
-impl SqldAdapter for RealSqldAdapter {
+#[derive(Debug, Default)]
+pub struct SqlResult {
+    pub cols:              Vec<(Option<String>, Option<String>)>, // (name, decltype)
+    pub rows:              Vec<Vec<SqlValue>>,
+    pub rows_affected:     u64,
+    pub last_insert_rowid: Option<i64>,
+}
+
+// ── SqldAdapter トレイト ──────────────────────────────────────────────────────
+
+#[async_trait::async_trait]
+pub trait SqldAdapter: Send + Sync {
     async fn execute(
         &self,
-        stmt: &sqld::hrana::proto::Stmt,
-    ) -> Result<sqld::hrana::proto::StmtResult, crate::error::AppError> {
-        self.0.execute(stmt).await.map_err(crate::error::AppError::Sqld)
+        sql:       &str,
+        args:      Vec<SqlValue>,
+        want_rows: bool,
+    ) -> Result<SqlResult, AppError>;
+
+    /// 複数ステートメントを一括実行する（Sequence リクエスト用）
+    async fn execute_batch(&self, sql: &str) -> Result<(), AppError>;
+}
+
+// ── RealSqldAdapter（libsql embedded） ────────────────────────────────────────
+
+pub struct RealSqldAdapter {
+    db: Arc<libsql::Database>,
+}
+
+impl RealSqldAdapter {
+    pub async fn open(path: &Path, busy_timeout_ms: u64, run_integrity_check: bool) -> anyhow::Result<Self> {
+        let db = libsql::Builder::new_local(path).build().await?;
+        let conn = db.connect()?;
+        let _ = conn.query("PRAGMA journal_mode=WAL", ()).await?;
+        conn.execute("PRAGMA synchronous=NORMAL", ()).await?;
+        let _ = conn.query(&format!("PRAGMA busy_timeout={busy_timeout_ms}"), ()).await?;
+
+        if run_integrity_check {
+            let mut rows = conn.query("PRAGMA integrity_check", ()).await?;
+            let row = rows.next().await?
+                .ok_or_else(|| anyhow::anyhow!("integrity_check returned no rows"))?;
+            let val: String = row.get(0)?;
+            if val != "ok" {
+                anyhow::bail!("PRAGMA integrity_check failed for {:?}: {val}", path);
+            }
+            tracing::debug!(path = %path.display(), "integrity check passed");
+        }
+
+        tracing::debug!(path = %path.display(), "opened SQLite (WAL mode)");
+        Ok(Self { db: Arc::new(db) })
+    }
+}
+
+fn libsql_err(e: libsql::Error) -> AppError {
+    let msg = e.to_string();
+    if msg.contains("locked") || msg.contains("busy") {
+        AppError::StorageBusy
+    } else {
+        AppError::Sqld(msg)
+    }
+}
+
+#[async_trait::async_trait]
+impl SqldAdapter for RealSqldAdapter {
+    async fn execute_batch(&self, sql: &str) -> Result<(), AppError> {
+        let conn = self.db.connect().map_err(|e| AppError::Sqld(e.to_string()))?;
+        conn.execute_batch(sql).await.map(|_| ()).map_err(libsql_err)
     }
 
-    async fn execute_pipeline(
-        &self,
-        pipeline: &sqld::hrana::proto::PipelineReqBody,
-    ) -> Result<sqld::hrana::proto::PipelineRespBody, crate::error::AppError> {
-        self.0.execute_pipeline(pipeline).await.map_err(crate::error::AppError::Sqld)
+    async fn execute(&self, sql: &str, args: Vec<SqlValue>, want_rows: bool) -> Result<SqlResult, AppError> {
+        let conn   = self.db.connect().map_err(|e| AppError::Sqld(e.to_string()))?;
+        let params = to_libsql_params(args);
+
+        if want_rows {
+            let mut rows = conn.query(sql, params).await.map_err(libsql_err)?;
+            let col_count = rows.column_count();
+            let cols: Vec<(Option<String>, Option<String>)> = (0..col_count)
+                .map(|i| (rows.column_name(i).map(|s| s.to_string()), None))
+                .collect();
+            let mut result_rows: Vec<Vec<SqlValue>> = vec![];
+            while let Some(row) = rows.next().await.map_err(libsql_err)? {
+                let cells = (0..col_count)
+                    .map(|i| from_libsql_value(row.get_value(i).unwrap_or(libsql::Value::Null)))
+                    .collect();
+                result_rows.push(cells);
+            }
+            Ok(SqlResult { cols, rows: result_rows, rows_affected: 0, last_insert_rowid: None })
+        } else {
+            let rows_affected      = conn.execute(sql, params).await.map_err(libsql_err)?;
+            let last_insert_rowid  = conn.last_insert_rowid();
+            Ok(SqlResult { cols: vec![], rows: vec![], rows_affected, last_insert_rowid: Some(last_insert_rowid) })
+        }
+    }
+}
+
+fn to_libsql_params(args: Vec<SqlValue>) -> Vec<libsql::Value> {
+    args.into_iter().map(|v| match v {
+        SqlValue::Null       => libsql::Value::Null,
+        SqlValue::Integer(n) => libsql::Value::Integer(n),
+        SqlValue::Real(f)    => libsql::Value::Real(f),
+        SqlValue::Text(s)    => libsql::Value::Text(s),
+        SqlValue::Blob(b)    => libsql::Value::Blob(b),
+    }).collect()
+}
+
+fn from_libsql_value(v: libsql::Value) -> SqlValue {
+    match v {
+        libsql::Value::Null       => SqlValue::Null,
+        libsql::Value::Integer(n) => SqlValue::Integer(n),
+        libsql::Value::Real(f)    => SqlValue::Real(f),
+        libsql::Value::Text(s)    => SqlValue::Text(s),
+        libsql::Value::Blob(b)    => SqlValue::Blob(b),
+    }
+}
+
+// ── MockSqldAdapter（テスト用） ───────────────────────────────────────────────
+
+pub struct MockSqldAdapter;
+
+#[async_trait::async_trait]
+impl SqldAdapter for MockSqldAdapter {
+    async fn execute_batch(&self, _sql: &str) -> Result<(), AppError> { Ok(()) }
+    async fn execute(&self, _sql: &str, _args: Vec<SqlValue>, _want_rows: bool) -> Result<SqlResult, AppError> {
+        Ok(SqlResult::default())
     }
 }
 ```
 
 > **設計メモ**: `db/manager.rs` の `DbManager` は `Arc<dyn SqldAdapter>` を保持する。
-> テストでは `MockSqldAdapter` を差し込んで sqld バイナリなしで単体テストが可能になる。
+> テストでは `MockSqldAdapter` を差し込んで libsql バイナリなしで単体テストが可能になる。
 
 ### Phase 3：HTTP サーバー・hrana パイプライン
 
@@ -2659,138 +2907,8 @@ pub fn build_admin_router(state: SharedState) -> axum::Router {
 ```rust
 // hrana/convert.rs
 
-pub fn to_pipeline_response(
-    results: Vec<Result<sqld::QueryResult, sqld::Error>>,
-) -> PipelineResponse {
-    PipelineResponse {
-        baton:    None,
-        base_url: None,
-        results:  results.into_iter().map(to_stream_result).collect(),
-    }
-}
-
-fn to_stream_result(r: Result<sqld::QueryResult, sqld::Error>) -> StreamResult {
-    match r {
-        Ok(qr)  => StreamResult::Ok {
-            response: StreamResponse::Execute { result: to_stmt_result(qr) },
-        },
-        Err(e) => StreamResult::Error {
-            error: HranaError {
-                message: e.to_string(),
-                code:    sqld_error_code(&e),
-            },
-        },
-    }
-}
-
-fn to_stmt_result(qr: sqld::QueryResult) -> StmtResult {
-    StmtResult {
-        cols: qr.columns.into_iter().map(|c| Col {
-            name:     c.name,
-            decltype: c.decl_type,
-        }).collect(),
-        rows: qr.rows.into_iter().map(|row| {
-            row.values.into_iter().map(sqld_val_to_hrana).collect()
-        }).collect(),
-        rows_affected:     qr.rows_affected as u64,
-        last_insert_rowid: qr.last_insert_rowid.map(|n| n.to_string()),
-    }
-}
-
-fn sqld_error_code(e: &sqld::Error) -> String {
-    // sqld のエラー型は実装時に確定する。典型的なマッピングを示す
-    if e.to_string().contains("UNIQUE constraint") {
-        "SQLITE_CONSTRAINT".into()
-    } else {
-        "SQLITE_ERROR".into()
-    }
-}
-
-fn sqld_val_to_hrana(v: sqld::Value) -> Value {
-    match v {
-        sqld::Value::Null       => Value::Null,
-        sqld::Value::Integer(n) => Value::Integer { value: n.to_string() },
-        sqld::Value::Real(f)    => Value::Real    { value: f },
-        sqld::Value::Text(s)    => Value::Text    { value: s },
-        sqld::Value::Blob(b)    => Value::Blob    {
-            value: base64::engine::general_purpose::STANDARD.encode(&b),
-        },
-    }
-}
-```
-
-
-#### 14.15 HTTP ハンドラ実装
-
-```rust
-// handlers/pipeline.rs
-
-// 単一 DB ハンドラ（Phase 1）
-pub async fn handle(
-    State(state): State<Arc<AppState>>,
-    Authenticated(claims): Authenticated,
-    Json(req): Json<PipelineRequest>,
-) -> Result<Json<PipelineResponse>, AppError> {
-    let db = state.db_mgr.get("default").await
-        .ok_or_else(|| AppError::DbNotFound("default".to_string()))?;
-    let results = execute_pipeline(&db, &claims, &req.requests, "default").await?;
-    Ok(Json(PipelineResponse { baton: None, base_url: None, results }))
-}
-
-// マルチ DB ハンドラ（Phase 6）
-pub async fn handle_db(
-    State(state): State<Arc<AppState>>,
-    Authenticated(claims): Authenticated,
-    Path(db_name): Path<String>,
-    Json(req): Json<PipelineRequest>,
-) -> Result<Json<PipelineResponse>, AppError> {
-    let db = state.db_mgr.get(&db_name).await
-        .ok_or_else(|| AppError::DbNotFound(db_name.clone()))?;
-    let results = execute_pipeline(&db, &claims, &req.requests, &db_name).await?;
-    Ok(Json(PipelineResponse { baton: None, base_url: None, results }))
-}
-
-async fn execute_pipeline(
-    db: &sqld::Database,
-    claims: &Claims,
-    requests: &[StreamRequest],
-    db_name: &str,
-) -> Result<Vec<StreamResult>, AppError> {
-    let conn = db.connect().map_err(|e| AppError::Sqld(e.to_string()))?;
-    let mut results = Vec::with_capacity(requests.len());
-    for req in requests {
-        match req {
-            StreamRequest::Execute { stmt } => {
-                if is_write_stmt(&stmt.sql) && claims.resolve_access(db_name) != AccessLevel::Rw {
-                    results.push(StreamResult::Error {
-                        error: HranaError { message: "write not permitted".into(), code: "PERMISSION_DENIED".into() },
-                    });
-                } else {
-                    let params = hrana_values_to_params(&stmt.args);
-                    let result = conn.execute(&stmt.sql, params).await
-                        .map_err(|e| AppError::Sqld(e.to_string()))?;
-                    results.push(StreamResult::Ok {
-                        response: StreamResponse::Execute { result: to_stmt_result(result) },
-                    });
-                }
-            }
-            StreamRequest::Sequence { sql } => {
-                // execute_batch に丸ごと渡すことで文字列リテラル内のセミコロンを誤分割しない
-                match db.execute_batch(sql).await {
-                    Ok(()) => results.push(StreamResult::Ok {
-                        response: StreamResponse::Sequence,
-                    }),
-                    Err(AppError::Sqld(msg)) => results.push(StreamResult::Error {
-                        error: HranaError { message: msg.clone(), code: sqld_error_code(&msg) },
-                    }),
-                    Err(e) => return Err(e),
-                }
-            }
-            StreamRequest::Close => break,
-        }
-    }
-    Ok(results)
-}
+use crate::{db::sqld_adapter::{SqlResult, SqlValue}, error::AppError};
+use super::types::{Col, StmtResult, Value};
 
 /// hrana `Value` → SQL 実行用 `SqlValue`（整数パース失敗は InvalidRequest を返す）
 pub fn hrana_to_sql(v: &Value) -> Result<SqlValue, AppError> {
@@ -2810,6 +2928,151 @@ pub fn hrana_to_sql(v: &Value) -> Result<SqlValue, AppError> {
             SqlValue::Blob(bytes)
         }
     })
+}
+
+/// `SqlResult` → hrana `StmtResult`
+pub fn sql_to_stmt_result(r: SqlResult) -> StmtResult {
+    let rows = r.rows.into_iter().map(|row| {
+        row.into_iter().map(sql_val_to_hrana).collect()
+    }).collect();
+    StmtResult {
+        cols: r.cols.into_iter().map(|(name, decltype)| Col { name, decltype }).collect(),
+        rows,
+        rows_affected:     r.rows_affected,
+        last_insert_rowid: r.last_insert_rowid.map(|n| n.to_string()),
+    }
+}
+
+fn sql_val_to_hrana(v: SqlValue) -> Value {
+    match v {
+        SqlValue::Null       => Value::Null,
+        SqlValue::Integer(n) => Value::Integer { value: n.to_string() },
+        SqlValue::Real(f)    => Value::Real    { value: f },
+        SqlValue::Text(s)    => Value::Text    { value: s },
+        SqlValue::Blob(b)    => {
+            use base64::Engine as _;
+            Value::Blob { value: base64::engine::general_purpose::STANDARD.encode(&b) }
+        }
+    }
+}
+```
+
+
+#### 14.15 HTTP ハンドラ実装
+
+```rust
+// handlers/pipeline.rs
+
+/// JSON パース失敗を 400 INVALID_REQUEST で返すカスタムエクストラクタ
+/// axum::Json は 422 を返すが、仕様は 400 INVALID_REQUEST を要求するため独自実装
+pub struct JsonPayload<T>(pub T);
+
+#[async_trait::async_trait]
+impl<T, S> axum::extract::FromRequest<S> for JsonPayload<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        let bytes = axum::body::Bytes::from_request(req, state)
+            .await
+            .map_err(|_| AppError::InvalidRequest)?;
+        serde_json::from_slice::<T>(&bytes)
+            .map(JsonPayload)
+            .map_err(|_| AppError::InvalidRequest)
+    }
+}
+
+// 単一 DB ハンドラ（Phase 1）
+pub async fn handle(
+    State(state): State<SharedState>,
+    Authenticated(claims): Authenticated,
+    JsonPayload(req): JsonPayload<PipelineRequest>,
+) -> Result<Json<PipelineResponse>, AppError> {
+    let db = state.db_mgr.get("default").await
+        .ok_or_else(|| AppError::DbNotFound("default".to_string()))?;
+    let results = execute_pipeline(&db, &claims, &req.requests, "default").await?;
+    Ok(Json(PipelineResponse { baton: None, base_url: None, results }))
+}
+
+// マルチ DB ハンドラ（Phase 6）
+pub async fn handle_db(
+    State(state): State<SharedState>,
+    Authenticated(claims): Authenticated,
+    axum::extract::Path(db_name): axum::extract::Path<String>,
+    JsonPayload(req): JsonPayload<PipelineRequest>,
+) -> Result<Json<PipelineResponse>, AppError> {
+    let db = state.db_mgr.get(&db_name).await
+        .ok_or_else(|| AppError::DbNotFound(db_name.clone()))?;
+    let results = execute_pipeline(&db, &claims, &req.requests, &db_name).await?;
+    Ok(Json(PipelineResponse { baton: None, base_url: None, results }))
+}
+
+async fn execute_pipeline(
+    db: &Arc<dyn SqldAdapter>,
+    claims: &Claims,
+    requests: &[StreamRequest],
+    db_name: &str,
+) -> Result<Vec<StreamResult>, AppError> {
+    let mut responses = Vec::with_capacity(requests.len());
+    for req in requests {
+        match req {
+            StreamRequest::Execute { stmt } => {
+                if is_write_stmt(&stmt.sql) && !claims.can_write_db(db_name) {
+                    responses.push(StreamResult::Error {
+                        error: HranaError { message: "write not permitted".into(), code: "PERMISSION_DENIED".into() },
+                    });
+                    continue;
+                }
+                let sql_args: Result<Vec<_>, _> = stmt.args.iter().map(hrana_to_sql).collect();
+                let sql_args = match sql_args {
+                    Ok(a) => a,
+                    Err(_) => {
+                        responses.push(StreamResult::Error {
+                            error: HranaError { message: "invalid argument value".into(), code: "SQLITE_ERROR".into() },
+                        });
+                        continue;
+                    }
+                };
+                match db.execute(&stmt.sql, sql_args, stmt.want_rows).await {
+                    Ok(result) => responses.push(StreamResult::Ok {
+                        response: StreamResponse::Execute { result: sql_to_stmt_result(result) },
+                    }),
+                    Err(AppError::Sqld(msg)) => responses.push(StreamResult::Error {
+                        error: HranaError { message: msg.clone(), code: sqld_error_code(&msg) },
+                    }),
+                    Err(e) => return Err(e),
+                }
+            }
+            StreamRequest::Sequence { sql } => {
+                // execute_batch に丸ごと渡すことで文字列リテラル内のセミコロンを誤分割しない
+                match db.execute_batch(sql).await {
+                    Ok(()) => responses.push(StreamResult::Ok {
+                        response: StreamResponse::Sequence,
+                    }),
+                    Err(AppError::Sqld(msg)) => responses.push(StreamResult::Error {
+                        error: HranaError { message: msg.clone(), code: sqld_error_code(&msg) },
+                    }),
+                    Err(e) => return Err(e),
+                }
+            }
+            StreamRequest::Close => {
+                responses.push(StreamResult::Ok { response: StreamResponse::Close });
+                break;
+            }
+        }
+    }
+    Ok(responses)
+}
+
+fn sqld_error_code(msg: &str) -> String {
+    if msg.contains("UNIQUE constraint") {
+        "SQLITE_CONSTRAINT".to_string()
+    } else {
+        "SQLITE_ERROR".to_string()
+    }
 }
 
 
@@ -2898,34 +3161,26 @@ T-9: `token create` サブコマンド
 pub struct Authenticated(pub Claims);
 // 利用側: Authenticated(claims): Authenticated
 
-impl<S> axum::extract::FromRequestParts<S> for Authenticated
-where
-    S: Send + Sync,
-    SharedState: axum::extract::FromRef<S>,
-{
+impl axum::extract::FromRequestParts<SharedState> for Authenticated {
     type Rejection = AppError;
 
     async fn from_request_parts(
         parts: &mut http::request::Parts,
-        state: &S,
+        state: &SharedState,
     ) -> Result<Self, Self::Rejection> {
-        let state = SharedState::from_ref(state);
-
         // 認証無効モード（jwt_secret 未設定）はスキップ
-        if state.auth.is_disabled() {
+        if !state.auth.is_auth_enabled() {
+            tracing::debug!("auth disabled — passing unauthenticated claims");
             return Ok(Authenticated(Claims::unauthenticated()));
         }
 
-        let header = parts.headers
+        let raw = parts.headers
             .get(http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
             .ok_or(AppError::AuthRequired)?;
 
-        let token = header
-            .strip_prefix("Bearer ")
-            .ok_or(AppError::AuthInvalid)?;
-
-        let claims = state.auth.verify(token).await?;
+        let claims = state.auth.verify(raw).await?;
         Ok(Authenticated(claims))
     }
 }
@@ -2962,152 +3217,29 @@ pub async fn admin_auth_middleware(
 ```
 
 
-#### 14.16 AuthState 実装
+#### 14.16 AuthState 実装（Phase 3 スタブ）
+
+Phase 4 で JWT 検証・revoke リスト・token 発行を実装する。
 
 ```rust
-// auth/state.rs
+// auth/mod.rs
 
 impl AuthState {
-    pub fn is_disabled(&self) -> bool { self.secret.is_none() }
-
-    pub fn load(config: &Config, tokens: Vec<TokenRecord>) -> Self {
-        let (secret_bytes, secret) = match &config.jwt_secret_bytes {
-            Some(b) => {
-                let key = jsonwebtoken::DecodingKey::from_secret(b);
-                (Some(b.clone()), Some(key))
-            }
-            None => (None, None),
-        };
-        Self {
-            secret_bytes,
-            secret,
-            revoked: tokio::sync::RwLock::new(std::collections::HashSet::new()),
-            tokens:  tokio::sync::RwLock::new(tokens),
-        }
+    pub fn new(config: &Config) -> Self {
+        Self { secret_bytes: config.jwt_secret_bytes.clone() }
     }
 
-    pub async fn verify(&self, raw_token: &str) -> Result<Claims, AppError> {
-        let key = self.secret.as_ref().ok_or(AppError::AuthDisabled)?;
-        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
-        validation.validate_exp = false;  // 手動で exp を検証する
+    pub fn is_auth_enabled(&self) -> bool { self.secret_bytes.is_some() }
 
-        let data = jsonwebtoken::decode::<Claims>(raw_token, key, &validation)
-            .map_err(|_| AppError::AuthInvalid)?;
-        let claims = data.claims;
-
-        // exp チェック
-        if let Some(exp) = claims.exp {
-            if exp < chrono::Utc::now().timestamp() {
-                return Err(AppError::AuthExpired);
-            }
-        }
-
-        // 失効チェック（tokio RwLock: read().await）
-        let revoked = self.revoked.read().await;
-        if revoked.contains(&claims.sub) {
-            return Err(AppError::AuthInvalid);
-        }
-
-        Ok(claims)
+    /// Phase 4 で実装。Phase 3 では常に AuthInvalid を返す。
+    pub async fn verify(&self, _raw_token: &str) -> Result<Claims, AppError> {
+        Err(AppError::AuthInvalid)
     }
+}
 
-    pub async fn revoke(&self, token_id: &str, meta_path: &Path) -> Result<(), AppError> {
-        {
-            let mut revoked = self.revoked.write().await;
-            revoked.insert(token_id.to_string());
-        }
-        // tokens リストの該当エントリを論理削除（revoked=true）して永続化
-        {
-            let mut tokens = self.tokens.write().await;
-            let record = tokens.iter_mut()
-                .find(|t| t.id == token_id)
-                .ok_or_else(|| AppError::TokenNotFound(token_id.to_string()))?;
-            record.revoked    = true;
-            record.revoked_at = Some(chrono::Utc::now());
-            let meta      = TokensMeta { tokens: tokens.clone() };
-            let path_copy = meta_path.to_path_buf();
-            tokio::task::spawn_blocking(move || save_atomic(&path_copy, &meta))
-                .await
-                .map_err(|e| AppError::Internal(e.into()))??;
-        }
-        Ok(())
-    }
-
-    // 戻り値: (token_id, jwt_string)
-    pub async fn issue(
-        &self,
-        access: AccessLevel,
-        exp:    Option<chrono::DateTime<chrono::Utc>>,
-        dbs:    Option<HashMap<String, AccessLevel>>,
-    ) -> Result<(String, String), AppError> {
-        let secret = self.secret_bytes.as_ref().ok_or(AppError::AuthDisabled)?;
-        let token_id = generate_token_id();
-        let claims = Claims {
-            iss: Some("adlaire-db".into()),
-            sub: token_id.clone(),
-            iat: chrono::Utc::now().timestamp(),
-            exp: exp.map(|e| e.timestamp()),
-            a:   access,
-            dbs,
-        };
-        let jwt = jsonwebtoken::encode(
-            &jsonwebtoken::Header::default(),
-            &claims,
-            &jsonwebtoken::EncodingKey::from_secret(secret),
-        ).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-        Ok((token_id, jwt))
-    }
-
-    // テスト用ヘルパー（#[cfg(test)]）
-    pub fn load_with(secret_bytes: &[u8], tokens: Vec<TokenRecord>) -> Self {
-        let b = secret_bytes.to_vec();
-        let key = jsonwebtoken::DecodingKey::from_secret(&b);
-        Self {
-            secret_bytes: Some(b),
-            secret: Some(key),
-            revoked: tokio::sync::RwLock::new(std::collections::HashSet::new()),
-            tokens:  tokio::sync::RwLock::new(tokens),
-        }
-    }
-
-    #[cfg(test)]
-    pub fn issue_test_token(&self, access: AccessLevel) -> String {
-        self.issue_test_token_exp(access, None)
-    }
-
-    #[cfg(test)]
-    pub fn issue_test_token_exp(&self, access: AccessLevel, exp: Option<chrono::DateTime<Utc>>) -> String {
-        let bytes = self.secret_bytes.as_ref().expect("secret not set");
-        let key = jsonwebtoken::EncodingKey::from_secret(bytes);
-        let claims = Claims {
-            iss: Some("adlaire-db".into()),
-            sub: generate_token_id(),
-            iat: Utc::now().timestamp(),
-            exp: exp.map(|t| t.timestamp()),
-            a:   access,
-            dbs: None,
-        };
-        jsonwebtoken::encode(&jsonwebtoken::Header::default(), &claims, &key).unwrap()
-    }
-
-    /// 発行済みトークン一覧を返す（JWT 値は含まない）
-    pub async fn list_tokens(&self) -> Vec<TokenRecord> {
-        self.tokens.read().await.clone()
-    }
-
-    /// 指定 ID のトークンを返す
-    pub async fn get_token(&self, token_id: &str) -> Result<TokenRecord, AppError> {
-        self.tokens.read().await
-            .iter()
-            .find(|t| t.id == token_id)
-            .cloned()
-            .ok_or_else(|| AppError::TokenNotFound(token_id.to_string()))
-    }
-
-    #[cfg(test)]
-    pub fn revoke_sync(&self, token_id: &str) {
-        self.revoked.blocking_write().insert(token_id.to_string());
-    }
+/// Phase 4 スタブ。tokens.json の読み込みは Phase 4 で実装する。
+pub fn load_tokens(_config: &Config) -> anyhow::Result<Vec<()>> {
+    Ok(vec![])
 }
 ```
 
@@ -3534,10 +3666,7 @@ pub fn validate_db_name(name: &str) -> Result<(), AppError> {
     if !DB_NAME_RE.is_match(name) {
         return Err(AppError::InvalidDbName);
     }
-    if RESERVED_NAMES.contains(&name) {
-        return Err(AppError::InvalidDbName);
-    }
-    if name.contains(BRANCH_SEP) {
+    if RESERVED_NAMES.contains(&name) || name.contains(BRANCH_SEP) {
         return Err(AppError::DbReservedName);
     }
     Ok(())
@@ -3555,42 +3684,29 @@ pub fn branch_db_name(source: &str, branch: &str) -> String {
 ```rust
 // db/meta.rs
 
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DatabasesMeta { pub databases: Vec<DbInfo> }
-pub struct TokensMeta    { pub tokens: Vec<TokenRecord> }
 
-pub fn load_databases(data_dir: &Path) -> anyhow::Result<DatabasesMeta> {
-    load_or_init(data_dir.join("meta").join("databases.json"))
-}
-
-pub fn load_tokens(data_dir: &Path) -> anyhow::Result<TokensMeta> {
-    load_or_init(data_dir.join("meta").join("tokens.json"))
-}
-
-fn load_or_init<T>(path: PathBuf) -> anyhow::Result<T>
-where
-    T: serde::de::DeserializeOwned + serde::Serialize + Default,
-{
-    if path.exists() {
-        let s = std::fs::read_to_string(&path)?;
-        Ok(serde_json::from_str(&s)?)
-    } else {
-        let val = T::default();
-        save_atomic(&path, &val)?;
-        Ok(val)
+impl DatabasesMeta {
+    /// meta/databases.json をロードする（なければ空を返す、保存はしない）
+    pub fn load(data_dir: &Path) -> anyhow::Result<Self> {
+        let path = data_dir.join("meta").join("databases.json");
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let bytes = std::fs::read(&path)?;
+        Ok(serde_json::from_slice(&bytes)?)
     }
-}
 
-// tmp → fsync → rename によるアトミック保存（WAL マニフェストと同一パターン）
-pub fn save_atomic<T: serde::Serialize>(path: &Path, val: &T) -> anyhow::Result<()> {
-    let tmp = path.with_extension("tmp");
-    let mut f = std::fs::File::create(&tmp)?;
-    let json = serde_json::to_vec_pretty(val)?;
-    use std::io::Write;
-    f.write_all(&json)?;
-    f.sync_all()?;
-    drop(f);
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    /// meta/databases.json にアトミック保存（json.tmp → rename）
+    pub fn save(&self, data_dir: &Path) -> anyhow::Result<()> {
+        let path = data_dir.join("meta").join("databases.json");
+        let tmp  = path.with_extension("json.tmp");
+        let json = serde_json::to_vec_pretty(self)?;
+        std::fs::write(&tmp, &json)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    }
 }
 ```
 
@@ -3693,108 +3809,69 @@ T2-6: 統合テスト TC-2-1〜TC-2-6（TC-2-5b 含む）
 #### 実装詳細
 
 ```rust
-// handlers/admin/databases.rs
+// http/admin/mod.rs
+// Phase 6〜7 で各ハンドラを実装する。現時点はすべて 501 を返す stub。
 
-/// POST /admin/v1/databases  → DB 作成
-pub async fn create_db(
-    State(state): State<Arc<AppState>>,
-    _auth: AdminAuth,
-    Json(req): Json<CreateDbRequest>,
-) -> Result<(StatusCode, Json<DbInfo>), AppError> {
-    validate_db_name(&req.name)?;
-    let info = state.db_mgr.create(&req.name).await?;
-    Ok((StatusCode::CREATED, Json(info)))
+pub async fn admin_auth_middleware(
+    State(state): State<SharedState>,
+    req: Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if let Some(expected) = &state.config.admin_auth_token {
+        let provided = req
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "));
+        match provided {
+            Some(token) if token == expected.as_str() => {}
+            _ => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    axum::Json(serde_json::json!({
+                        "error": "admin authentication required",
+                        "code":  "AUTH_REQUIRED"
+                    })),
+                ).into_response();
+            }
+        }
+    }
+    next.run(req).await
 }
 
-/// GET /admin/v1/databases  → DB 一覧
-pub async fn list_dbs(
-    State(state): State<Arc<AppState>>,
-    _auth: AdminAuth,
-) -> Result<Json<Vec<DbInfo>>, AppError> {
-    Ok(Json(state.db_mgr.list().await))
+pub mod databases {
+    use axum::http::StatusCode;
+    pub async fn list()   -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+    pub async fn create() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+    pub async fn get()    -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+    pub async fn delete() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
 }
 
-/// GET /admin/v1/databases/:name  → DB 詳細
-pub async fn get_db(
-    State(state): State<Arc<AppState>>,
-    _auth: AdminAuth,
-    Path(name): Path<String>,
-) -> Result<Json<DbInfo>, AppError> {
-    state.db_mgr.get_info(&name).await.map(Json)
+pub mod tokens {
+    use axum::http::StatusCode;
+    pub async fn list()   -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+    pub async fn create() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+    pub async fn get()    -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+    pub async fn revoke() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
 }
 
-/// DELETE /admin/v1/databases/:name  → DB 削除
-pub async fn delete_db(
-    State(state): State<Arc<AppState>>,
-    _auth: AdminAuth,
-    Path(name): Path<String>,
-) -> Result<StatusCode, AppError> {
-    state.db_mgr.delete(&name).await?;
-    Ok(StatusCode::NO_CONTENT)
+pub mod metrics {
+    use axum::http::StatusCode;
+    pub async fn get() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
 }
 
-// handlers/admin/tokens.rs
-
-#[derive(serde::Deserialize)]
-pub struct IssueTokenRequest {
-    pub access: AccessLevel,
-    pub expiry: Option<String>,          // "30d" / "24h" / "3600s" 形式
-    pub dbs:    Option<HashMap<String, AccessLevel>>,
+pub mod backup {
+    use axum::http::StatusCode;
+    pub async fn backup()  -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+    pub async fn restore() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+    pub async fn pitr()    -> StatusCode { StatusCode::NOT_IMPLEMENTED }
 }
 
-#[derive(serde::Serialize)]
-pub struct TokenResponse {
-    pub id:         String,
-    pub token:      String,
-    pub access:     AccessLevel,
-    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-/// POST /admin/v1/tokens  → トークン発行
-pub async fn issue_token(
-    State(state): State<Arc<AppState>>,
-    _auth: AdminAuth,
-    Json(req): Json<IssueTokenRequest>,
-) -> Result<(StatusCode, Json<TokenResponse>), AppError> {
-    // "30d" / "24h" / "3600s" → chrono::DateTime<Utc>
-    let exp: Option<chrono::DateTime<chrono::Utc>> = req.expiry.as_deref()
-        .map(|s| parse_expiry(s).map(|d| chrono::Utc::now() + d))
-        .transpose()
-        .map_err(|e| AppError::Internal(e))?;
-    let (token_id, jwt) = state.auth.issue(req.access.clone(), exp, req.dbs).await?;
-    Ok((StatusCode::CREATED, Json(TokenResponse {
-        id:         token_id,
-        token:      jwt,
-        access:     req.access,
-        expires_at: exp,
-    })))
-}
-
-/// GET /admin/v1/tokens  → トークン一覧（JWT シークレット非公開）
-pub async fn list_tokens(
-    State(state): State<Arc<AppState>>,
-    _auth: AdminAuth,
-) -> Result<Json<Vec<TokenRecord>>, AppError> {
-    Ok(Json(state.auth.list_tokens().await))
-}
-
-/// GET /admin/v1/tokens/:id  → トークン詳細
-pub async fn get_token(
-    State(state): State<Arc<AppState>>,
-    _auth: AdminAuth,
-    Path(id): Path<String>,
-) -> Result<Json<TokenRecord>, AppError> {
-    state.auth.get_token(&id).await.map(Json)
-}
-
-/// DELETE /admin/v1/tokens/:id  → トークン失効（冪等）
-pub async fn revoke_token(
-    State(state): State<Arc<AppState>>,
-    _auth: AdminAuth,
-    Path(id): Path<String>,
-) -> Result<StatusCode, AppError> {
-    state.auth.revoke(&id, &state.config.tokens_path()).await?;
-    Ok(StatusCode::NO_CONTENT)
+pub mod branches {
+    use axum::http::StatusCode;
+    pub async fn list()   -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+    pub async fn create() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+    pub async fn delete() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
 }
 ```
 
