@@ -1610,11 +1610,12 @@ crates/adlaire-server/src/
 // state.rs
 #[derive(Clone)]
 pub struct AppState {
-    pub config:  Arc<Config>,
-    pub db_mgr:  Arc<DbManager>,
-    pub auth:    Arc<AuthState>,
-    pub metrics: Arc<Metrics>,   // Phase 9～
-    pub role:    ServerRole,     // Phase 10～（デフォルト Standalone）
+    pub config:      Arc<Config>,
+    pub db_mgr:      Arc<DbManager>,
+    pub auth:        Arc<AuthState>,
+    pub metrics:     Arc<Metrics>,                    // Phase 9～
+    pub role:        ServerRole,                      // Phase 10～（デフォルト Standalone）
+    pub replication: Option<Arc<ReplicationState>>,   // Phase 10～（Replica のみ Some）
 }
 
 pub type SharedState = Arc<AppState>;
@@ -1770,15 +1771,22 @@ impl AuthState {
 
     /// トークン発行: JWT 生成 + tokens.json 追記
     /// dbs: None = 全 DB アクセス、Some = DB スコープ付き
+    /// 戻り値: (token_id, jwt_string)
     pub async fn issue(
         &self,
         access: AccessLevel,
         exp:    Option<chrono::DateTime<chrono::Utc>>,
         dbs:    Option<HashMap<String, AccessLevel>>,
-    ) -> Result<String, AppError>;
+    ) -> Result<(String, String), AppError>;
 
     /// トークン失効: revoked フラグ更新 + tokens.json 書き直し
     pub async fn revoke(&self, token_id: &str, meta_path: &Path) -> Result<(), AppError>;
+
+    /// 発行済みトークン一覧（JWT シークレット値は含まない）
+    pub async fn list_tokens(&self) -> Vec<TokenRecord>;
+
+    /// 指定 ID のトークンを返す（存在しない場合は TokenNotFound）
+    pub async fn get_token(&self, token_id: &str) -> Result<TokenRecord, AppError>;
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1986,10 +1994,10 @@ pub struct FrameMeta {
 }
 
 impl Manifest {
-    pub fn load(path: &std::path::Path) -> anyhow::Result<Self>;
+    pub async fn load(path: &std::path::Path) -> anyhow::Result<Self>;
 
-    /// 一時ファイルへ書き込み → fsync → rename（POSIX アトミック）
-    pub fn save_atomic(&self, path: &std::path::Path) -> anyhow::Result<()>;
+    /// 一時ファイルへ書き込み → rename（POSIX アトミック）
+    pub async fn save_atomic(&self, path: &std::path::Path) -> anyhow::Result<()>;
 
     /// timestamp 以前の全フレームを返す
     pub fn frames_before(&self, ts: chrono::DateTime<chrono::Utc>) -> Vec<&FrameMeta>;
@@ -2203,9 +2211,9 @@ fn run_token_create(args: TokenCreateArgs) -> anyhow::Result<()> {
         .map(|d| chrono::Utc::now() + d);
     let auth = AuthState::load_with(&secret, vec![]);
     // dbs は token create サブコマンドでは None（全 DB アクセス）
-    let token = tokio::runtime::Handle::current()
+    let (_token_id, jwt) = tokio::runtime::Handle::current()
         .block_on(auth.issue(access, exp, None))?;
-    println!("{token}");
+    println!("{jwt}");
     Ok(())
 }
 
@@ -2268,6 +2276,11 @@ pub struct TomlReplication {
 }
 
 impl Config {
+    /// tokens.json のパスを返す
+    pub fn tokens_path(&self) -> std::path::PathBuf {
+        self.data_dir.join("meta").join("tokens.json")
+    }
+
     pub fn resolve(args: &ServeArgs) -> anyhow::Result<Arc<Config>> {
         // 1. config.toml 読み込み（存在しなければ Default）
         let toml_path = args.config.clone()
@@ -2982,32 +2995,38 @@ impl AuthState {
                 .ok_or_else(|| AppError::TokenNotFound(token_id.to_string()))?;
             record.revoked    = true;
             record.revoked_at = Some(chrono::Utc::now());
-            let meta = TokensMeta { tokens: tokens.clone() };
-            save_atomic(meta_path, &meta).map_err(AppError::Internal)?;
+            let meta      = TokensMeta { tokens: tokens.clone() };
+            let path_copy = meta_path.to_path_buf();
+            tokio::task::spawn_blocking(move || save_atomic(&path_copy, &meta))
+                .await
+                .map_err(|e| AppError::Internal(e.into()))??;
         }
         Ok(())
     }
 
+    // 戻り値: (token_id, jwt_string)
     pub async fn issue(
         &self,
         access: AccessLevel,
         exp:    Option<chrono::DateTime<chrono::Utc>>,
         dbs:    Option<HashMap<String, AccessLevel>>,
-    ) -> Result<String, AppError> {
+    ) -> Result<(String, String), AppError> {
         let secret = self.secret_bytes.as_ref().ok_or(AppError::AuthDisabled)?;
+        let token_id = generate_token_id();
         let claims = Claims {
             iss: Some("adlaire-db".into()),
-            sub: generate_token_id(),
+            sub: token_id.clone(),
             iat: chrono::Utc::now().timestamp(),
             exp: exp.map(|e| e.timestamp()),
             a:   access,
             dbs,
         };
-        jsonwebtoken::encode(
+        let jwt = jsonwebtoken::encode(
             &jsonwebtoken::Header::default(),
             &claims,
             &jsonwebtoken::EncodingKey::from_secret(secret),
-        ).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))
+        ).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
+        Ok((token_id, jwt))
     }
 
     // テスト用ヘルパー（#[cfg(test)]）
@@ -3040,6 +3059,20 @@ impl AuthState {
             dbs: None,
         };
         jsonwebtoken::encode(&jsonwebtoken::Header::default(), &claims, &key).unwrap()
+    }
+
+    /// 発行済みトークン一覧を返す（JWT 値は含まない）
+    pub async fn list_tokens(&self) -> Vec<TokenRecord> {
+        self.tokens.read().await.clone()
+    }
+
+    /// 指定 ID のトークンを返す
+    pub async fn get_token(&self, token_id: &str) -> Result<TokenRecord, AppError> {
+        self.tokens.read().await
+            .iter()
+            .find(|t| t.id == token_id)
+            .cloned()
+            .ok_or_else(|| AppError::TokenNotFound(token_id.to_string()))
     }
 
     #[cfg(test)]
@@ -3580,13 +3613,15 @@ pub async fn issue_token(
     _auth: AdminAuth,
     Json(req): Json<IssueTokenRequest>,
 ) -> Result<(StatusCode, Json<TokenResponse>), AppError> {
-    let exp = req.expiry.as_deref().map(parse_expiry).transpose()?;
-    let token = state.auth.issue(req.access.clone(), exp, req.dbs).await?;
-    // JWT の sub クレームが token ID（tok_xxx）
-    let claims = state.auth.verify(&token).await?;
+    // "30d" / "24h" / "3600s" → chrono::DateTime<Utc>
+    let exp: Option<chrono::DateTime<chrono::Utc>> = req.expiry.as_deref()
+        .map(|s| parse_expiry(s).map(|d| chrono::Utc::now() + d))
+        .transpose()
+        .map_err(|e| AppError::Internal(e))?;
+    let (token_id, jwt) = state.auth.issue(req.access.clone(), exp, req.dbs).await?;
     Ok((StatusCode::CREATED, Json(TokenResponse {
-        id:         claims.sub.clone(),
-        token,
+        id:         token_id,
+        token:      jwt,
         access:     req.access,
         expires_at: exp,
     })))
@@ -4156,6 +4191,8 @@ pub struct ReplicationState {
     pub frame_tx:      broadcast::Sender<WalFrame>,
     pub current_frame: std::sync::atomic::AtomicU64,
     pub replicas:      dashmap::DashMap<String, ReplicaStatus>,
+    /// レプリカのみ: primary との差分フレーム数（primary_frame - synced_frame）
+    pub lag_frames:    std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone, Debug)]
@@ -4277,22 +4314,18 @@ pub async fn maybe_redirect_write(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    if state.config.role == ServerRole::Replica {
+    if let ServerRole::Replica { primary_url } = &state.role {
         if is_mutating_request(&req) {
-            if let Some(primary_url) = &state.config.primary_url {
-                let target = format!(
-                    "{}{}",
-                    primary_url.trim_end_matches('/'),
-                    req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("")
-                );
-                return axum::response::Response::builder()
-                    .status(axum::http::StatusCode::TEMPORARY_REDIRECT)
-                    .header(axum::http::header::LOCATION, target)
-                    .body(axum::body::Body::empty())
-                    .unwrap();
-            }
-            // primary_url 未設定 = プライマリ到達不能
-            return AppError::ReplicationTimeout.into_response();
+            let target = format!(
+                "{}{}",
+                primary_url.as_str().trim_end_matches('/'),
+                req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("")
+            );
+            return axum::response::Response::builder()
+                .status(axum::http::StatusCode::TEMPORARY_REDIRECT)
+                .header(axum::http::header::LOCATION, target)
+                .body(axum::body::Body::empty())
+                .unwrap();
         }
     }
     next.run(req).await
@@ -4316,18 +4349,15 @@ pub struct HealthResponse {
 }
 
 pub async fn handle(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
-    let lag = if state.config.role == ServerRole::Replica {
-        Some(state.replication.lag_frames.load(std::sync::atomic::Ordering::Relaxed))
-    } else {
-        None
-    };
+    let lag = state.replication.as_ref()
+        .map(|r| r.lag_frames.load(std::sync::atomic::Ordering::Relaxed));
     let status = match lag {
         Some(lag) if lag > 1000 => "degraded",
         _ => "ok",
     };
     Json(HealthResponse {
         status,
-        role: state.config.role.clone(),
+        role: state.role.clone(),
         replication_lag_frames: lag,
     })
 }
