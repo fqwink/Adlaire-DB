@@ -1,8 +1,8 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.29  
+**バージョン：** 0.30  
 **ステータス：** 設計中  
-**最終更新：** 2026-09-10  
+**最終更新：** 2026-09-11  
 
 ---
 
@@ -240,6 +240,9 @@ clap            = { version = "4", features = ["derive"] } # CLI パース
 tracing         = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] } # 構造化ログ出力
 tokio-tungstenite  = "0.21"                                # Phase 3: WebSocket
+toml            = "0.8"                                    # config.toml パース
+libc            = "0.2"                                    # flock による排他ロック
+base64          = "0.22"                                   # Blob フィールドの Base64 エンコード
 
 [build-dependencies]
 # libsql-sys が SQLite をコンパイルするため cc が必要
@@ -319,6 +322,9 @@ sqld が独自の hrana 実装を持つ場合、その型をそのまま流用�
 | `chrono` | 0.4 | `DateTime<Utc>`・タイムスタンプ処理 | 1 |
 | `regex` | 1 | DB 名バリデーション（`LazyLock<Regex>`） | 1 |
 | `tokio-tungstenite` | 0.21 | WebSocket フレーム送受信 | 3 |
+| `toml` | 0.8 | `config.toml` デシリアライズ | 1 |
+| `libc` | 0.2 | `flock` による排他プロセスロック | 1 |
+| `base64` | 0.22 | Blob フィールドの Base64 エンコード | 1 |
 | `dashmap` | 5 | `Metrics`・`ReplicationState` の並行マップ | 3 |
 | `url` | 2 | `ServerRole::Replica` の `primary_url` 型 | 4 |
 | `bytes` | 1 | WAL フレームバッファ（`WalFrame::data`） | 4 |
@@ -2902,9 +2908,10 @@ impl Claims {
 }
 
 pub struct AuthState {
-    secret:  Option<jsonwebtoken::DecodingKey>,
-    revoked: tokio::sync::RwLock<std::collections::HashSet<String>>,  // token_id
-    tokens:  tokio::sync::RwLock<Vec<TokenRecord>>,
+    secret_bytes: Option<Vec<u8>>,                                    // 発行・テスト用生バイト
+    secret:       Option<jsonwebtoken::DecodingKey>,
+    revoked:      tokio::sync::RwLock<std::collections::HashSet<String>>,  // token_id
+    tokens:       tokio::sync::RwLock<Vec<TokenRecord>>,
 }
 
 impl AuthState {
@@ -3399,6 +3406,18 @@ fn sqld_error_code(e: &sqld::Error) -> String {
         "SQLITE_ERROR".into()
     }
 }
+
+fn sqld_val_to_hrana(v: sqld::Value) -> Value {
+    match v {
+        sqld::Value::Null       => Value::Null,
+        sqld::Value::Integer(n) => Value::Integer { value: n.to_string() },
+        sqld::Value::Real(f)    => Value::Real    { value: f },
+        sqld::Value::Text(s)    => Value::Text    { value: s },
+        sqld::Value::Blob(b)    => Value::Blob    {
+            value: base64::engine::general_purpose::STANDARD.encode(&b),
+        },
+    }
+}
 ```
 
 ### 14.7 DB 名バリデーション
@@ -3742,5 +3761,521 @@ async fn tc3_jwt_auth() {
     let bad = srv.pipeline_with_token("eyJ.eyJ.badsig", minimal_select()).await;
     assert_eq!(bad.status(), 401);
     assert_eq!(bad.json::<serde_json::Value>().await.unwrap()["code"], "AUTH_INVALID");
+}
+```
+
+---
+
+### 14.12 CLI 構造体
+
+```rust
+// main.rs
+#[derive(Parser)]
+#[command(name = "adlaire-db", version, about = "Self-hosted libSQL-compatible DB server")]
+pub struct Cli { #[command(subcommand)] pub command: CliCommand }
+
+#[derive(Subcommand)]
+pub enum CliCommand {
+    Serve(ServeArgs),
+    Token { #[command(subcommand)] cmd: TokenSubcommand },
+}
+
+#[derive(Subcommand)]
+pub enum TokenSubcommand { Create(TokenCreateArgs) }
+
+#[derive(Parser)]
+pub struct ServeArgs {
+    #[arg(long, required = true)] pub data:                    PathBuf,
+    #[arg(long)] pub port:                                     Option<u16>,
+    #[arg(long)] pub admin_port:                               Option<u16>,
+    #[arg(long)] pub config:                                   Option<PathBuf>,
+    #[arg(long)] pub auth_jwt_secret:                          Option<String>,
+    #[arg(long)] pub auth_jwt_secret_file:                     Option<PathBuf>,
+    #[arg(long)] pub log_level:                                Option<String>,
+    #[arg(long, default_value_t = false)] pub skip_integrity_check: bool,
+    #[arg(long)] pub replication_write_mode:                   Option<String>,
+    #[arg(long)] pub busy_timeout:                             Option<u64>,
+    #[arg(long)] pub shutdown_timeout:                         Option<u64>,
+}
+
+#[derive(Parser)]
+pub struct TokenCreateArgs {
+    #[arg(long, required = true)] pub secret: String,
+    #[arg(long, default_value = "rw")] pub access: String,
+    #[arg(long)] pub expiry: Option<String>,
+    #[arg(long, value_name = "DB:ACCESS")] pub db: Vec<String>,
+}
+```
+
+`--data` のみ required。その他はすべて `Option<T>` にして 3-way マージで解決する。
+
+---
+
+### 14.13 Config 解決ロジック
+
+```rust
+// config.rs
+
+// TOML 構造体はすべてのフィールドを Option<T> にする
+#[derive(Debug, serde::Deserialize, Default)]
+pub struct TomlConfig {
+    pub server:      Option<TomlServer>,
+    pub auth:        Option<TomlAuth>,
+    pub admin:       Option<TomlAdmin>,
+    pub storage:     Option<TomlStorage>,
+    pub replication: Option<TomlReplication>,
+}
+
+#[derive(Debug, serde::Deserialize, Default)]
+pub struct TomlServer {
+    pub port:             Option<u16>,
+    pub log_level:        Option<String>,
+    pub busy_timeout_ms:  Option<u64>,
+    pub shutdown_timeout: Option<u64>,
+}
+
+#[derive(Debug, serde::Deserialize, Default)]
+pub struct TomlAuth {
+    pub jwt_secret:      Option<String>,
+    pub jwt_secret_file: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, Default)]
+pub struct TomlAdmin {
+    pub port: Option<u16>,
+}
+
+#[derive(Debug, serde::Deserialize, Default)]
+pub struct TomlStorage {
+    pub wal_mode:              Option<String>,
+    pub skip_integrity_check:  Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, Default)]
+pub struct TomlReplication {
+    pub write_mode: Option<String>,
+}
+
+impl Config {
+    pub fn resolve(args: &ServeArgs) -> anyhow::Result<Arc<Config>> {
+        // 1. config.toml 読み込み（存在しなければ Default）
+        let toml_path = args.config.clone()
+            .unwrap_or_else(|| args.data.join("config.toml"));
+        let toml: TomlConfig = if toml_path.exists() {
+            let s = std::fs::read_to_string(&toml_path)?;
+            toml::from_str(&s)?
+        } else {
+            TomlConfig::default()
+        };
+        let srv  = toml.server.unwrap_or_default();
+        let auth = toml.auth.unwrap_or_default();
+        let adm  = toml.admin.unwrap_or_default();
+        let sto  = toml.storage.unwrap_or_default();
+        let rep  = toml.replication.unwrap_or_default();
+
+        // 2. JWT シークレット解決（優先度順）
+        //    --auth-jwt-secret-file > --auth-jwt-secret
+        //    > ADLAIRE_JWT_SECRET 環境変数
+        //    > toml jwt_secret > toml jwt_secret_file
+        let raw_secret: Option<Vec<u8>> = if let Some(p) = &args.auth_jwt_secret_file {
+            Some(std::fs::read(p)?)
+        } else if let Some(s) = &args.auth_jwt_secret {
+            Some(s.as_bytes().to_vec())
+        } else if let Ok(s) = std::env::var("ADLAIRE_JWT_SECRET") {
+            Some(s.into_bytes())
+        } else if let Some(s) = &auth.jwt_secret {
+            Some(s.as_bytes().to_vec())
+        } else if let Some(p) = &auth.jwt_secret_file {
+            Some(std::fs::read(p)?)
+        } else {
+            None
+        };
+
+        // 3. シークレット長チェック（32 バイト未満は拒否）
+        if let Some(ref b) = raw_secret {
+            anyhow::ensure!(b.len() >= 32, "JWT secret must be at least 32 bytes");
+        }
+
+        // 4. 3-way マージ（CLI > TOML > デフォルト）
+        let port       = args.port.or(srv.port).unwrap_or(8080);
+        let admin_port = args.admin_port.or(adm.port).unwrap_or(9090);
+        let log_level  = args.log_level.as_deref()
+            .or(srv.log_level.as_deref())
+            .unwrap_or("info")
+            .to_string();
+        let busy_timeout = Duration::from_millis(
+            args.busy_timeout.or(srv.busy_timeout_ms).unwrap_or(5000),
+        );
+        let shutdown_timeout = Duration::from_secs(
+            args.shutdown_timeout.or(srv.shutdown_timeout).unwrap_or(30),
+        );
+        let skip_integrity_check = args.skip_integrity_check
+            || sto.skip_integrity_check.unwrap_or(false);
+        let wal_mode  = parse_wal_mode(sto.wal_mode.as_deref())?;
+        let write_mode = match &args.replication_write_mode {
+            Some(s) => parse_write_mode(s)?,
+            None    => rep.write_mode.as_deref()
+                           .map(parse_write_mode)
+                           .transpose()?
+                           .unwrap_or(ReplicationWriteMode::Primary),
+        };
+
+        Ok(Arc::new(Config {
+            data_dir: args.data.clone(),
+            port, admin_port, log_level, busy_timeout, shutdown_timeout,
+            skip_integrity_check, wal_mode, write_mode,
+            jwt_secret_bytes: raw_secret,
+        }))
+    }
+}
+
+fn parse_wal_mode(s: Option<&str>) -> anyhow::Result<WalCheckpointMode> {
+    match s.unwrap_or("wal2") {
+        "wal"  => Ok(WalCheckpointMode::Wal),
+        "wal2" => Ok(WalCheckpointMode::Wal2),
+        other  => anyhow::bail!("unknown wal_mode: {other}"),
+    }
+}
+
+fn parse_write_mode(s: &str) -> anyhow::Result<ReplicationWriteMode> {
+    match s {
+        "primary" => Ok(ReplicationWriteMode::Primary),
+        "replica" => Ok(ReplicationWriteMode::Replica),
+        other     => anyhow::bail!("unknown replication write_mode: {other}"),
+    }
+}
+```
+
+---
+
+### 14.14 DataDir・ProcessLock 実装
+
+```rust
+// data_dir.rs
+
+impl DataDir {
+    pub fn init(data_dir: &Path) -> anyhow::Result<()> {
+        for sub in &["", "databases", "meta"] {
+            let p = data_dir.join(sub);
+            std::fs::create_dir_all(&p)?;
+            std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+
+            // 実際のモードを確認し、0o700 より広ければ警告
+            let mode = std::fs::metadata(&p)?.permissions().mode() & 0o777;
+            if mode > 0o700 {
+                tracing::warn!(path = %p.display(), mode = format!("{:04o}", mode),
+                    "data directory permissions are broader than 0700");
+            }
+        }
+        Ok(())
+    }
+}
+
+// プロセス多重起動防止
+pub struct ProcessLock {
+    _file: std::fs::File,  // Drop 時に flock が自動解放される
+}
+
+impl ProcessLock {
+    pub fn acquire(data_dir: &Path) -> anyhow::Result<Self> {
+        use std::os::unix::io::AsRawFd;
+        let file = std::fs::OpenOptions::new()
+            .create(true).write(true)
+            .open(data_dir.join(".lock"))?;
+        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if ret != 0 {
+            anyhow::bail!("another adlaire-db process is already running in {:?}", data_dir);
+        }
+        Ok(Self { _file: file })
+    }
+}
+```
+
+---
+
+### 14.15 HTTP ハンドラ実装
+
+```rust
+// handlers/pipeline.rs
+
+// 単一 DB ハンドラ（Phase 1）
+pub async fn handle(
+    State(state): State<Arc<AppState>>,
+    Authenticated(claims): Authenticated,
+    Json(req): Json<PipelineRequest>,
+) -> Result<Json<PipelineResponse>, AppError> {
+    let results = execute_pipeline(&state.db, &claims, &req.requests).await?;
+    Ok(Json(PipelineResponse { baton: None, base_url: None, results }))
+}
+
+// マルチ DB ハンドラ（Phase 2）
+pub async fn handle_db(
+    State(state): State<Arc<AppState>>,
+    Authenticated(claims): Authenticated,
+    Path(db_name): Path<String>,
+    Json(req): Json<PipelineRequest>,
+) -> Result<Json<PipelineResponse>, AppError> {
+    let db = state.db_pool.get(&db_name)
+        .ok_or(AppError::NotFound(format!("database '{}' not found", db_name)))?;
+    let results = execute_pipeline(&db, &claims, &req.requests).await?;
+    Ok(Json(PipelineResponse { baton: None, base_url: None, results }))
+}
+
+async fn execute_pipeline(
+    db: &sqld::Database,
+    claims: &Claims,
+    requests: &[StreamRequest],
+) -> Result<Vec<StreamResult>, AppError> {
+    let conn = db.connect().map_err(AppError::Sqld)?;
+    let mut results = Vec::with_capacity(requests.len());
+    for req in requests {
+        let result = match req {
+            StreamRequest::Execute { stmt } => {
+                // 書き込み文の場合は権限チェック
+                if is_write_stmt(&stmt.sql) && !claims.can_write() {
+                    Err(sqld::Error::msg("write not permitted"))
+                } else {
+                    conn.execute(&stmt.sql, stmt.args.clone()).map_err(Into::into)
+                }
+            }
+            StreamRequest::Close => break,
+        };
+        results.push(to_stream_result(result));
+    }
+    Ok(results)
+}
+
+// 書き込み文プレフィックス判定
+// 注意: CTE を使った書き込み（WITH ... INSERT）は検出できない。
+//       SQLite が SQLITE_READONLY を返すため実害はない。
+fn is_write_stmt(sql: &str) -> bool {
+    let upper = sql.trim_start().to_ascii_uppercase();
+    matches!(upper.split_whitespace().next().unwrap_or(""),
+        "INSERT" | "UPDATE" | "DELETE" | "CREATE" | "DROP" | "ALTER" | "REPLACE" | "PRAGMA"
+    )
+}
+
+// ヘルスチェックハンドラ
+// handlers/health.rs
+pub async fn handle() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+```
+
+---
+
+### 14.16 AuthState 実装
+
+```rust
+// auth/state.rs
+
+impl AuthState {
+    pub fn is_disabled(&self) -> bool { self.secret.is_none() }
+
+    pub fn load(config: &Config, tokens: Vec<TokenRecord>) -> Self {
+        let (secret_bytes, secret) = match &config.jwt_secret_bytes {
+            Some(b) => {
+                let key = jsonwebtoken::DecodingKey::from_secret(b);
+                (Some(b.clone()), Some(key))
+            }
+            None => (None, None),
+        };
+        Self {
+            secret_bytes,
+            secret,
+            revoked: tokio::sync::RwLock::new(std::collections::HashSet::new()),
+            tokens:  tokio::sync::RwLock::new(tokens),
+        }
+    }
+
+    pub fn verify(&self, raw_token: &str) -> Result<Claims, AppError> {
+        let key = self.secret.as_ref().ok_or(AppError::AuthDisabled)?;
+        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+        validation.validate_exp = false;  // 手動で exp を検証する
+
+        let data = jsonwebtoken::decode::<Claims>(raw_token, key, &validation)
+            .map_err(|_| AppError::AuthInvalid)?;
+        let claims = data.claims;
+
+        // exp チェック
+        if let Some(exp) = claims.exp {
+            if exp < chrono::Utc::now().timestamp() {
+                return Err(AppError::AuthExpired);
+            }
+        }
+
+        // 失効チェック
+        let revoked = self.revoked.blocking_read();
+        if let Some(ref jti) = claims.jti {
+            if revoked.contains(jti) {
+                return Err(AppError::AuthRevoked);
+            }
+        }
+
+        Ok(claims)
+    }
+
+    pub async fn revoke(&self, token_id: &str, meta_path: &Path) -> Result<(), AppError> {
+        {
+            let mut revoked = self.revoked.write().await;
+            revoked.insert(token_id.to_string());
+        }
+        // tokens リストから該当エントリを削除して永続化
+        {
+            let mut tokens = self.tokens.write().await;
+            tokens.retain(|t| t.id != token_id);
+            let meta = TokensMeta { tokens: tokens.clone() };
+            save_atomic(meta_path, &meta).map_err(AppError::Internal)?;
+        }
+        Ok(())
+    }
+
+    // テスト用ヘルパー（#[cfg(test)]）
+    #[cfg(test)]
+    pub fn load_with(secret: &str, tokens: Vec<TokenRecord>) -> Self {
+        let b = secret.as_bytes().to_vec();
+        let key = jsonwebtoken::DecodingKey::from_secret(&b);
+        Self {
+            secret_bytes: Some(b),
+            secret: Some(key),
+            revoked: tokio::sync::RwLock::new(std::collections::HashSet::new()),
+            tokens:  tokio::sync::RwLock::new(tokens),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn issue_test_token(&self, access: &str) -> String {
+        self.issue_test_token_exp(access, None)
+    }
+
+    #[cfg(test)]
+    pub fn issue_test_token_exp(&self, access: &str, exp: Option<i64>) -> String {
+        let bytes = self.secret_bytes.as_ref().expect("secret not set");
+        let key = jsonwebtoken::EncodingKey::from_secret(bytes);
+        let claims = Claims {
+            sub: "test".into(),
+            access: access.into(),
+            jti: Some(generate_token_id()),
+            exp,
+            dbs: None,
+        };
+        jsonwebtoken::encode(&jsonwebtoken::Header::default(), &claims, &key).unwrap()
+    }
+
+    #[cfg(test)]
+    pub fn revoke_sync(&self, token_id: &str) {
+        self.revoked.blocking_write().insert(token_id.to_string());
+    }
+}
+```
+
+---
+
+### 14.17 db/meta.rs 実装
+
+```rust
+// db/meta.rs
+
+pub struct DatabasesMeta { pub databases: Vec<DbInfo> }
+pub struct TokensMeta    { pub tokens: Vec<TokenRecord> }
+
+pub fn load_databases(data_dir: &Path) -> anyhow::Result<DatabasesMeta> {
+    load_or_init(data_dir.join("meta").join("databases.json"))
+}
+
+pub fn load_tokens(data_dir: &Path) -> anyhow::Result<TokensMeta> {
+    load_or_init(data_dir.join("meta").join("tokens.json"))
+}
+
+fn load_or_init<T>(path: PathBuf) -> anyhow::Result<T>
+where
+    T: serde::de::DeserializeOwned + serde::Serialize + Default,
+{
+    if path.exists() {
+        let s = std::fs::read_to_string(&path)?;
+        Ok(serde_json::from_str(&s)?)
+    } else {
+        let val = T::default();
+        save_atomic(&path, &val)?;
+        Ok(val)
+    }
+}
+
+// tmp → fsync → rename によるアトミック保存（WAL マニフェストと同一パターン）
+pub fn save_atomic<T: serde::Serialize>(path: &Path, val: &T) -> anyhow::Result<()> {
+    let tmp = path.with_extension("tmp");
+    let mut f = std::fs::File::create(&tmp)?;
+    let json = serde_json::to_vec_pretty(val)?;
+    use std::io::Write;
+    f.write_all(&json)?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+```
+
+---
+
+### 14.18 Expiry パース・トークン ID 生成
+
+```rust
+// token/util.rs
+
+/// "30d" / "24h" / "3600s" / "90m" 形式の期限文字列を chrono::Duration に変換する
+pub fn parse_expiry(s: &str) -> anyhow::Result<chrono::Duration> {
+    // 最初のアルファベット文字の位置で数値部分とサフィックスを分割
+    let split_pos = s.find(|c: char| c.is_alphabetic())
+        .ok_or_else(|| anyhow::anyhow!("expiry must end with a unit (s/m/h/d): {s}"))?;
+    let (num_str, unit) = s.split_at(split_pos);
+    let n: i64 = num_str.parse()
+        .map_err(|_| anyhow::anyhow!("invalid expiry number: {num_str}"))?;
+    let dur = match unit {
+        "s" => chrono::Duration::seconds(n),
+        "m" => chrono::Duration::minutes(n),
+        "h" => chrono::Duration::hours(n),
+        "d" => chrono::Duration::days(n),
+        _   => anyhow::bail!("unknown expiry unit '{}' (use s/m/h/d)", unit),
+    };
+    Ok(dur)
+}
+
+/// /dev/urandom から 8 バイト読み取り "tok_{hex16}" 形式の ID を生成する
+pub fn generate_token_id() -> String {
+    let mut buf = [0u8; 8];
+    let mut f = std::fs::File::open("/dev/urandom").expect("cannot open /dev/urandom");
+    use std::io::Read;
+    f.read_exact(&mut buf).expect("cannot read /dev/urandom");
+    format!("tok_{}", hex::encode(buf))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_expiry_days() {
+        assert_eq!(parse_expiry("30d").unwrap(), chrono::Duration::days(30));
+    }
+
+    #[test]
+    fn parse_expiry_hours() {
+        assert_eq!(parse_expiry("24h").unwrap(), chrono::Duration::hours(24));
+    }
+
+    #[test]
+    fn parse_expiry_seconds() {
+        assert_eq!(parse_expiry("3600s").unwrap(), chrono::Duration::seconds(3600));
+    }
+
+    #[test]
+    fn parse_expiry_invalid_unit() {
+        assert!(parse_expiry("10y").is_err());
+    }
+
+    #[test]
+    fn parse_expiry_no_unit() {
+        assert!(parse_expiry("3600").is_err());
+    }
 }
 ```
