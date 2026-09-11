@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.35  
+**バージョン：** 0.36  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-11  
 
@@ -192,121 +192,141 @@ adlaire-db バイナリ（Rust）
 
 #### 3.3.1 Cargo ワークスペース構成
 
-Adlaire DB のリポジトリは libSQL フォークを Git submodule として管理し、Cargo workspace で参照する。
+Adlaire DB のリポジトリはシングルワークスペースで管理する。libSQL は crates.io の `libsql` crate（embedded SQLite モード）を使用する（git submodule は使わない）。
 
 ```
 adlaire-db/              ← このリポジトリ
-├── Cargo.toml           ← workspace root
-├── crates/
-│   └── adlaire-server/  ← Adlaire サーバー層
-│       ├── Cargo.toml
-│       └── src/
-└── libsql/              ← git submodule (fqwink/libsql fork)
-    ├── sqld/            ← sqld crate
-    └── libsql-sys/      ← SQLite バインディング
+├── Cargo.toml           ← workspace root（[workspace.dependencies] で依存一括管理）
+├── adlaire-server/      ← Adlaire サーバー層 crate
+│   ├── Cargo.toml       ← { workspace = true } 参照のみ
+│   └── src/
+└── Cargo.lock           ← リポジトリにコミットして依存をロック
 ```
 
 **workspace Cargo.toml：**
 
 ```toml
 [workspace]
-members = [
-    "crates/adlaire-server",
-    "libsql/sqld",
-]
+members = ["adlaire-server"]
 resolver = "2"
+
+[workspace.dependencies]
+anyhow             = "1"
+async-trait        = "0.1"
+base64             = "0.22"
+axum               = { version = "0.7", features = ["json", "macros"] }
+chrono             = { version = "0.4", features = ["serde"] }
+clap               = { version = "4", features = ["derive"] }
+libc               = "0.2"
+libsql             = "0.6"   # embedded SQLite（WAL モード）
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+thiserror          = "1"
+tokio              = { version = "1", features = ["full"] }
+toml               = "0.8"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+uuid               = { version = "1", features = ["v4"] }
+regex              = "1"
+# Phase 4〜 で追加予定
+# jsonwebtoken = "9"
+# Phase 8〜 で追加予定
+# tokio-tungstenite = "0.21"
+# Phase 9〜 で追加予定
+# dashmap = "5"
+# Phase 10〜 で追加予定
+# url   = "2"
+# bytes = "1"
+# crc32fast = "1"
+# hex   = "0.4"
 ```
 
-**adlaire-server/Cargo.toml 主要依存：**
+**adlaire-server/Cargo.toml：**
 
 ```toml
+[package]
+name    = "adlaire-server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "adlaire-db"
+path = "src/main.rs"
+
 [dependencies]
-sqld            = { path = "../../libsql/sqld", default-features = false, features = ["core"] }
-tokio           = { version = "1", features = ["full"] }
-axum            = "0.7"
-tower           = "0.4"
-serde           = { version = "1", features = ["derive"] }
-serde_json      = "1"
-jsonwebtoken    = "9"
-thiserror       = "1"                                      # AppError derive
-anyhow          = "1"                                      # 内部エラーラッパー・main() 戻り値
-chrono          = { version = "0.4", features = ["serde"] } # DateTime<Utc>
-crc32fast       = "1"                                      # WAL フレームチェックサム
-dashmap         = "5"                                      # Metrics・ReplicationState
-regex           = "1"                                      # DB 名バリデーション
-url             = "2"                                      # ServerRole::Replica の primary_url
-bytes           = "1"                                      # WalFrame::data
-clap            = { version = "4", features = ["derive"] } # CLI パース
-tracing         = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json"] } # 構造化ログ出力
-tokio-tungstenite  = "0.21"                                # Phase 8: WebSocket
-toml            = "0.8"                                    # config.toml パース
-libc            = "0.2"                                    # flock による排他ロック
-base64          = "0.22"                                   # Blob フィールドの Base64 エンコード
-hex             = "0.4"                                    # generate_token_id() の tok_ プレフィックス生成
-uuid            = { version = "1", features = ["v4"] }     # DbInfo::id 生成
-
-[dev-dependencies]
-reqwest         = { version = "0.12", features = ["json"] } # TestServer HTTP クライアント
-tempfile        = "3"                                       # TestServer 一時ディレクトリ
-
-[build-dependencies]
-# libsql-sys が SQLite をコンパイルするため cc が必要
-cc = "1"
+anyhow             = { workspace = true }
+async-trait        = { workspace = true }
+base64             = { workspace = true }
+axum               = { workspace = true }
+chrono             = { workspace = true }
+clap               = { workspace = true }
+libc               = { workspace = true }
+libsql             = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+thiserror          = { workspace = true }
+tokio              = { workspace = true }
+toml               = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid               = { workspace = true }
+regex              = { workspace = true }
 ```
 
-#### 3.3.2 sqld との境界（呼び出しインターフェース）
+#### 3.3.2 libsql crate との境界（呼び出しインターフェース）
 
-Adlaire サーバー層が sqld に対して行う操作は以下の 3 種類に限定する（Phase 1 時点）。
+Adlaire サーバー層が `libsql` crate に対して行う操作は以下の 3 種類に限定する（Phase 3 時点）。
 
 **① DB オープン（起動時・Phase 6 は DB 作成時）**
 
 ```rust
-// 擬似コード。実際の型名は libSQL フォーク実装時に確定する
-let db: sqld::Database = sqld::Database::open(path, sqld::Config {
-    journal_mode: JournalMode::Wal,
-    busy_timeout: Duration::from_millis(5000),
-    ..Default::default()
-})?;
+// db/sqld_adapter.rs の RealSqldAdapter::open() 参照（§14.19）
+let db = libsql::Builder::new_local(path).build().await?;
+let conn = db.connect()?;
+let _ = conn.query("PRAGMA journal_mode=WAL", ()).await?;
+conn.execute("PRAGMA synchronous=NORMAL", ()).await?;
+let _ = conn.query(&format!("PRAGMA busy_timeout={busy_timeout_ms}"), ()).await?;
+// skip_integrity_check=false のとき:
+// let mut rows = conn.query("PRAGMA integrity_check", ()).await?;
+// → ok 以外なら Error: database integrity check failed
 ```
 
 **② SQL 実行（hrana-http v2 pipeline リクエストごと）**
 
 ```rust
-let conn: sqld::Connection = db.connect()?;
-let result: sqld::QueryResult = conn.execute_batch(&statements)?;
-// result を hrana-http v2 レスポンス形式に変換して返す
+// execute() は呼び出しのたびに新規 Connection を生成する（§14.19 注記参照）
+let conn = self.db.connect()?;
+let mut rows = conn.query(sql, params).await?;       // SELECT 系
+conn.execute(sql, params).await?;                    // DML 系
+conn.execute_batch(sql).await?;                      // Sequence リクエスト（複文）
+// rows → hrana-http v2 results[] 形式に変換して返す
 ```
 
 **③ DB クローズ（DB 削除時・サーバーシャットダウン時）**
 
 ```rust
-drop(conn);
-drop(db); // Drop で WAL チェックポイント + ファイルクローズ
+drop(db); // Arc<libsql::Database> の最後の参照が drop されると WAL チェックポイント + ファイルクローズ
 ```
 
-Adlaire サーバー層は sqld の HTTP サーバー・認証・レプリケーション機能を一切呼び出さない。これらは sqld の `core` feature フラグで無効化する（フラグが存在しない場合は Phase 1 着手時に feature 分割を実施する）。
+Adlaire サーバー層は libsql crate の HTTP サーバー・認証・レプリケーション機能を一切使用しない。組み込み SQLite エンジン部分のみを利用する。
 
 #### 3.3.3 hrana-http v2 プロトコル変換層
 
-sqld の `QueryResult` → hrana-http v2 レスポンス JSON への変換は Adlaire サーバー層で実装する。
+`libsql` の行・カラム型 → hrana-http v2 レスポンス JSON への変換は Adlaire サーバー層で実装する。
 
 ```
 POST /v2/pipeline
   ↓ リクエスト JSON をパース（Adlaire）
-  ↓ statements[] を sqld::Connection に渡す（Adlaire → sqld 境界）
-  ↓ sqld::QueryResult を受け取る（sqld → Adlaire 境界）
+  ↓ statements[] を libsql::Connection に渡す（Adlaire → libsql 境界）
+  ↓ libsql の行・カラム型を受け取る（libsql → Adlaire 境界）
   ↓ hrana-http v2 results[] 形式に変換（Adlaire）
   ↓ JSON レスポンスを返す（Adlaire）
 ```
 
-sqld が独自の hrana 実装を持つ場合、その型をそのまま流用することも可とする（実装時判断）。ただし sqld の HTTP サーバーを起動する形にはしない。
+#### 3.3.4 依存ロックダウン方針
 
-#### 3.3.4 Phase 1 の依存ロックダウン方針
-
-- libSQL フォークのコミットハッシュを submodule で固定する
-- Phase 1 着手時に `Cargo.lock` をリポジトリにコミットし、依存バージョンをロックする
-- フォーク内部の変更は必ず diff レビューを行い、意図しない upstream 取り込みを防ぐ
+- `Cargo.lock` をリポジトリにコミットし、依存バージョンをロックする
+- `libsql` crate は crates.io からバージョン固定で取得する（git submodule 不使用）
 
 #### 3.3.5 クレート一覧
 
@@ -314,12 +334,11 @@ sqld が独自の hrana 実装を持つ場合、その型をそのまま流用�
 
 | クレート | バージョン | 用途 | 導入フェーズ |
 |---------|-----------|------|------------|
-| `sqld`（libSQL fork） | submodule 固定 | SQL 実行 / WAL / ページストレージ | 1 |
+| `libsql` | 0.6 | 組み込み SQLite（WAL モード）| 1 |
 | `tokio` | 1 | 非同期ランタイム | 1 |
 | `axum` | 0.7 | HTTP フレームワーク・ルーティング | 1 |
-| `tower` | 0.4 | ミドルウェアスタック | 1 |
 | `serde` / `serde_json` | 1 | JSON シリアライズ・デシリアライズ | 1 |
-| `jsonwebtoken` | 9 | JWT HS256 署名・検証 | 1 |
+| `jsonwebtoken` | 9 | JWT HS256 署名・検証 | 4 |
 | `thiserror` | 1 | `AppError` derive | 1 |
 | `anyhow` | 1 | 内部エラーラッパー・`main()` 戻り値 | 1 |
 | `clap` | 4 | CLI パース（derive マクロ） | 1 |
@@ -331,7 +350,8 @@ sqld が独自の hrana 実装を持つ場合、その型をそのまま流用�
 | `toml` | 0.8 | `config.toml` デシリアライズ | 1 |
 | `libc` | 0.2 | `flock` による排他プロセスロック | 1 |
 | `base64` | 0.22 | Blob フィールドの Base64 エンコード | 1 |
-| `hex` | 0.4 | `generate_token_id()` の hex エンコード | 1 |
+| `uuid` | 1 | DB ID・トークン ID 生成（v4） | 1 |
+| `async-trait` | 0.1 | `SqldAdapter` トレイトの async fn | 1 |
 | `dashmap` | 5 | `Metrics`・`ReplicationState` の並行マップ | 9 |
 | `url` | 2 | `ServerRole::Replica` の `primary_url` 型 | 10 |
 | `bytes` | 1 | WAL フレームバッファ（`WalFrame::data`） | 10 |
@@ -1566,11 +1586,14 @@ Step 5: 停止完了
 #### 14.1 モジュール構成
 
 ```
-crates/adlaire-server/src/
-├── main.rs              ← エントリポイント・tokio ランタイム起動・CLI パース
+adlaire-server/src/
+├── main.rs              ← エントリポイント・tokio ランタイム起動・run_serve / run_token_create
+├── cli.rs               ← Cli / CliCommand / ServeArgs / TokenCreateArgs（clap derive）
 ├── config.rs            ← Config struct・CLI フラグと config.toml のマージ
+├── data_dir.rs          ← DataDir::init()・ProcessLock::acquire()（flock）
 ├── error.rs             ← AppError enum（thiserror）・HTTP レスポンス変換
 ├── state.rs             ← AppState struct・Arc<> ラッパー定義
+├── metrics.rs           ← Metrics struct（Phase 9 スタブ）
 ├── db/
 │   ├── mod.rs           ← DB 名バリデーション・DbInfo 型
 │   ├── manager.rs       ← DbManager struct・open/close/create/delete ロジック
@@ -1584,16 +1607,11 @@ crates/adlaire-server/src/
 │   ├── pipeline.rs      ← POST /v2/pipeline ハンドラ
 │   ├── health.rs        ← GET /v2/health ハンドラ
 │   └── admin/
-│       ├── mod.rs       ← 管理 API Router・admin_auth_middleware
-│       ├── databases.rs ← DB CRUD ハンドラ（Phase 6）
-│       ├── tokens.rs    ← トークン CRUD ハンドラ（Phase 7）
-│       ├── metrics.rs   ← GET /admin/v1/metrics（Phase 9）
-│       ├── backup.rs    ← バックアップ・リストア・PITR（Phase 12〜13）
-│       └── branches.rs  ← ブランチ管理（Phase 14）
+│       └── mod.rs       ← 管理 API Router・admin_auth_middleware・各ハンドラスタブ（Phase 6〜14）
 ├── hrana/
 │   ├── mod.rs           ← hrana-http v2 型の re-export
 │   ├── types.rs         ← PipelineRequest / PipelineResponse / Value 等
-│   └── convert.rs       ← sqld::QueryResult → hrana 型変換
+│   └── convert.rs       ← libsql 行・カラム型 → hrana 型変換
 ├── ws/
 │   ├── mod.rs           ← hrana-ws v3 WebSocket ハンドラ（Phase 8）
 │   ├── session.rs       ← WsSession・stream_id ごとの状態管理
@@ -2017,6 +2035,7 @@ pub enum StreamRequest {
 #[derive(Debug, serde::Deserialize)]
 pub struct Stmt {
     pub sql:        String,
+    #[serde(default)]
     pub args:       Vec<Value>,
     #[serde(default)]
     pub named_args: Vec<NamedArg>,
@@ -2194,7 +2213,7 @@ T-2: CLI フレームワーク
 #### 14.12 CLI 構造体
 
 ```rust
-// main.rs
+// cli.rs
 #[derive(Parser)]
 #[command(name = "adlaire-db", version, about = "Self-hosted libSQL-compatible DB server")]
 pub struct Cli { #[command(subcommand)] pub command: CliCommand }
@@ -2669,6 +2688,11 @@ pub struct SqlResult {
 
 #[async_trait::async_trait]
 pub trait SqldAdapter: Send + Sync {
+    /// 単一ステートメントを実行する。
+    /// **注記**: RealSqldAdapter の実装では呼び出しのたびに新規 Connection を生成する。
+    /// そのため、execute() を複数回呼び出しても同一トランザクション内に収まる保証はない。
+    /// インタラクティブトランザクション（BEGIN/COMMIT を跨ぐ操作）は Phase 5 の WebSocket
+    /// セッション設計時に再検討する。
     async fn execute(
         &self,
         sql:       &str,
@@ -3020,7 +3044,7 @@ async fn execute_pipeline(
     for req in requests {
         match req {
             StreamRequest::Execute { stmt } => {
-                if is_write_stmt(&stmt.sql) && !claims.can_write_db(db_name) {
+                if is_write_stmt(&stmt.sql) && claims.resolve_access(db_name) != AccessLevel::Rw {
                     responses.push(StreamResult::Error {
                         error: HranaError { message: "write not permitted".into(), code: "PERMISSION_DENIED".into() },
                     });
@@ -3184,6 +3208,14 @@ impl axum::extract::FromRequestParts<SharedState> for Authenticated {
         Ok(Authenticated(claims))
     }
 }
+```
+
+#### 14.3b 管理 API 認証ミドルウェア
+
+管理 API 用の認証ミドルウェアは `http/admin/mod.rs` に定義する（JWT ではなく固定トークンの文字列完全一致）。
+
+```rust
+// http/admin/mod.rs
 
 /// 管理 API 認証ミドルウェア（Bearer 文字列完全一致）
 /// build_admin_router で layer として適用するため、全ハンドラに自動適用される
