@@ -1033,6 +1033,7 @@ DELETE /admin/v1/databases/{name}        DB 削除
 
 ```json
 {
+  "id": "550e8400-e29b-41d4-a716-446655440000",
   "name": "my-db",
   "created_at": "2026-09-10T12:00:00Z"
 }
@@ -1044,6 +1045,7 @@ DELETE /admin/v1/databases/{name}        DB 削除
 {
   "databases": [
     {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
       "name": "my-db",
       "created_at": "2026-09-10T12:00:00Z",
       "size_bytes": 4096
@@ -1056,6 +1058,7 @@ DELETE /admin/v1/databases/{name}        DB 削除
 
 ```json
 {
+  "id": "550e8400-e29b-41d4-a716-446655440000",
   "name": "my-db",
   "created_at": "2026-09-10T12:00:00Z",
   "size_bytes": 4096
@@ -1268,11 +1271,11 @@ GET /admin/v1/metrics     全 DB のメトリクス取得
     {
       "name": "my-db",
       "queries_total": 1234,
-      "rows_read": 5678,
-      "rows_written": 91,
+      "rows_read_total": 5678,
+      "rows_written_total": 91,
       "connections_active": 2,
       "size_bytes": 4096,
-      "integrity_errors": 0
+      "wal_size_bytes": 1024
     }
   ]
 }
@@ -1699,6 +1702,18 @@ impl DbManager {
 
     /// DB 一覧（size_bytes は data.db のファイルサイズ）
     pub async fn list(&self) -> Vec<DbInfo>;
+
+    /// DB 名で DbInfo を返す（存在しない場合は DbNotFound、size_bytes はファイルから動的取得）
+    pub async fn get_info(&self, name: &str) -> Result<DbInfo, AppError> {
+        let meta = self.meta.read().await;
+        let info = meta.databases.iter()
+            .find(|d| d.name == name)
+            .cloned()
+            .ok_or_else(|| AppError::DbNotFound(name.to_string()))?;
+        let db_path = self.data_dir.join("databases").join(name).join("data.db");
+        let size_bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+        Ok(DbInfo { size_bytes, ..info })
+    }
 
     /// シャットダウン時: 全 sqld::Database を drop
     pub async fn close_all(self);
@@ -2719,7 +2734,7 @@ pub async fn handle(
 ) -> Result<Json<PipelineResponse>, AppError> {
     let db = state.db_mgr.get("default").await
         .ok_or_else(|| AppError::DbNotFound("default".to_string()))?;
-    let results = execute_pipeline(&db, &claims, &req.requests).await?;
+    let results = execute_pipeline(&db, &claims, &req.requests, "default").await?;
     Ok(Json(PipelineResponse { baton: None, base_url: None, results }))
 }
 
@@ -2732,7 +2747,7 @@ pub async fn handle_db(
 ) -> Result<Json<PipelineResponse>, AppError> {
     let db = state.db_mgr.get(&db_name).await
         .ok_or_else(|| AppError::DbNotFound(db_name.clone()))?;
-    let results = execute_pipeline(&db, &claims, &req.requests).await?;
+    let results = execute_pipeline(&db, &claims, &req.requests, &db_name).await?;
     Ok(Json(PipelineResponse { baton: None, base_url: None, results }))
 }
 
@@ -2740,13 +2755,14 @@ async fn execute_pipeline(
     db: &sqld::Database,
     claims: &Claims,
     requests: &[StreamRequest],
+    db_name: &str,
 ) -> Result<Vec<StreamResult>, AppError> {
     let conn = db.connect().map_err(|e| AppError::Sqld(e))?;
     let mut results = Vec::with_capacity(requests.len());
     for req in requests {
         match req {
             StreamRequest::Execute { stmt } => {
-                if is_write_stmt(&stmt.sql) && !claims.can_write() {
+                if is_write_stmt(&stmt.sql) && claims.resolve_access(db_name) != AccessLevel::Rw {
                     results.push(StreamResult::Error {
                         error: HranaError { message: "write not permitted".into(), code: "PERMISSION_DENIED".into() },
                     });
@@ -3371,6 +3387,20 @@ impl TestServer {
         resp.json::<serde_json::Value>().await.unwrap()["token"]
             .as_str().unwrap().to_string()
     }
+
+    /// Bearer トークン付きで /v2/pipeline を呼ぶ
+    pub async fn pipeline_with_token(&self, token: &str, body: serde_json::Value) -> reqwest::Response {
+        self.client.post(format!("{}/v2/pipeline", self.base_url))
+            .bearer_auth(token)
+            .json(&body).send().await.unwrap()
+    }
+}
+
+fn minimal_select() -> serde_json::Value {
+    serde_json::json!({"baton":null,"requests":[
+        {"type":"execute","stmt":{"sql":"SELECT 1","args":[],"want_rows":true}},
+        {"type":"close"}
+    ]})
 }
 
 fn pick_unused_port() -> u16 {
@@ -3432,17 +3462,19 @@ async fn tc2_health_check() {
 async fn tc3_jwt_auth() {
     let secret = "test-secret-32bytes-minimum-len!";
     let srv = TestServer::spawn(TestConfig {
-        jwt_secret: Some(secret.to_string()),
-        ..Default::default()
+        jwt_secret:  Some(secret.to_string()),
+        admin_token: Some("admin-tok".to_string()),
     }).await;
 
-    let valid_token = srv.create_token(secret, "rw", None);
+    // 管理 API でトークン発行（Phase 7 以降で有効）
+    let valid_token = srv.create_token("rw").await;
 
     // (a) 有効トークン → 200
     assert_eq!(srv.pipeline_with_token(&valid_token, minimal_select()).await.status(), 200);
 
     // (b) Authorization ヘッダなし → 401 AUTH_REQUIRED
-    let no_auth = srv.pipeline_no_auth(minimal_select()).await;
+    // pipeline() は Bearer ヘッダを付けないので認証エラーになる
+    let no_auth = srv.pipeline(minimal_select()).await;
     assert_eq!(no_auth.status(), 401);
     assert_eq!(no_auth.json::<serde_json::Value>().await.unwrap()["code"], "AUTH_REQUIRED");
 
@@ -3681,7 +3713,7 @@ pub async fn list_dbs(
     State(state): State<Arc<AppState>>,
     _auth: AdminAuth,
 ) -> Result<Json<Vec<DbInfo>>, AppError> {
-    Ok(Json(state.db_mgr.list().await?))
+    Ok(Json(state.db_mgr.list().await))
 }
 
 /// GET /admin/v1/databases/:name  → DB 詳細
@@ -4168,7 +4200,7 @@ pub fn record_metrics(metrics: &DbMetrics, results: &[StreamResult]) {
     metrics.queries_total.fetch_add(results.len() as u64, Ordering::Relaxed);
     for r in results {
         if let StreamResult::Ok { response: StreamResponse::Execute { result: ref row } } = r {
-            metrics.rows_read_total.fetch_add(row.rows_read, Ordering::Relaxed);
+            metrics.rows_read_total.fetch_add(row.rows.len() as u64, Ordering::Relaxed);
             metrics.rows_written_total.fetch_add(row.rows_affected, Ordering::Relaxed);
         }
     }
@@ -4660,7 +4692,12 @@ impl Manifest {
     pub async fn save_atomic(&self, path: &std::path::Path) -> anyhow::Result<()> {
         let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_vec_pretty(self)?;
-        tokio::fs::write(&tmp, &json).await?;
+        {
+            let mut f = tokio::fs::File::create(&tmp).await?;
+            use tokio::io::AsyncWriteExt;
+            f.write_all(&json).await?;
+            f.sync_all().await?;
+        }
         tokio::fs::rename(&tmp, path).await?;
         Ok(())
     }
