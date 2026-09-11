@@ -13,12 +13,38 @@ use crate::{
     state::SharedState,
 };
 
+// ── カスタム JSON エクストラクター ────────────────────────────────────────────
+// axum::Json は JSON パースエラーを 422 で返すが、仕様は 400 INVALID_REQUEST を要求する
+
+pub struct JsonPayload<T>(pub T);
+
+#[async_trait::async_trait]
+impl<T, S> axum::extract::FromRequest<S> for JsonPayload<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request(
+        req:   axum::extract::Request,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let bytes = axum::body::Bytes::from_request(req, state)
+            .await
+            .map_err(|_| AppError::InvalidRequest)?;
+        serde_json::from_slice::<T>(&bytes)
+            .map(JsonPayload)
+            .map_err(|_| AppError::InvalidRequest)
+    }
+}
+
 // ── シングル DB ハンドラ（Phase 3） ───────────────────────────────────────────
 
 pub async fn handle(
-    State(state):        State<SharedState>,
+    State(state):          State<SharedState>,
     Authenticated(claims): Authenticated,
-    Json(req):           Json<PipelineRequest>,
+    JsonPayload(req):      JsonPayload<PipelineRequest>,
 ) -> Result<Json<PipelineResponse>, AppError> {
     let db = state
         .db_mgr
@@ -32,10 +58,10 @@ pub async fn handle(
 // ── マルチ DB ハンドラ（Phase 6 用スタブ） ────────────────────────────────────
 
 pub async fn handle_db(
-    State(state):        State<SharedState>,
+    State(state):          State<SharedState>,
     Authenticated(claims): Authenticated,
     axum::extract::Path(db_name): axum::extract::Path<String>,
-    Json(req):           Json<PipelineRequest>,
+    JsonPayload(req):      JsonPayload<PipelineRequest>,
 ) -> Result<Json<PipelineResponse>, AppError> {
     let db = state
         .db_mgr

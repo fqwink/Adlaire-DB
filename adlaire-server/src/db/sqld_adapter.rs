@@ -47,7 +47,7 @@ pub struct RealSqldAdapter {
 }
 
 impl RealSqldAdapter {
-    pub async fn open(path: &Path, busy_timeout_ms: u64) -> anyhow::Result<Self> {
+    pub async fn open(path: &Path, busy_timeout_ms: u64, run_integrity_check: bool) -> anyhow::Result<Self> {
         let db = libsql::Builder::new_local(path)
             .build()
             .await?;
@@ -61,8 +61,28 @@ impl RealSqldAdapter {
             (),
         ).await?;
 
+        if run_integrity_check {
+            let mut rows = conn.query("PRAGMA integrity_check", ()).await?;
+            let row = rows.next().await?
+                .ok_or_else(|| anyhow::anyhow!("integrity_check returned no rows"))?;
+            let val: String = row.get(0)?;
+            if val != "ok" {
+                anyhow::bail!("PRAGMA integrity_check failed for {:?}: {val}", path);
+            }
+            tracing::debug!(path = %path.display(), "integrity check passed");
+        }
+
         tracing::debug!(path = %path.display(), "opened SQLite (WAL mode)");
         Ok(Self { db: Arc::new(db) })
+    }
+}
+
+fn libsql_err(e: libsql::Error) -> AppError {
+    let msg = e.to_string();
+    if msg.contains("locked") || msg.contains("busy") {
+        AppError::StorageBusy
+    } else {
+        AppError::Sqld(msg)
     }
 }
 
@@ -73,7 +93,7 @@ impl SqldAdapter for RealSqldAdapter {
         conn.execute_batch(sql)
             .await
             .map(|_| ())
-            .map_err(|e| AppError::Sqld(e.to_string()))
+            .map_err(libsql_err)
     }
 
     async fn execute(
@@ -91,7 +111,7 @@ impl SqldAdapter for RealSqldAdapter {
             let mut rows = conn
                 .query(sql, params)
                 .await
-                .map_err(|e| AppError::Sqld(e.to_string()))?;
+                .map_err(libsql_err)?;
 
             let col_count = rows.column_count();
             let cols: Vec<(Option<String>, Option<String>)> = (0..col_count)
@@ -102,7 +122,7 @@ impl SqldAdapter for RealSqldAdapter {
                 .collect();
 
             let mut result_rows: Vec<Vec<SqlValue>> = vec![];
-            while let Some(row) = rows.next().await.map_err(|e| AppError::Sqld(e.to_string()))? {
+            while let Some(row) = rows.next().await.map_err(libsql_err)? {
                 let cells = (0..col_count)
                     .map(|i| {
                         let v = row.get_value(i).unwrap_or(libsql::Value::Null);
@@ -122,7 +142,7 @@ impl SqldAdapter for RealSqldAdapter {
             let rows_affected = conn
                 .execute(sql, params)
                 .await
-                .map_err(|e| AppError::Sqld(e.to_string()))?;
+                .map_err(libsql_err)?;
 
             let last_insert_rowid = conn.last_insert_rowid();
 

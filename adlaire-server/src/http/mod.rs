@@ -2,6 +2,8 @@ pub mod admin;
 pub mod health;
 pub mod pipeline;
 
+use std::sync::Arc;
+
 use axum::routing::{delete, get, post};
 
 use crate::state::SharedState;
@@ -34,5 +36,9 @@ pub fn build_admin_router(state: SharedState) -> axum::Router {
                 get(admin::branches::list).post(admin::branches::create))
             .route("/databases/:name/branches/:branch",      delete(admin::branches::delete))
         )
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            admin::admin_auth_middleware,
+        ))
         .with_state(state)
 }

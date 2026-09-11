@@ -42,6 +42,14 @@ async fn run_serve(args: crate::cli::ServeArgs) -> anyhow::Result<()> {
 
     init_tracing(&config.log_level);
 
+    // F + J: 起動ログ（バージョン付き）
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "Adlaire DB starting");
+
+    // G: integrity check スキップ時の警告
+    if config.skip_integrity_check {
+        tracing::warn!("--skip-integrity-check is set; startup integrity check disabled");
+    }
+
     // Step 3: データディレクトリ初期化
     DataDir::init(&config.data_dir)?;
 
@@ -85,15 +93,36 @@ async fn run_serve(args: crate::cli::ServeArgs) -> anyhow::Result<()> {
         "Adlaire DB listening"
     );
 
-    // Step 9: サーバー起動 + グレースフルシャットダウン
+    // Step 9: グレースフルシャットダウン付きでサーバー起動（I）
     let api_router   = build_router(Arc::clone(&state));
     let admin_router = build_admin_router(Arc::clone(&state));
+    let shutdown_timeout = config.shutdown_timeout;
+
+    let (sd_tx, mut sd_rx) = tokio::sync::watch::channel(false);
+    let mut sd_rx2 = sd_rx.clone();
+
+    let api_task = tokio::spawn(async move {
+        axum::serve(api_listener, api_router)
+            .with_graceful_shutdown(async move { sd_rx.changed().await.ok(); })
+            .await
+            .ok();
+    });
+    let admin_task = tokio::spawn(async move {
+        axum::serve(admin_listener, admin_router)
+            .with_graceful_shutdown(async move { sd_rx2.changed().await.ok(); })
+            .await
+            .ok();
+    });
+
+    // K: シグナル名付きシャットダウンログ
+    let sig_name = shutdown_signal_named().await;
+    tracing::info!(signal = sig_name, "shutdown signal received");
+    let _ = sd_tx.send(true);
 
     tokio::select! {
-        r = axum::serve(api_listener,   api_router)   => r?,
-        r = axum::serve(admin_listener, admin_router) => r?,
-        _ = shutdown_signal() => {
-            tracing::info!("shutdown signal received");
+        _ = async { let _ = tokio::join!(api_task, admin_task); } => {},
+        _ = tokio::time::sleep(std::time::Duration::from_secs(shutdown_timeout)) => {
+            tracing::warn!(timeout_secs = shutdown_timeout, "graceful shutdown timed out, forcing exit");
         }
     }
 
@@ -149,12 +178,12 @@ fn init_tracing(log_level: &str) {
 
 // ── shutdown signal ───────────────────────────────────────────────────────────
 
-async fn shutdown_signal() {
+async fn shutdown_signal_named() -> &'static str {
     use tokio::signal::unix::{signal, SignalKind};
     let mut sigint  = signal(SignalKind::interrupt()).unwrap();
     let mut sigterm = signal(SignalKind::terminate()).unwrap();
     tokio::select! {
-        _ = sigint.recv()  => {},
-        _ = sigterm.recv() => {},
+        _ = sigint.recv()  => "SIGINT",
+        _ = sigterm.recv() => "SIGTERM",
     }
 }

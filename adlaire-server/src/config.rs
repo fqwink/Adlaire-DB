@@ -25,6 +25,7 @@ pub struct StorageConfig {
     pub wal_checkpoint_mode:          WalCheckpointMode,
     pub wal_retention_days:           u64,
     pub integrity_check_interval_hrs: u64,
+    pub skip_integrity_check:         bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,6 +168,7 @@ impl Config {
                 wal_checkpoint_mode:          wal_mode,
                 wal_retention_days:           0,
                 integrity_check_interval_hrs: 0,
+                skip_integrity_check,
             },
             replication: ReplicationConfig {
                 write_mode,

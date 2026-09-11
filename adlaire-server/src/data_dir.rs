@@ -18,6 +18,12 @@ impl DataDir {
                 );
             }
         }
+        // §8.1 Step 5-2: tokens.json が存在しなければ空で初期化する
+        let tokens_path = data_dir.join("meta").join("tokens.json");
+        if !tokens_path.exists() {
+            std::fs::write(&tokens_path, r#"{"tokens":[]}"#)?;
+        }
+
         tracing::info!(path = %data_dir.display(), "DataDir initialized");
         Ok(())
     }

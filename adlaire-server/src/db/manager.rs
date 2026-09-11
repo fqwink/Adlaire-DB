@@ -45,7 +45,7 @@ impl DbManager {
                 .join(&db.name)
                 .join("data.db");
 
-            match RealSqldAdapter::open(&db_file, config.busy_timeout_ms).await {
+            match RealSqldAdapter::open(&db_file, config.busy_timeout_ms, !config.skip_integrity_check).await {
                 Ok(adapter) => {
                     dbs.insert(db.name.clone(), Arc::new(adapter));
                     tracing::info!(db = %db.name, "opened database");
@@ -82,7 +82,7 @@ impl DbManager {
             .map_err(|e| AppError::Internal(e.into()))?;
 
         let db_file = db_path.join("data.db");
-        let adapter = RealSqldAdapter::open(&db_file, self.config.busy_timeout_ms)
+        let adapter = RealSqldAdapter::open(&db_file, self.config.busy_timeout_ms, !self.config.skip_integrity_check)
             .await
             .map_err(|e| AppError::Internal(e))?;
 
