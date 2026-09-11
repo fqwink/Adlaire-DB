@@ -1733,6 +1733,11 @@ impl Claims {
         }
     }
 
+    /// 書き込み権限の有無を返す（AccessLevel::Rw の場合のみ true）
+    pub fn can_write(&self) -> bool {
+        matches!(self.a, AccessLevel::Rw)
+    }
+
     /// 認証無効モード用（jwt_secret 未設定時のみ使用）
     pub fn unauthenticated() -> Self {
         Self {
@@ -1830,6 +1835,8 @@ pub enum AppError {
     AuthDisabled,
     #[error("config error: {0}")]
     ConfigError(String),
+    #[error("sqld error: {0}")]
+    Sqld(sqld::Error),
     #[error("internal error: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -1856,6 +1863,7 @@ impl axum::response::IntoResponse for AppError {
             Self::RestoreFrameCorrupt   => (StatusCode::CONFLICT,                "RESTORE_FRAME_CORRUPT"),
             Self::AuthDisabled          => (StatusCode::UNAUTHORIZED,            "AUTH_DISABLED"),
             Self::ConfigError(_)        => (StatusCode::INTERNAL_SERVER_ERROR,   "CONFIG_ERROR"),
+            Self::Sqld(_)              => (StatusCode::INTERNAL_SERVER_ERROR,   "INTERNAL_ERROR"),
             Self::Internal(_)           => (StatusCode::INTERNAL_SERVER_ERROR,   "INTERNAL_ERROR"),
         };
         let body = axum::Json(serde_json::json!({
@@ -2023,6 +2031,7 @@ pub struct DbMetrics {
     pub rows_written_total: std::sync::atomic::AtomicU64,
     pub connections_active: std::sync::atomic::AtomicI64,
     pub integrity_errors:   std::sync::atomic::AtomicU64,
+    pub wal_size_bytes:     std::sync::atomic::AtomicU64,  // WAL ファイルサイズ（バイト）
 }
 ```
 
@@ -2710,23 +2719,57 @@ async fn execute_pipeline(
     claims: &Claims,
     requests: &[StreamRequest],
 ) -> Result<Vec<StreamResult>, AppError> {
-    let conn = db.connect().map_err(AppError::Sqld)?;
+    let conn = db.connect().map_err(|e| AppError::Sqld(e))?;
     let mut results = Vec::with_capacity(requests.len());
     for req in requests {
-        let result = match req {
+        match req {
             StreamRequest::Execute { stmt } => {
-                // 書き込み文の場合は権限チェック
                 if is_write_stmt(&stmt.sql) && !claims.can_write() {
-                    Err(sqld::Error::msg("write not permitted"))
+                    results.push(StreamResult::error("PERMISSION_DENIED", "write not permitted"));
                 } else {
-                    conn.execute(&stmt.sql, stmt.args.clone()).map_err(Into::into)
+                    let params = hrana_values_to_params(&stmt.args);
+                    let result = conn.execute(&stmt.sql, params).await
+                        .map_err(|e| AppError::Sqld(e))?;
+                    results.push(StreamResult::Execute(to_stmt_result(result)));
+                }
+            }
+            StreamRequest::Sequence { sql } => {
+                // セミコロン分割して逐次実行（いずれかが失敗したら即座に返す）
+                for stmt_sql in split_sql_statements(sql) {
+                    let result = conn.execute(&stmt_sql, libsql::params![]).await
+                        .map_err(|e| AppError::Sqld(e))?;
+                    results.push(StreamResult::Execute(to_stmt_result(result)));
                 }
             }
             StreamRequest::Close => break,
-        };
-        results.push(to_stream_result(result));
+        }
     }
     Ok(results)
+}
+
+/// hrana Value 列を libsql Params へ変換する
+fn hrana_values_to_params(args: &[Value]) -> libsql::Params {
+    let values: Vec<libsql::Value> = args.iter().map(|v| match v {
+        Value::Null                => libsql::Value::Null,
+        Value::Integer { value }   => libsql::Value::Integer(value.parse().unwrap_or(0)),
+        Value::Real    { value }   => libsql::Value::Real(*value),
+        Value::Text    { value }   => libsql::Value::Text(value.clone()),
+        Value::Blob    { value }   => {
+            use base64::Engine as _;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(value).unwrap_or_default();
+            libsql::Value::Blob(bytes)
+        }
+    }).collect();
+    libsql::Params::Positional(values)
+}
+
+/// SQL 文字列をセミコロンで分割し、空文字列を除去する
+fn split_sql_statements(sql: &str) -> Vec<String> {
+    sql.split(';')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 // 書き込み文プレフィックス判定
@@ -2936,7 +2979,7 @@ impl AuthState {
             let mut tokens = self.tokens.write().await;
             let record = tokens.iter_mut()
                 .find(|t| t.id == token_id)
-                .ok_or(AppError::TokenNotFound)?;
+                .ok_or_else(|| AppError::TokenNotFound(token_id.to_string()))?;
             record.revoked    = true;
             record.revoked_at = Some(chrono::Utc::now());
             let meta = TokensMeta { tokens: tokens.clone() };
@@ -3471,6 +3514,112 @@ T2-6: 統合テスト TC-2-1〜TC-2-6（TC-2-5b 含む）
   [ ] Phase 1〜6 の TC がリグレッションしないことを確認
 ```
 
+#### 実装詳細
+
+```rust
+// handlers/admin/databases.rs
+
+/// POST /admin/v1/databases  → DB 作成
+pub async fn create_db(
+    State(state): State<Arc<AppState>>,
+    _auth: AdminAuth,
+    Json(req): Json<CreateDbRequest>,
+) -> Result<(StatusCode, Json<DbInfo>), AppError> {
+    validate_db_name(&req.name)?;
+    let info = state.db_mgr.create(&req.name).await?;
+    Ok((StatusCode::CREATED, Json(info)))
+}
+
+/// GET /admin/v1/databases  → DB 一覧
+pub async fn list_dbs(
+    State(state): State<Arc<AppState>>,
+    _auth: AdminAuth,
+) -> Result<Json<Vec<DbInfo>>, AppError> {
+    Ok(Json(state.db_mgr.list().await?))
+}
+
+/// GET /admin/v1/databases/:name  → DB 詳細
+pub async fn get_db(
+    State(state): State<Arc<AppState>>,
+    _auth: AdminAuth,
+    Path(name): Path<String>,
+) -> Result<Json<DbInfo>, AppError> {
+    state.db_mgr.get_info(&name).await.map(Json)
+}
+
+/// DELETE /admin/v1/databases/:name  → DB 削除
+pub async fn delete_db(
+    State(state): State<Arc<AppState>>,
+    _auth: AdminAuth,
+    Path(name): Path<String>,
+) -> Result<StatusCode, AppError> {
+    state.db_mgr.delete(&name).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// handlers/admin/tokens.rs
+
+#[derive(serde::Deserialize)]
+pub struct IssueTokenRequest {
+    pub access: AccessLevel,
+    pub expiry: Option<String>,          // "30d" / "24h" / "3600s" 形式
+    pub dbs:    Option<HashMap<String, AccessLevel>>,
+}
+
+#[derive(serde::Serialize)]
+pub struct TokenResponse {
+    pub id:         String,
+    pub token:      String,
+    pub access:     AccessLevel,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// POST /admin/v1/tokens  → トークン発行
+pub async fn issue_token(
+    State(state): State<Arc<AppState>>,
+    _auth: AdminAuth,
+    Json(req): Json<IssueTokenRequest>,
+) -> Result<(StatusCode, Json<TokenResponse>), AppError> {
+    let exp = req.expiry.as_deref().map(parse_expiry).transpose()?;
+    let token = state.auth.issue(req.access.clone(), exp, req.dbs).await?;
+    // JWT の sub クレームが token ID（tok_xxx）
+    let claims = state.auth.verify(&token).await?;
+    Ok((StatusCode::CREATED, Json(TokenResponse {
+        id:         claims.sub.clone(),
+        token,
+        access:     req.access,
+        expires_at: exp,
+    })))
+}
+
+/// GET /admin/v1/tokens  → トークン一覧（JWT シークレット非公開）
+pub async fn list_tokens(
+    State(state): State<Arc<AppState>>,
+    _auth: AdminAuth,
+) -> Result<Json<Vec<TokenRecord>>, AppError> {
+    Ok(Json(state.auth.list_tokens().await))
+}
+
+/// GET /admin/v1/tokens/:id  → トークン詳細
+pub async fn get_token(
+    State(state): State<Arc<AppState>>,
+    _auth: AdminAuth,
+    Path(id): Path<String>,
+) -> Result<Json<TokenRecord>, AppError> {
+    state.auth.get_token(&id).await.map(Json)
+}
+
+/// DELETE /admin/v1/tokens/:id  → トークン失効（冪等）
+pub async fn revoke_token(
+    State(state): State<Arc<AppState>>,
+    _auth: AdminAuth,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    state.auth.revoke(&id, &state.config.tokens_path()).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+```
+
 ---
 
 
@@ -3645,7 +3794,18 @@ impl WsSession {
             RequestBody::Execute { stmt } => {
                 let stream = self.streams.get_mut(&stream_id)
                     .ok_or(AppError::InvalidRequest)?;
-                let result = stream.conn.execute(&stmt.sql, &stmt.args)?;
+                // BEGIN/COMMIT/ROLLBACK でトランザクション状態を更新
+                let sql_upper = stmt.sql.trim_start().to_ascii_uppercase();
+                let first_word = sql_upper.split_whitespace().next().unwrap_or("");
+                match first_word {
+                    "BEGIN"    => { stream.tx_mode = TransactionMode::ReadWrite; }
+                    "BEGIN READ ONLY" => { stream.tx_mode = TransactionMode::ReadOnly; }
+                    "COMMIT" | "ROLLBACK" => { stream.tx_mode = TransactionMode::None; }
+                    _ => {}
+                }
+                let params = hrana_values_to_params(&stmt.args);
+                let result = stream.conn.execute(&stmt.sql, params).await
+                    .map_err(|e| AppError::Sqld(e))?;
                 Ok(ResponseBody::Execute { result: to_stmt_result(result) })
             }
             RequestBody::CloseStream => {
@@ -3747,6 +3907,93 @@ T3-5: インタラクティブトランザクション状態管理（BEGIN/COMMI
 T3-6: ATTACH DATABASE インターセプト・DB 名バリデーション・パス解決
 T3-7: メトリクス収集（インメモリカウンター）+ GET /admin/v1/metrics
 T3-8: 統合テスト TC-3-1〜TC-3-6
+```
+
+#### 実装詳細
+
+```rust
+// ATTACH DATABASE インターセプト
+// execute_pipeline で呼び出す前に SQL を検査し、ATTACH 文なら DB 名を解決して書き換える
+
+/// "ATTACH DATABASE 'foo' AS alias" を検出して解決済みパスに書き換える。
+/// foo が Adlaire 管理外（バリデーション失敗 or 未登録）なら Err を返す。
+pub async fn resolve_attach(
+    sql: &str,
+    db_mgr: &dyn DbManager,
+    data_dir: &std::path::Path,
+) -> Result<String, AppError> {
+    let re = regex::Regex::new(
+        r#"(?i)ATTACH\s+(?:DATABASE\s+)?'([^']+)'\s+AS\s+(\w+)"#
+    ).unwrap();
+    if let Some(caps) = re.captures(sql) {
+        let db_name = &caps[1];
+        let alias   = &caps[2];
+        validate_db_name(db_name)?;
+        // DB が存在するか確認（存在しない場合は DbNotFound）
+        db_mgr.get_info(db_name).await?;
+        let db_path = data_dir
+            .join("databases")
+            .join(db_name)
+            .join("data.db");
+        Ok(format!(
+            "ATTACH DATABASE '{}' AS {}",
+            db_path.display(), alias
+        ))
+    } else {
+        Ok(sql.to_string())
+    }
+}
+
+// メトリクス収集
+use std::sync::atomic::Ordering;
+
+/// execute_pipeline の実行後に呼び出してカウンターを更新する
+pub fn record_metrics(metrics: &DbMetrics, results: &[StreamResult]) {
+    metrics.queries_total.fetch_add(results.len() as u64, Ordering::Relaxed);
+    for r in results {
+        if let StreamResult::Execute(ref row) = r {
+            metrics.rows_read_total.fetch_add(row.rows_read, Ordering::Relaxed);
+            metrics.rows_written_total.fetch_add(row.rows_affected, Ordering::Relaxed);
+        }
+    }
+}
+
+// handlers/admin/metrics.rs
+
+/// GET /admin/v1/metrics  → プロセス起動からの累積カウンター
+pub async fn get_metrics(
+    State(state): State<Arc<AppState>>,
+    _auth: AdminAuth,
+) -> Json<serde_json::Value> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let uptime = state.metrics.started_at.elapsed().as_secs();
+    let databases: Vec<serde_json::Value> = state.metrics.databases.iter().map(|e| {
+        let (name, m) = (e.key(), e.value());
+        // WAL サイズはファイルシステムから取得
+        let wal_path = state.config.data_dir
+            .join("databases").join(name).join("data.db-wal");
+        let wal_size = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+        // 現在値をカウンターに反映
+        m.wal_size_bytes.store(wal_size, Relaxed);
+        serde_json::json!({
+            "name":              name,
+            "size_bytes":        std::fs::metadata(
+                                     state.config.data_dir.join("databases").join(name).join("data.db")
+                                 ).map(|m| m.len()).unwrap_or(0),
+            "wal_size_bytes":    wal_size,
+            "connections_active": m.connections_active.load(Relaxed),
+            "queries_total":     m.queries_total.load(Relaxed),
+            "rows_read_total":   m.rows_read_total.load(Relaxed),
+            "rows_written_total":m.rows_written_total.load(Relaxed),
+        })
+    }).collect();
+    Json(serde_json::json!({
+        "uptime_seconds":  uptime,
+        "databases":       databases,
+        "tokens_total":    state.metrics.tokens_total.load(Relaxed),
+        "tokens_revoked":  state.metrics.tokens_revoked.load(Relaxed),
+    }))
+}
 ```
 
 ---
@@ -4019,6 +4266,73 @@ T4-6: GET /v2/health にロール・ lag 情報を追加
 T4-7: 統合テスト TC-4-1〜TC-4-5
 ```
 
+#### 実装詳細
+
+```rust
+// middleware/replica_redirect.rs
+
+/// レプリカモードで書き込みリクエストを受けた際に primary-url へ 307 リダイレクト
+pub async fn maybe_redirect_write(
+    State(state): State<Arc<AppState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if state.config.role == ServerRole::Replica {
+        if is_mutating_request(&req) {
+            if let Some(primary_url) = &state.config.primary_url {
+                let target = format!(
+                    "{}{}",
+                    primary_url.trim_end_matches('/'),
+                    req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("")
+                );
+                return axum::response::Response::builder()
+                    .status(axum::http::StatusCode::TEMPORARY_REDIRECT)
+                    .header(axum::http::header::LOCATION, target)
+                    .body(axum::body::Body::empty())
+                    .unwrap();
+            }
+            // primary_url 未設定 = プライマリ到達不能
+            return AppError::ReplicationTimeout.into_response();
+        }
+    }
+    next.run(req).await
+}
+
+/// POST / PUT / DELETE は書き込みリクエストとみなす
+fn is_mutating_request(req: &axum::extract::Request) -> bool {
+    matches!(
+        req.method(),
+        &axum::http::Method::POST | &axum::http::Method::PUT | &axum::http::Method::DELETE
+    )
+}
+
+// handlers/health.rs（Phase 11 拡張）
+
+#[derive(serde::Serialize)]
+pub struct HealthResponse {
+    pub status:               &'static str,
+    pub role:                 ServerRole,
+    pub replication_lag_frames: Option<u64>,  // replica のみ
+}
+
+pub async fn handle(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
+    let lag = if state.config.role == ServerRole::Replica {
+        Some(state.replication.lag_frames.load(std::sync::atomic::Ordering::Relaxed))
+    } else {
+        None
+    };
+    let status = match lag {
+        Some(lag) if lag > 1000 => "degraded",
+        _ => "ok",
+    };
+    Json(HealthResponse {
+        status,
+        role: state.config.role.clone(),
+        replication_lag_frames: lag,
+    })
+}
+```
+
 ---
 
 
@@ -4093,7 +4407,7 @@ pub async fn archive_frames(
     let manifest_path = archive_dir.join("manifest.json");
 
     tokio::fs::create_dir_all(&archive_dir).await?;
-    let mut manifest = Manifest::load(&manifest_path).unwrap_or_default();
+    let mut manifest = Manifest::load(&manifest_path).await.unwrap_or_default();
 
     for frame in new_frames {
         // CRC32 計算
@@ -4118,21 +4432,25 @@ pub async fn archive_frames(
         });
     }
 
-    // manifest をアトミック更新（tmp → fsync → rename）
-    manifest.save_atomic(&manifest_path)?;
+    // manifest をアトミック更新（tmp → rename）
+    manifest.save_atomic(&manifest_path).await?;
     Ok(())
 }
 
-/// manifest.json のアトミック保存
+/// manifest.json のロード・アトミック保存
 impl Manifest {
-    pub fn save_atomic(&self, path: &std::path::Path) -> anyhow::Result<()> {
+    /// manifest.json を読み込む。ファイルが存在しない場合は Err を返す（呼び出し側で unwrap_or_default）
+    pub async fn load(path: &std::path::Path) -> anyhow::Result<Self> {
+        let data = tokio::fs::read(path).await?;
+        Ok(serde_json::from_slice(&data)?)
+    }
+
+    /// manifest.json をアトミック更新（tmp → fsync → rename、I-4 保証）
+    pub async fn save_atomic(&self, path: &std::path::Path) -> anyhow::Result<()> {
         let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_vec_pretty(self)?;
-        std::fs::write(&tmp, &json)?;
-        // fsync → rename（POSIX アトミック）
-        let f = std::fs::File::open(&tmp)?;
-        f.sync_all()?;
-        std::fs::rename(&tmp, path)?;
+        tokio::fs::write(&tmp, &json).await?;
+        tokio::fs::rename(&tmp, path).await?;
         Ok(())
     }
 }
