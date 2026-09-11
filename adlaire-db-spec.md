@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.33  
+**バージョン：** 0.34  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-11  
 
@@ -1673,8 +1673,8 @@ pub struct ReplicationConfig {
     pub sync_timeout_ms: u64,  // デフォルト 5000
 }
 
-#[derive(Debug, Clone, Default)]
-pub enum ReplicationWriteMode { #[default] Async, Sync }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplicationWriteMode { Async, Sync }
 ```
 
 #### DbManager
@@ -1683,26 +1683,81 @@ pub enum ReplicationWriteMode { #[default] Async, Sync }
 // db/manager.rs
 pub struct DbManager {
     data_dir: PathBuf,
-    dbs:      tokio::sync::RwLock<HashMap<String, Arc<sqld::Database>>>,
+    dbs:      tokio::sync::RwLock<HashMap<String, Arc<dyn SqldAdapter>>>,
     meta:     tokio::sync::RwLock<DatabasesMeta>,
     config:   Arc<StorageConfig>,
 }
 
 impl DbManager {
-    /// 起動時: databases/ 以下を全件オープン
-    pub async fn open_all(data_dir: &Path, config: Arc<StorageConfig>) -> anyhow::Result<Self>;
+    /// 起動時: databases/ 以下の *.sqlite ファイルを全件 RealSqldAdapter::open() でオープン
+    pub async fn open_all(data_dir: &Path, config: Arc<StorageConfig>) -> anyhow::Result<Self> {
+        let meta = DatabasesMeta::load(data_dir)?;
+        let mut dbs = HashMap::new();
+        for db_info in &meta.databases {
+            let path = data_dir.join("databases").join(format!("{}.sqlite", db_info.name));
+            let adapter = RealSqldAdapter::open(
+                &path,
+                config.busy_timeout_ms,
+                false, // open_all では integrity check はスキップ（起動時に別途実行）
+            ).await?;
+            dbs.insert(db_info.name.clone(), Arc::new(adapter) as Arc<dyn SqldAdapter>);
+        }
+        Ok(Self {
+            data_dir: data_dir.to_path_buf(),
+            dbs: tokio::sync::RwLock::new(dbs),
+            meta: tokio::sync::RwLock::new(meta),
+            config,
+        })
+    }
 
-    /// DB 名 → sqld::Database を返す（存在しない場合 None）
-    pub async fn get(&self, name: &str) -> Option<Arc<sqld::Database>>;
+    /// DB 名 → SqldAdapter を返す（存在しない場合 None）
+    pub async fn get(&self, name: &str) -> Option<Arc<dyn SqldAdapter>> {
+        self.dbs.read().await.get(name).cloned()
+    }
 
-    /// DB 作成: ディレクトリ作成 → sqld オープン → meta 更新
-    pub async fn create(&self, name: &str) -> Result<DbInfo, AppError>;
+    /// DB 作成: validate → RealSqldAdapter::open → meta 更新
+    pub async fn create(&self, name: &str) -> Result<DbInfo, AppError> {
+        validate_db_name(name)?;
+        let mut dbs  = self.dbs.write().await;
+        let mut meta = self.meta.write().await;
+        if dbs.contains_key(name) {
+            return Err(AppError::DbAlreadyExists(name.to_string()));
+        }
+        let path = self.data_dir.join("databases").join(format!("{name}.sqlite"));
+        let adapter = RealSqldAdapter::open(&path, self.config.busy_timeout_ms, false)
+            .await
+            .map_err(|e| AppError::Internal(e))?;
+        let info = DbInfo {
+            id:         uuid::Uuid::new_v4().to_string(),
+            name:       name.to_string(),
+            created_at: chrono::Utc::now(),
+            size_bytes: 0,
+        };
+        meta.databases.push(info.clone());
+        meta.save(&self.data_dir)?;
+        dbs.insert(name.to_string(), Arc::new(adapter) as Arc<dyn SqldAdapter>);
+        Ok(info)
+    }
 
-    /// DB 削除: sqld クローズ → ディレクトリ削除 → meta 更新
-    pub async fn delete(&self, name: &str) -> Result<(), AppError>;
+    /// DB 削除: dbs から削除 → ファイル削除 → meta 更新
+    pub async fn delete(&self, name: &str) -> Result<(), AppError> {
+        let mut dbs  = self.dbs.write().await;
+        let mut meta = self.meta.write().await;
+        if !dbs.contains_key(name) {
+            return Err(AppError::DbNotFound(name.to_string()));
+        }
+        dbs.remove(name);
+        let path = self.data_dir.join("databases").join(format!("{name}.sqlite"));
+        let _ = std::fs::remove_file(&path);
+        meta.databases.retain(|d| d.name != name);
+        meta.save(&self.data_dir)?;
+        Ok(())
+    }
 
-    /// DB 一覧（size_bytes は data.db のファイルサイズ）
-    pub async fn list(&self) -> Vec<DbInfo>;
+    /// DB 一覧（meta から返す）
+    pub async fn list(&self) -> Vec<DbInfo> {
+        self.meta.read().await.databases.clone()
+    }
 
     /// DB 名で DbInfo を返す（存在しない場合は DbNotFound、size_bytes はファイルから動的取得）
     pub async fn get_info(&self, name: &str) -> Result<DbInfo, AppError> {
@@ -1711,13 +1766,17 @@ impl DbManager {
             .find(|d| d.name == name)
             .cloned()
             .ok_or_else(|| AppError::DbNotFound(name.to_string()))?;
-        let db_path = self.data_dir.join("databases").join(name).join("data.db");
+        let db_path = self.data_dir.join("databases").join(format!("{name}.sqlite"));
         let size_bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
         Ok(DbInfo { size_bytes, ..info })
     }
 
-    /// シャットダウン時: 全 sqld::Database を drop
-    pub async fn close_all(self);
+    /// シャットダウン時: dbs を drain して Arc<dyn SqldAdapter> をドロップ
+    pub async fn close_all(self) {
+        let mut dbs = self.dbs.write().await;
+        dbs.clear();
+        tracing::info!("DbManager: all databases closed");
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1733,7 +1792,7 @@ pub struct DbInfo {
 
 ```rust
 // auth/mod.rs
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Claims {
     pub iss: Option<String>,
     pub sub: String,                             // token_id（tok_xxx）
@@ -1756,8 +1815,8 @@ impl Claims {
         }
     }
 
-    /// 書き込み権限の有無を返す（AccessLevel::Rw の場合のみ true）
-    pub fn can_write(&self) -> bool {
+    /// DB 名に対する書き込み権限の有無を返す（AccessLevel::Rw の場合のみ true）
+    pub fn can_write_db(&self, _db_name: &str) -> bool {
         matches!(self.a, AccessLevel::Rw)
     }
 
@@ -2856,11 +2915,30 @@ fn sql_val_to_hrana(v: SqlValue) -> Value {
 ```rust
 // handlers/pipeline.rs
 
+/// JSON パース失敗を 400 INVALID_REQUEST で返すカスタムエクストラクタ
+pub struct JsonPayload<T>(pub T);
+
+#[async_trait::async_trait]
+impl<T, S> axum::extract::FromRequest<S> for JsonPayload<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        let Json(val) = axum::extract::Json::<T>::from_request(req, state)
+            .await
+            .map_err(|_| AppError::InvalidRequest)?;
+        Ok(JsonPayload(val))
+    }
+}
+
 // 単一 DB ハンドラ（Phase 1）
 pub async fn handle(
     State(state): State<Arc<AppState>>,
     Authenticated(claims): Authenticated,
-    Json(req): Json<PipelineRequest>,
+    JsonPayload(req): JsonPayload<PipelineRequest>,
 ) -> Result<Json<PipelineResponse>, AppError> {
     let db = state.db_mgr.get("default").await
         .ok_or_else(|| AppError::DbNotFound("default".to_string()))?;
@@ -2873,7 +2951,7 @@ pub async fn handle_db(
     State(state): State<Arc<AppState>>,
     Authenticated(claims): Authenticated,
     Path(db_name): Path<String>,
-    Json(req): Json<PipelineRequest>,
+    JsonPayload(req): JsonPayload<PipelineRequest>,
 ) -> Result<Json<PipelineResponse>, AppError> {
     let db = state.db_mgr.get(&db_name).await
         .ok_or_else(|| AppError::DbNotFound(db_name.clone()))?;
@@ -2887,46 +2965,59 @@ async fn execute_pipeline(
     requests: &[StreamRequest],
     db_name: &str,
 ) -> Result<Vec<StreamResult>, AppError> {
-    let mut results = Vec::with_capacity(requests.len());
+    let mut responses = Vec::with_capacity(requests.len());
     for req in requests {
         match req {
             StreamRequest::Execute { stmt } => {
-                if is_write_stmt(&stmt.sql) && claims.resolve_access(db_name) != AccessLevel::Rw {
-                    results.push(StreamResult::Error {
+                if is_write_stmt(&stmt.sql) && !claims.can_write_db(db_name) {
+                    responses.push(StreamResult::Error {
                         error: HranaError { message: "write not permitted".into(), code: "PERMISSION_DENIED".into() },
                     });
-                } else {
-                    let args: Result<Vec<_>, _> = stmt.args.iter().map(hrana_to_sql).collect();
-                    match args {
-                        Err(e) => results.push(StreamResult::Error {
-                            error: HranaError { message: e.to_string(), code: "SQLITE_ERROR".into() },
+                    continue;
+                }
+                let args: Result<Vec<_>, _> = stmt.args.iter().map(hrana_to_sql).collect();
+                match args {
+                    Err(e) => responses.push(StreamResult::Error {
+                        error: HranaError { message: e.to_string(), code: "SQLITE_ERROR".into() },
+                    }),
+                    Ok(args) => match db.execute(&stmt.sql, args, stmt.want_rows).await {
+                        Ok(result) => responses.push(StreamResult::Ok {
+                            response: StreamResponse::Execute { result: sql_to_stmt_result(result) },
                         }),
-                        Ok(args) => match db.execute(&stmt.sql, args, stmt.want_rows).await {
-                            Ok(result) => results.push(StreamResult::Ok {
-                                response: StreamResponse::Execute { result: sql_to_stmt_result(result) },
-                            }),
-                            Err(e) => results.push(StreamResult::Error {
-                                error: HranaError { message: e.to_string(), code: "SQLITE_ERROR".into() },
-                            }),
-                        },
-                    }
+                        Err(AppError::Sqld(msg)) => responses.push(StreamResult::Error {
+                            error: HranaError { message: msg.clone(), code: sqld_error_code(&msg) },
+                        }),
+                        Err(e) => return Err(e),
+                    },
                 }
             }
             StreamRequest::Sequence { sql } => {
                 // execute_batch に丸ごと渡すことで文字列リテラル内のセミコロンを誤分割しない
                 match db.execute_batch(sql).await {
-                    Ok(()) => results.push(StreamResult::Ok {
+                    Ok(()) => responses.push(StreamResult::Ok {
                         response: StreamResponse::Sequence,
                     }),
-                    Err(e) => results.push(StreamResult::Error {
-                        error: HranaError { message: e.to_string(), code: "SQLITE_ERROR".into() },
+                    Err(AppError::Sqld(msg)) => responses.push(StreamResult::Error {
+                        error: HranaError { message: msg.clone(), code: sqld_error_code(&msg) },
                     }),
+                    Err(e) => return Err(e),
                 }
             }
-            StreamRequest::Close => break,
+            StreamRequest::Close => {
+                responses.push(StreamResult::Ok { response: StreamResponse::Close });
+                break;
+            }
         }
     }
-    Ok(results)
+    Ok(responses)
+}
+
+fn sqld_error_code(msg: &str) -> String {
+    if msg.contains("UNIQUE constraint") {
+        "SQLITE_CONSTRAINT".to_string()
+    } else {
+        "SQLITE_ERROR".to_string()
+    }
 }
 
 
@@ -3015,34 +3106,26 @@ T-9: `token create` サブコマンド
 pub struct Authenticated(pub Claims);
 // 利用側: Authenticated(claims): Authenticated
 
-impl<S> axum::extract::FromRequestParts<S> for Authenticated
-where
-    S: Send + Sync,
-    SharedState: axum::extract::FromRef<S>,
-{
+impl axum::extract::FromRequestParts<SharedState> for Authenticated {
     type Rejection = AppError;
 
     async fn from_request_parts(
         parts: &mut http::request::Parts,
-        state: &S,
+        state: &SharedState,
     ) -> Result<Self, Self::Rejection> {
-        let state = SharedState::from_ref(state);
-
         // 認証無効モード（jwt_secret 未設定）はスキップ
         if !state.auth.is_auth_enabled() {
+            tracing::debug!("auth disabled — passing unauthenticated claims");
             return Ok(Authenticated(Claims::unauthenticated()));
         }
 
-        let header = parts.headers
+        let raw = parts.headers
             .get(http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
             .ok_or(AppError::AuthRequired)?;
 
-        let token = header
-            .strip_prefix("Bearer ")
-            .ok_or(AppError::AuthInvalid)?;
-
-        let claims = state.auth.verify(token).await?;
+        let claims = state.auth.verify(raw).await?;
         Ok(Authenticated(claims))
     }
 }
@@ -3097,6 +3180,11 @@ impl AuthState {
     pub async fn verify(&self, _raw_token: &str) -> Result<Claims, AppError> {
         Err(AppError::AuthInvalid)
     }
+}
+
+/// Phase 4 スタブ。tokens.json の読み込みは Phase 4 で実装する。
+pub fn load_tokens(_config: &Config) -> anyhow::Result<Vec<()>> {
+    Ok(vec![])
 }
 ```
 
@@ -3523,10 +3611,7 @@ pub fn validate_db_name(name: &str) -> Result<(), AppError> {
     if !DB_NAME_RE.is_match(name) {
         return Err(AppError::InvalidDbName);
     }
-    if RESERVED_NAMES.contains(&name) {
-        return Err(AppError::InvalidDbName);
-    }
-    if name.contains(BRANCH_SEP) {
+    if RESERVED_NAMES.contains(&name) || name.contains(BRANCH_SEP) {
         return Err(AppError::DbReservedName);
     }
     Ok(())
@@ -3544,42 +3629,36 @@ pub fn branch_db_name(source: &str, branch: &str) -> String {
 ```rust
 // db/meta.rs
 
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct DatabasesMeta { pub databases: Vec<DbInfo> }
-pub struct TokensMeta    { pub tokens: Vec<TokenRecord> }
 
-pub fn load_databases(data_dir: &Path) -> anyhow::Result<DatabasesMeta> {
-    load_or_init(data_dir.join("meta").join("databases.json"))
-}
-
-pub fn load_tokens(data_dir: &Path) -> anyhow::Result<TokensMeta> {
-    load_or_init(data_dir.join("meta").join("tokens.json"))
-}
-
-fn load_or_init<T>(path: PathBuf) -> anyhow::Result<T>
-where
-    T: serde::de::DeserializeOwned + serde::Serialize + Default,
-{
-    if path.exists() {
-        let s = std::fs::read_to_string(&path)?;
-        Ok(serde_json::from_str(&s)?)
-    } else {
-        let val = T::default();
-        save_atomic(&path, &val)?;
-        Ok(val)
+impl DatabasesMeta {
+    /// meta/databases.json をロードする（なければ空で初期化）
+    pub fn load(data_dir: &Path) -> anyhow::Result<Self> {
+        let path = data_dir.join("meta").join("databases.json");
+        if path.exists() {
+            let s = std::fs::read_to_string(&path)?;
+            Ok(serde_json::from_str(&s)?)
+        } else {
+            let val = Self::default();
+            val.save(data_dir)?;
+            Ok(val)
+        }
     }
-}
 
-// tmp → fsync → rename によるアトミック保存（WAL マニフェストと同一パターン）
-pub fn save_atomic<T: serde::Serialize>(path: &Path, val: &T) -> anyhow::Result<()> {
-    let tmp = path.with_extension("tmp");
-    let mut f = std::fs::File::create(&tmp)?;
-    let json = serde_json::to_vec_pretty(val)?;
-    use std::io::Write;
-    f.write_all(&json)?;
-    f.sync_all()?;
-    drop(f);
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    /// meta/databases.json にアトミック保存（tmp → fsync → rename）
+    pub fn save(&self, data_dir: &Path) -> anyhow::Result<()> {
+        let path = data_dir.join("meta").join("databases.json");
+        let tmp = path.with_extension("tmp");
+        let mut f = std::fs::File::create(&tmp)?;
+        let json = serde_json::to_vec_pretty(self)?;
+        use std::io::Write;
+        f.write_all(&json)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    }
 }
 ```
 
@@ -3682,108 +3761,20 @@ T2-6: 統合テスト TC-2-1〜TC-2-6（TC-2-5b 含む）
 #### 実装詳細
 
 ```rust
-// handlers/admin/databases.rs
+// http/admin/mod.rs
+// Phase 7 以降で実装する。現在は全ハンドラが 501 NOT IMPLEMENTED を返す。
 
-/// POST /admin/v1/databases  → DB 作成
-pub async fn create_db(
-    State(state): State<Arc<AppState>>,
-    _auth: AdminAuth,
-    Json(req): Json<CreateDbRequest>,
-) -> Result<(StatusCode, Json<DbInfo>), AppError> {
-    validate_db_name(&req.name)?;
-    let info = state.db_mgr.create(&req.name).await?;
-    Ok((StatusCode::CREATED, Json(info)))
+pub async fn list(_: axum::extract::Request) -> impl axum::response::IntoResponse {
+    axum::http::StatusCode::NOT_IMPLEMENTED
 }
-
-/// GET /admin/v1/databases  → DB 一覧
-pub async fn list_dbs(
-    State(state): State<Arc<AppState>>,
-    _auth: AdminAuth,
-) -> Result<Json<Vec<DbInfo>>, AppError> {
-    Ok(Json(state.db_mgr.list().await))
+pub async fn create(_: axum::extract::Request) -> impl axum::response::IntoResponse {
+    axum::http::StatusCode::NOT_IMPLEMENTED
 }
-
-/// GET /admin/v1/databases/:name  → DB 詳細
-pub async fn get_db(
-    State(state): State<Arc<AppState>>,
-    _auth: AdminAuth,
-    Path(name): Path<String>,
-) -> Result<Json<DbInfo>, AppError> {
-    state.db_mgr.get_info(&name).await.map(Json)
+pub async fn get(_: axum::extract::Request) -> impl axum::response::IntoResponse {
+    axum::http::StatusCode::NOT_IMPLEMENTED
 }
-
-/// DELETE /admin/v1/databases/:name  → DB 削除
-pub async fn delete_db(
-    State(state): State<Arc<AppState>>,
-    _auth: AdminAuth,
-    Path(name): Path<String>,
-) -> Result<StatusCode, AppError> {
-    state.db_mgr.delete(&name).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-// handlers/admin/tokens.rs
-
-#[derive(serde::Deserialize)]
-pub struct IssueTokenRequest {
-    pub access: AccessLevel,
-    pub expiry: Option<String>,          // "30d" / "24h" / "3600s" 形式
-    pub dbs:    Option<HashMap<String, AccessLevel>>,
-}
-
-#[derive(serde::Serialize)]
-pub struct TokenResponse {
-    pub id:         String,
-    pub token:      String,
-    pub access:     AccessLevel,
-    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-/// POST /admin/v1/tokens  → トークン発行
-pub async fn issue_token(
-    State(state): State<Arc<AppState>>,
-    _auth: AdminAuth,
-    Json(req): Json<IssueTokenRequest>,
-) -> Result<(StatusCode, Json<TokenResponse>), AppError> {
-    // "30d" / "24h" / "3600s" → chrono::DateTime<Utc>
-    let exp: Option<chrono::DateTime<chrono::Utc>> = req.expiry.as_deref()
-        .map(|s| parse_expiry(s).map(|d| chrono::Utc::now() + d))
-        .transpose()
-        .map_err(|e| AppError::Internal(e))?;
-    let (token_id, jwt) = state.auth.issue(req.access.clone(), exp, req.dbs).await?;
-    Ok((StatusCode::CREATED, Json(TokenResponse {
-        id:         token_id,
-        token:      jwt,
-        access:     req.access,
-        expires_at: exp,
-    })))
-}
-
-/// GET /admin/v1/tokens  → トークン一覧（JWT シークレット非公開）
-pub async fn list_tokens(
-    State(state): State<Arc<AppState>>,
-    _auth: AdminAuth,
-) -> Result<Json<Vec<TokenRecord>>, AppError> {
-    Ok(Json(state.auth.list_tokens().await))
-}
-
-/// GET /admin/v1/tokens/:id  → トークン詳細
-pub async fn get_token(
-    State(state): State<Arc<AppState>>,
-    _auth: AdminAuth,
-    Path(id): Path<String>,
-) -> Result<Json<TokenRecord>, AppError> {
-    state.auth.get_token(&id).await.map(Json)
-}
-
-/// DELETE /admin/v1/tokens/:id  → トークン失効（冪等）
-pub async fn revoke_token(
-    State(state): State<Arc<AppState>>,
-    _auth: AdminAuth,
-    Path(id): Path<String>,
-) -> Result<StatusCode, AppError> {
-    state.auth.revoke(&id, &state.config.tokens_path()).await?;
-    Ok(StatusCode::NO_CONTENT)
+pub async fn delete(_: axum::extract::Request) -> impl axum::response::IntoResponse {
+    axum::http::StatusCode::NOT_IMPLEMENTED
 }
 ```
 
