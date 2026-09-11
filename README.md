@@ -1,53 +1,53 @@
 # Adlaire DB
 
-libSQL ワイヤプロトコル（hrana）互換のセルフホスト DB サーバー。libSQL フォーク（sqld）を基盤として Rust で実装する。
+libSQL ワイヤプロトコル（hrana-http v2）互換のセルフホスト DB サーバー。
+Rust + axum + libsql（embedded SQLite）で実装する。
 
-## 概要
+## 現在の状態
 
-Adlaire DB は [Turso Cloud](https://turso.tech) が提供する機能をセルフホストで再現する。既存の libSQL クライアント SDK（TypeScript・Rust・Go）から接続 URL を差し替えるだけで動作する。
-
-## 特徴
-
-- **libSQL クライアント SDK 互換** — Turso Cloud の URL を Adlaire DB の URL に置き換えるだけで動作
-- **シングルバイナリ** — `./adlaire-db serve --data ./data` 一コマンドで起動
-- **hrana-http v2 / hrana-ws v3** — Turso Cloud と同じワイヤプロトコル
-- **マルチ DB** — URL パスでデータベースを切り替え（`/{db-name}/v2/pipeline`）
-- **JWT 認証** — HS256 Bearer トークン、DB スコープ、失効管理
-- **WAL レプリケーション** — プライマリ・レプリカ構成（Phase 4）
-- **Backup / PITR / ブランチ** — WAL アーカイブからの任意時点復元（Phase 5・6）
-
-## 実装フェーズ
+**Phase 3 実装済み** — HTTP サーバー・hrana-http v2 パイプライン・シングル DB モードが動作する。
 
 | フェーズ | 内容 | 状態 |
 |----------|------|------|
-| Phase 1 | シングル DB・HTTP API（hrana-http v2）・JWT 認証 | 設計中 |
-| Phase 2 | マルチ DB・管理 API・DB スコープ JWT | 設計中 |
-| Phase 3 | WebSocket API（hrana-ws v3）・ATTACH DATABASE・メトリクス | 設計中 |
-| Phase 4 | プライマリ・レプリカ構成・WAL レプリケーション | 設計中 |
-| Phase 5 | オンラインバックアップ・PITR | 設計中 |
-| Phase 6 | ブランチ | 設計中 |
-| Phase 7 | SQLite 拡張機能・内製化・HA | 計画中 |
+| Phase 1 | Cargo ワークスペース・clap CLI 骨格 | ✅ 完了 |
+| Phase 2 | データディレクトリ初期化・libsql 統合・プロセスロック | ✅ 完了 |
+| Phase 3 | HTTP サーバー・hrana-http v2 パイプライン・シングル DB | ✅ 完了 |
+| Phase 4 | JWT 認証・`token create` コマンド | 🔲 未実装 |
+| Phase 5 | hrana WebSocket v3 | 🔲 未実装 |
+| Phase 6 | マルチ DB URL ルーティング | 🔲 未実装 |
+| Phase 7 | 管理 API（DB CRUD・トークン CRUD） | 🔲 未実装 |
+| Phase 8 | WebSocket（hrana-ws v3） | 🔲 未実装 |
+| Phase 10 | プライマリ・レプリカ構成 | 🔲 未実装 |
+| Phase 12-13 | バックアップ・PITR | 🔲 未実装 |
+| Phase 14 | ブランチ | 🔲 未実装 |
 
-## 起動方法（Phase 1 予定）
+## 起動方法
 
 ```sh
-adlaire-db serve \
-  --data /var/lib/adlaire \
-  --port 8080 \
-  --admin-port 8081 \
-  --auth-jwt-secret <32バイト以上のシークレット>
+# 認証なし（開発用）
+adlaire-db serve --data ./data --port 8080
+
+# JWT 認証は Phase 4 で実装予定。現在は --auth-jwt-secret を指定すると起動を拒否する。
 ```
 
-## 接続例
+## 動作確認
+
+```sh
+# ヘルスチェック
+curl http://localhost:8080/v2/health
+# → {"status":"ok"}
+
+# SQL 実行
+curl -s -X POST http://localhost:8080/v2/pipeline \
+  -H "Content-Type: application/json" \
+  -d '{"requests":[{"type":"execute","stmt":{"sql":"SELECT 1","want_rows":true}}]}' | jq .
+```
+
+## libSQL クライアント SDK からの接続
 
 ```typescript
 import { createClient } from "@libsql/client";
-
-const db = createClient({
-  url: "http://localhost:8080",
-  authToken: "<JWT>",
-});
-
+const db = createClient({ url: "http://localhost:8080" });
 const result = await db.execute("SELECT 1");
 ```
 
@@ -55,11 +55,20 @@ const result = await db.execute("SELECT 1");
 
 | 項目 | 内容 |
 |------|------|
-| 実装言語 | Rust |
-| ストレージ基盤 | libSQL フォーク（sqld） |
-| HTTP フレームワーク | axum + tokio |
-| WebSocket | tokio-tungstenite |
-| 対象 OS | Linux (x86_64 / aarch64) |
+| 実装言語 | Rust 2021 edition |
+| ストレージ基盤 | `libsql` crate（embedded SQLite / WAL モード）|
+| HTTP フレームワーク | `axum` 0.7 + `tokio` |
+| シリアライゼーション | `serde_json` |
+| ロギング | `tracing` + `tracing-subscriber`（JSON 形式）|
+| CLI | `clap` 4（derive API）|
+| 対象 OS | Linux |
+
+## 制約（Phase 3 時点）
+
+- JWT 認証は未実装（`--auth-jwt-secret` を指定すると起動拒否）
+- 管理 API（`/admin/v1/...`）はすべて 501 を返す
+- "default" データベースのみ利用可能（マルチ DB は Phase 6 以降）
+- WebSocket（hrana-ws v3）は未対応
 
 ## 仕様書
 
