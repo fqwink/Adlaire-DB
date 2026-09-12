@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.45  
+**バージョン：** 0.46  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-12  
 
@@ -1299,6 +1299,8 @@ GET /admin/v1/metrics     全 DB のメトリクス取得
 ```json
 {
   "uptime_seconds": 3600,
+  "tokens_total": 5,
+  "tokens_revoked": 1,
   "databases": [
     {
       "name": "my-db",
