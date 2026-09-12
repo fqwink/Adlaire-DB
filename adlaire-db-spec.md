@@ -1,8 +1,8 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.35  
+**バージョン：** 0.42  
 **ステータス：** 設計中  
-**最終更新：** 2026-09-11  
+**最終更新：** 2026-09-12  
 
 ---
 
@@ -21,15 +21,16 @@ libSQL クライアント SDK（TypeScript・Rust・Go 等）から接続 URL �
 | 比較対象 | Adlaire DB との関係 |
 |----------|---------------------|
 | Turso Cloud | ワイヤプロトコル（hrana）互換の参照実装。埋め込みレプリカは対象外 |
-| libSQL / sqld | フォーク元。Adlaire DB の全体基盤 |
-| SQLite | libSQL 経由で互換性を維持 |
+| libSQL / libsql crate | ワイヤプロトコルと embedded SQLite の実装参照。libsql 0.6（crates.io）を組み込み利用 |
+| SQLite | libsql crate 経由で互換性を維持 |
 
 ### 1.3 固定制約
 
 | 項目 | 内容 |
 |------|------|
 | 実装言語 | Rust + 標準ライブラリ |
-| ストレージ・SQL 基盤 | libSQL フォーク（sqld 含む）|
+| ストレージ・SQL 基盤 | libsql crate 0.6（embedded SQLite / WAL モード）|
+| 外部フレームワーク | 使用禁止。外部クレートは使用可能だが、Web フレームワーク（axum・actix-web・rocket 等）は採用しない |
 | 目標機能 | hrana プロトコル互換・サーバー特化機能 |
 | 将来方針 | libSQL 内部の段階的内製化（詳細は各フェーズで検討）|
 | デプロイ形態 | シングルバイナリ起動 |
@@ -53,6 +54,9 @@ SQLite・libSQL フォーク以外の外部 DB ライブラリ（PostgreSQL・My
 
 **I-5：内製化は段階的・計画的に**  
 libSQL 内部コンポーネントの内製化はフェーズ完了後に計画・判断する。「実装が大変だから」という理由で無計画に外部依存を追加することは認めない。
+
+**I-6：外部 Web フレームワーク不使用**  
+HTTP サーバー層に Web フレームワーク（axum・actix-web・rocket 等）を使用しない。hyper 等の低レベル HTTP ライブラリ（クレート）は使用可能だが、ルーティング・ミドルウェア・リクエスト解析の構造はフレームワークに依存せず自前で実装する。
 
 ---
 
@@ -130,7 +134,7 @@ libSQL クライアント SDK / curl / WebSocket クライアント
                         │
                         ▼
 ┌──────────────────────────────────────────────────┐
-│              libSQL フォーク（sqld）              │
+│           libsql crate 0.6（embedded SQLite）     │
 │  SQL パーサ / クエリ実行 / WAL / ページストレージ │
 └──────────────────────────────────────────────────┘
 ```
@@ -159,154 +163,181 @@ libSQL クライアント SDK / curl / WebSocket クライアント
     └── branches.json             # ブランチメタデータ（Phase 14）
 ```
 
-### 3.3 libSQL フォークとの統合方式
+### 3.3 libsql crate との統合方式
 
-sqld（libSQL のサーバーコンポーネント）を **Rust ライブラリとして組み込む**。sqld をサブプロセスとして起動してプロキシする方式は採らない。
+`libsql` crate（crates.io, embedded SQLite モード）を **Rust ライブラリとして組み込む**。sqld サブプロセスの起動・git submodule の利用は行わない。
 
 ```
 adlaire-db バイナリ（Rust）
 ├── Adlaire サーバー層（自前実装）
 │   ├── HTTP ルーティング・認証・管理 API
 │   └── マルチDB ルーター
-└── sqld コア（libSQL フォークとして静的リンク）
+└── libsql crate 0.6（embedded SQLite）
     ├── SQL パーサ・クエリエグゼキューター
     ├── WAL 管理
     └── ページストレージ
 ```
 
-**Phase 1 での sqld 改変範囲：**
+**libsql crate の利用範囲：**
 
-| sqld の機能 | Adlaire での扱い |
-|-------------|-----------------|
-| SQL パーサ・クエリ実行 | そのまま使用 |
-| WAL・ページストレージ | そのまま使用 |
-| sqld 内蔵 HTTP サーバー | 無効化。Adlaire サーバー層が代替 |
-| sqld 内蔵認証 | 無効化。Adlaire の JWT 認証が代替 |
-| sqld 内蔵管理 API | 無効化。Adlaire 管理 API が代替 |
-| hrana-http プロトコル実装 | sqld のものを再利用するか Adlaire で再実装するかは実装時に判断 |
+| libsql の機能 | Adlaire での扱い |
+|--------------|-----------------|
+| SQL パーサ・クエリ実行 | `libsql::Connection::query / execute / execute_batch` を使用 |
+| WAL・ページストレージ | libsql が内部処理。`PRAGMA` で設定（journal_mode / synchronous / busy_timeout） |
+| HTTP サーバー | libsql は持たない。Adlaire が hyper で実装 |
+| 認証 | libsql は持たない。Adlaire が JWT で実装 |
+| hrana-http プロトコル | libsql は持たない。Adlaire 独自型（hrana/types.rs）で実装 |
 
-**改変の基本方針：**
-- Phase 1 では sqld への変更を最小限に留める
-- sqld の `Connection` / `Database` 型を直接呼び出す形で統合する
-- sqld の HTTP サーバーループは起動しない（Adlaire サーバーが HTTP を受け付ける）
+**統合の基本方針：**
+- `libsql::Builder::new_local(path).build().await?` でデータベースをオープンする
+- `db.connect()?` でコネクションを取得し、クエリを実行する
+- HTTP・認証・管理 API は Adlaire が完全に実装し libsql には依存しない
 
 #### 3.3.1 Cargo ワークスペース構成
 
-Adlaire DB のリポジトリは libSQL フォークを Git submodule として管理し、Cargo workspace で参照する。
+Adlaire DB のリポジトリはシングルワークスペースで管理する。libSQL は crates.io の `libsql` crate（embedded SQLite モード）を使用する（git submodule は使わない）。
 
 ```
 adlaire-db/              ← このリポジトリ
-├── Cargo.toml           ← workspace root
-├── crates/
-│   └── adlaire-server/  ← Adlaire サーバー層
-│       ├── Cargo.toml
-│       └── src/
-└── libsql/              ← git submodule (fqwink/libsql fork)
-    ├── sqld/            ← sqld crate
-    └── libsql-sys/      ← SQLite バインディング
+├── Cargo.toml           ← workspace root（[workspace.dependencies] で依存一括管理）
+├── adlaire-server/      ← Adlaire サーバー層 crate
+│   ├── Cargo.toml       ← { workspace = true } 参照のみ
+│   └── src/
+└── Cargo.lock           ← リポジトリにコミットして依存をロック
 ```
 
 **workspace Cargo.toml：**
 
 ```toml
 [workspace]
-members = [
-    "crates/adlaire-server",
-    "libsql/sqld",
-]
+members = ["adlaire-server"]
 resolver = "2"
+
+[workspace.dependencies]
+anyhow             = "1"
+async-trait        = "0.1"
+base64             = "0.22"
+chrono             = { version = "0.4", features = ["serde"] }
+http-body-util     = "0.1"
+hyper              = { version = "1", features = ["full"] }
+hyper-util         = { version = "0.1", features = ["tokio"] }
+clap               = { version = "4", features = ["derive"] }
+libc               = "0.2"
+libsql             = "0.6"   # embedded SQLite（WAL モード）
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+thiserror          = "1"
+tokio              = { version = "1", features = ["full"] }
+toml               = "0.8"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+uuid               = { version = "1", features = ["v4"] }
+regex              = "1"
+# Phase 4〜 で追加予定
+# jsonwebtoken = "9"
+# Phase 8〜 で追加予定
+# tokio-tungstenite = "0.21"
+# Phase 9〜 で追加予定
+# dashmap = "5"
+bytes              = "1"
+# Phase 10〜 で追加予定
+# url   = "2"
+# crc32fast = "1"
 ```
 
-**adlaire-server/Cargo.toml 主要依存：**
+**adlaire-server/Cargo.toml：**
 
 ```toml
+[package]
+name    = "adlaire-server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "adlaire-db"
+path = "src/main.rs"
+
 [dependencies]
-sqld            = { path = "../../libsql/sqld", default-features = false, features = ["core"] }
-tokio           = { version = "1", features = ["full"] }
-axum            = "0.7"
-tower           = "0.4"
-serde           = { version = "1", features = ["derive"] }
-serde_json      = "1"
-jsonwebtoken    = "9"
-thiserror       = "1"                                      # AppError derive
-anyhow          = "1"                                      # 内部エラーラッパー・main() 戻り値
-chrono          = { version = "0.4", features = ["serde"] } # DateTime<Utc>
-crc32fast       = "1"                                      # WAL フレームチェックサム
-dashmap         = "5"                                      # Metrics・ReplicationState
-regex           = "1"                                      # DB 名バリデーション
-url             = "2"                                      # ServerRole::Replica の primary_url
-bytes           = "1"                                      # WalFrame::data
-clap            = { version = "4", features = ["derive"] } # CLI パース
-tracing         = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json"] } # 構造化ログ出力
-tokio-tungstenite  = "0.21"                                # Phase 8: WebSocket
-toml            = "0.8"                                    # config.toml パース
-libc            = "0.2"                                    # flock による排他ロック
-base64          = "0.22"                                   # Blob フィールドの Base64 エンコード
-hex             = "0.4"                                    # generate_token_id() の tok_ プレフィックス生成
-uuid            = { version = "1", features = ["v4"] }     # DbInfo::id 生成
+anyhow             = { workspace = true }
+async-trait        = { workspace = true }
+base64             = { workspace = true }
+chrono             = { workspace = true }
+http-body-util     = { workspace = true }
+hyper              = { workspace = true }
+hyper-util         = { workspace = true }
+clap               = { workspace = true }
+libc               = { workspace = true }
+libsql             = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+thiserror          = { workspace = true }
+tokio              = { workspace = true }
+toml               = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid               = { workspace = true }
+regex              = { workspace = true }
+bytes              = { workspace = true }
 
 [dev-dependencies]
-reqwest         = { version = "0.12", features = ["json"] } # TestServer HTTP クライアント
-tempfile        = "3"                                       # TestServer 一時ディレクトリ
-
-[build-dependencies]
-# libsql-sys が SQLite をコンパイルするため cc が必要
-cc = "1"
+reqwest  = { version = "0.12", features = ["json"] }
+tempfile = "3"
 ```
 
-#### 3.3.2 sqld との境界（呼び出しインターフェース）
+#### 3.3.2 libsql crate との境界（呼び出しインターフェース）
 
-Adlaire サーバー層が sqld に対して行う操作は以下の 3 種類に限定する（Phase 1 時点）。
+Adlaire サーバー層が `libsql` crate に対して行う操作は以下の 3 種類に限定する（Phase 3 時点）。
 
 **① DB オープン（起動時・Phase 6 は DB 作成時）**
 
 ```rust
-// 擬似コード。実際の型名は libSQL フォーク実装時に確定する
-let db: sqld::Database = sqld::Database::open(path, sqld::Config {
-    journal_mode: JournalMode::Wal,
-    busy_timeout: Duration::from_millis(5000),
-    ..Default::default()
-})?;
+// db/sqld_adapter.rs の RealSqldAdapter::open() 参照（§14.19）
+let db = libsql::Builder::new_local(path).build().await?;
+let conn = db.connect()?;
+let _ = conn.query("PRAGMA journal_mode=WAL", ()).await?;
+conn.execute("PRAGMA synchronous=NORMAL", ()).await?;
+let _ = conn.query(&format!("PRAGMA busy_timeout={busy_timeout_ms}"), ()).await?;
+// skip_integrity_check=false のとき:
+// let mut rows = conn.query("PRAGMA integrity_check", ()).await?;
+// → ok 以外なら Error: database integrity check failed
 ```
 
 **② SQL 実行（hrana-http v2 pipeline リクエストごと）**
 
 ```rust
-let conn: sqld::Connection = db.connect()?;
-let result: sqld::QueryResult = conn.execute_batch(&statements)?;
-// result を hrana-http v2 レスポンス形式に変換して返す
+// execute() は呼び出しのたびに新規 Connection を生成する（§14.19 注記参照）
+let conn = self.db.connect()?;
+let mut rows = conn.query(sql, params).await?;       // SELECT 系
+conn.execute(sql, params).await?;                    // DML 系
+conn.execute_batch(sql).await?;                      // Sequence リクエスト（複文）
+// rows → hrana-http v2 results[] 形式に変換して返す
 ```
 
 **③ DB クローズ（DB 削除時・サーバーシャットダウン時）**
 
 ```rust
-drop(conn);
-drop(db); // Drop で WAL チェックポイント + ファイルクローズ
+drop(db); // Arc<libsql::Database> の最後の参照が drop されると WAL チェックポイント + ファイルクローズ
 ```
 
-Adlaire サーバー層は sqld の HTTP サーバー・認証・レプリケーション機能を一切呼び出さない。これらは sqld の `core` feature フラグで無効化する（フラグが存在しない場合は Phase 1 着手時に feature 分割を実施する）。
+Adlaire サーバー層は libsql crate の HTTP サーバー・認証・レプリケーション機能を一切使用しない。組み込み SQLite エンジン部分のみを利用する。
 
 #### 3.3.3 hrana-http v2 プロトコル変換層
 
-sqld の `QueryResult` → hrana-http v2 レスポンス JSON への変換は Adlaire サーバー層で実装する。
+`libsql` の行・カラム型 → hrana-http v2 レスポンス JSON への変換は Adlaire サーバー層で実装する。
 
 ```
 POST /v2/pipeline
   ↓ リクエスト JSON をパース（Adlaire）
-  ↓ statements[] を sqld::Connection に渡す（Adlaire → sqld 境界）
-  ↓ sqld::QueryResult を受け取る（sqld → Adlaire 境界）
+  ↓ statements[] を libsql::Connection に渡す（Adlaire → libsql 境界）
+  ↓ libsql の行・カラム型を受け取る（libsql → Adlaire 境界）
   ↓ hrana-http v2 results[] 形式に変換（Adlaire）
   ↓ JSON レスポンスを返す（Adlaire）
 ```
 
-sqld が独自の hrana 実装を持つ場合、その型をそのまま流用することも可とする（実装時判断）。ただし sqld の HTTP サーバーを起動する形にはしない。
+#### 3.3.4 依存ロックダウン方針
 
-#### 3.3.4 Phase 1 の依存ロックダウン方針
-
-- libSQL フォークのコミットハッシュを submodule で固定する
-- Phase 1 着手時に `Cargo.lock` をリポジトリにコミットし、依存バージョンをロックする
-- フォーク内部の変更は必ず diff レビューを行い、意図しない upstream 取り込みを防ぐ
+- `Cargo.lock` をリポジトリにコミットし、依存バージョンをロックする
+- `libsql` crate は crates.io からバージョン固定で取得する（git submodule 不使用）
 
 #### 3.3.5 クレート一覧
 
@@ -314,12 +345,13 @@ sqld が独自の hrana 実装を持つ場合、その型をそのまま流用�
 
 | クレート | バージョン | 用途 | 導入フェーズ |
 |---------|-----------|------|------------|
-| `sqld`（libSQL fork） | submodule 固定 | SQL 実行 / WAL / ページストレージ | 1 |
+| `libsql` | 0.6 | 組み込み SQLite（WAL モード）| 1 |
 | `tokio` | 1 | 非同期ランタイム | 1 |
-| `axum` | 0.7 | HTTP フレームワーク・ルーティング | 1 |
-| `tower` | 0.4 | ミドルウェアスタック | 1 |
+| `hyper` | 1 | 低レベル HTTP ライブラリ | 1 |
+| `http-body-util` | 0.1 | リクエストボディ読み取りユーティリティ | 1 |
+| `hyper-util` | 0.1 | tokio IO アダプタ（`TokioIo`）| 1 |
 | `serde` / `serde_json` | 1 | JSON シリアライズ・デシリアライズ | 1 |
-| `jsonwebtoken` | 9 | JWT HS256 署名・検証 | 1 |
+| `jsonwebtoken` | 9 | JWT HS256 署名・検証 | 4 |
 | `thiserror` | 1 | `AppError` derive | 1 |
 | `anyhow` | 1 | 内部エラーラッパー・`main()` 戻り値 | 1 |
 | `clap` | 4 | CLI パース（derive マクロ） | 1 |
@@ -331,12 +363,13 @@ sqld が独自の hrana 実装を持つ場合、その型をそのまま流用�
 | `toml` | 0.8 | `config.toml` デシリアライズ | 1 |
 | `libc` | 0.2 | `flock` による排他プロセスロック | 1 |
 | `base64` | 0.22 | Blob フィールドの Base64 エンコード | 1 |
-| `hex` | 0.4 | `generate_token_id()` の hex エンコード | 1 |
+| `uuid` | 1 | DB ID・トークン ID 生成（v4） | 1 |
+| `async-trait` | 0.1 | `SqldAdapter` トレイトの async fn | 1 |
 | `dashmap` | 5 | `Metrics`・`ReplicationState` の並行マップ | 9 |
 | `url` | 2 | `ServerRole::Replica` の `primary_url` 型 | 10 |
-| `bytes` | 1 | WAL フレームバッファ（`WalFrame::data`） | 10 |
+| `bytes` | 1 | WAL フレームバッファ（`WalFrame::data`）・hyper レスポンスボディ | 1 |
 | `crc32fast` | 1 | WAL フレーム CRC32 チェックサム | 10 |
-| `cc`（build-dep） | 1 | `libsql-sys` が SQLite をコンパイルするためのビルド依存 | 1 |
+| `cc`（推移的ビルド依存） | 1 | `libsql-sys` → `libsql` の推移的依存。`libsql-sys` が SQLite C ソースをコンパイルするために使用。`Cargo.toml` には書かない | 1 |
 
 **内製クレート一覧（現行 + 計画）：**
 
@@ -368,7 +401,7 @@ sqld が独自の hrana 実装を持つ場合、その型をそのまま流用�
 
 1. `POST /admin/v1/databases` を受信
 2. `databases/{name}/` ディレクトリを作成（既存なら `DB_ALREADY_EXISTS` エラー）
-3. sqld で `data.db` を初期化（空の SQLite DB）
+3. `libsql::Builder::new_local()` で `data.db` を初期化（空の SQLite DB）
 4. `meta/databases.json` にメタデータを追記
 5. 成功レスポンスを返す
 
@@ -384,44 +417,37 @@ sqld が独自の hrana 実装を持つ場合、その型をそのまま流用�
 
 #### 3.5.1 hrana-http 変換層の方針
 
-sqld は hrana-http の型（ステートメント・カラム・行・エラー）を Rust の struct として持つ。Adlaire ではこの**型だけを借用**し、sqld の HTTP サーバーは起動しない。
+Adlaire は hrana-http の型（ステートメント・カラム・行・エラー）を**自前で定義**し、JSON の受け取りから libsql への受け渡し、結果の返却までを独自実装する。
 
-**採用する方式：sqld 型流用 + Adlaire 独自シリアライズ**
+**採用する方式：Adlaire 独自型 + libsql 直接呼び出し**
 
 ```
 POST /v2/pipeline
-  ↓ Adlaire: JSON → sqld の Statement 型にデシリアライズ
-  ↓ sqld: Connection::execute() を呼び出す
-  ↓ sqld: QueryResult 型を返す
-  ↓ Adlaire: QueryResult → hrana-http v2 JSON にシリアライズ
+  ↓ Adlaire: JSON → Adlaire 独自型（hrana/types.rs の Stmt 等）にデシリアライズ
+  ↓ Adlaire: libsql::Connection::execute() / query() / execute_batch() を呼び出す
+  ↓ Adlaire: libsql の行・カラム型を hrana-http v2 JSON にシリアライズ
   ↓ Adlaire: HTTP レスポンスを返す
 ```
 
-sqld の hrana HTTP ハンドラ関数（axum router 等）は使わない。JSON ⇔ sqld 型のシリアライズコードが sqld に存在する場合は `pub use` で再利用することを許容するが、sqld の tokio ランタイムや axum インスタンスには依存しない。
+libsql crate の HTTP サーバーや hrana ハンドラは使用しない（libsql embedded モードにはそれらは存在しない）。
 
-理由：sqld の HTTP サーバーを起動すると認証・管理 API の無効化が困難になり、Adlaire の制御から外れるリスクがある。
-
-#### 3.5.2 libSQL フォーク管理方針
+#### 3.5.2 依存バージョン管理方針
 
 | 項目 | 方針 |
 |------|------|
-| **fork タイミング** | Phase 1 着手直前に `github.com/tursodatabase/libsql` を fork する |
-| **fork リポジトリ名** | `fqwink/libsql`（予定）|
-| **upstream リモート** | `git remote add upstream https://github.com/tursodatabase/libsql` を登録し追従を可能にする |
-| **upstream 追従頻度** | 月 1 回、upstream の `main` をレビューして取り込む。セキュリティパッチは随時 |
-| **独自変更の範囲（Phase 1〜7）** | 最小限。sqld の feature flag 追加のみ。SQL パーサ・WAL・ストレージには触れない |
-| **独自変更の記録** | `ADLAIRE_PATCHES.md` を fork リポジトリに置き、変更の理由と対象コミットを記録する |
-| **upstream との diff 管理** | `git diff upstream/main..HEAD -- sqld/` を CI で常時確認し、意図しない乖離を検出する |
+| **libsql バージョン** | `libsql = "0.6"` を `[workspace.dependencies]` に固定する |
+| **Cargo.lock** | リポジトリにコミットし、依存バージョンをロックする |
+| **バージョン更新** | マイナーアップデートは changelog を確認し、テストが通ることを確認してから更新する |
 
 #### 3.5.3 内製化ロードマップ（Phase 15 以降）
 
-内製化の優先順位は「Adlaire の差別化に直結するか」と「upstream との依存切り離し効果が大きいか」で決める。
+内製化の優先順位は「Adlaire の差別化に直結するか」と「libsql crate への依存切り離し効果が大きいか」で決める。
 
 | 優先 | 対象コンポーネント | 理由 |
 |------|-------------------|----|
-| 1 | HTTP / 認証 / 管理 API | Phase 1〜7 で既に Adlaire 実装済み。sqld 依存なし |
-| 2 | WAL チェックポイント制御 | レプリケーション（Phase 10）に直結。sqld の WAL コードは比較的分離されている |
-| 3 | hrana-http/ws プロトコル変換 | 変換レイヤーを自前化すれば sqld の型依存を完全に排除できる |
+| 1 | HTTP / 認証 / 管理 API | Phase 1〜7 で Adlaire が独自実装済みのため内製化不要 |
+| 2 | WAL チェックポイント制御 | レプリケーション（Phase 10）に直結 |
+| 3 | hrana-http/ws プロトコル変換 | 変換レイヤーは既に Adlaire 独自実装。libsql 型依存を段階的に排除可 |
 | 4 | クエリエグゼキューター | SQLite との境界。libsql-sys（C バインディング）を直接呼ぶ形に移行 |
 | 5 | SQL パーサ | 最もリスクが高い。Phase 15 後半以降に検討 |
 
@@ -447,7 +473,6 @@ jobs:
   lint:     cargo clippy -- -D warnings
   fmt:      cargo fmt --check
   integ:    cargo test --test integration  # adlaire-db を起動して叩く
-  upstream: git diff upstream/main..HEAD -- libsql/sqld/ | wc -l  # diff 行数を記録
 ```
 
 **テストカバレッジ方針：**
@@ -464,8 +489,8 @@ jobs:
 
 ```
 クライアント POST /v2/pipeline INSERT
-  → sqld: WAL フレームをバッファに書く
-  → sqld: fsync（WAL ファイルをディスクに同期）
+  → libsql: WAL フレームをバッファに書く
+  → libsql: fsync（WAL ファイルをディスクに同期）
   → Adlaire: 200 OK を返す
 ```
 
@@ -550,6 +575,8 @@ OPTIONS:
                          JWT 署名秘密鍵（HS256）。未指定時は認証無効（開発用）
   --auth-jwt-secret-file <FILE>
                          秘密鍵をファイルから読み込む
+  --admin-auth-token <TOKEN>
+                         管理 API 固定認証トークン（未指定時は認証無効）。環境変数 ADLAIRE_ADMIN_TOKEN も使用可
   --log-level <LEVEL>    ログレベル: error / warn / info / debug（デフォルト: info）
   --skip-integrity-check 起動時の PRAGMA integrity_check をスキップ（非推奨。WARN ログ出力）
   --replication-write-mode <MODE>
@@ -575,15 +602,16 @@ Phase 6 移行後も `/v2/pipeline`（DB 名なし）は `default` DB にフォ�
 
 ```toml
 [server]
-port            = 8080     # HTTP API ポート
-admin_port      = 8081     # 管理 API ポート（Phase 1〜5 は 127.0.0.1 固定。--admin-bind は Phase 6 以降）
-log_level       = "info"   # trace / debug / info / warn / error
-log_file        = ""       # 空 = stdout。パス指定でファイル出力
-shutdown_timeout = 30      # グレースフルシャットダウン最大待機秒数
+port             = 8080      # HTTP API ポート
+admin_port       = 8081      # 管理 API ポート（Phase 1〜5 は 127.0.0.1 固定。--admin-bind は Phase 6 以降）
+log_level        = "info"    # trace / debug / info / warn / error
+# log_file       = ""        # 空 = stdout。パス指定でファイル出力（未実装）
+shutdown_timeout = 30        # グレースフルシャットダウン最大待機秒数
+busy_timeout_ms  = 5000      # WAL ロック待機タイムアウト（ミリ秒）
 
 [auth]
 jwt_secret      = ""       # 空文字列 = 認証無効（開発用）
-jwt_secret_file = ""       # ファイルから読む場合はこちら（jwt_secret より優先）
+jwt_secret_file = ""       # ファイルから読む場合はこちら（jwt_secret が指定されている場合は jwt_secret が優先）
 
 [admin]
 auth_token = ""            # 管理 API 認証トークン（空 = 認証無効）
@@ -591,12 +619,11 @@ auth_token = ""            # 管理 API 認証トークン（空 = 認証無効�
 
 [storage]
 # data-dir は CLI フラグで指定（config.toml に書かない）
-busy_timeout_ms               = 5000     # WAL ロック待機タイムアウト（ミリ秒）
-wal_checkpoint_pages          = 1000     # 自動チェックポイントのページ閾値
-wal_checkpoint_mode           = "PASSIVE"  # PASSIVE / FULL / RESTART
-synchronous                   = "NORMAL"   # OFF は非サポート（I-4 違反）
-wal_retention_days            = 0        # PITR 用 WAL アーカイブ保持日数（0 = 無効）
-integrity_check_interval_hours = 0       # 定期整合性チェック間隔（0 = 無効）
+wal_mode                           = "passive"  # passive / full / restart
+# wal_checkpoint_pages             = 1000       # 自動チェックポイントのページ閾値（未実装・Phase 10 以降）
+# synchronous                      = "NORMAL"   # OFF は非サポート（I-4 違反）（未実装・Phase 10 以降）
+# wal_retention_days               = 0          # PITR 用 WAL アーカイブ保持日数（未実装・Phase 12 以降）
+# integrity_check_interval_hours   = 0          # 定期整合性チェック間隔（未実装・Phase 12 以降）
 
 [replication]
 write_mode      = "async"  # async / sync
@@ -605,7 +632,7 @@ sync_timeout_ms = 5000     # sync モード時のタイムアウト（ミリ秒�
 
 優先順位：CLI フラグ > 設定ファイル > デフォルト値。
 
-`jwt_secret` と `jwt_secret_file` を両方指定した場合は `jwt_secret_file` を優先する。
+`jwt_secret` と `jwt_secret_file` を両方指定した場合は `jwt_secret` を優先する。
 
 ---
 
@@ -701,6 +728,8 @@ Phase 7 から JWT に省略可能な `dbs` クレームを追加する。
 
 **Phase 7 JWT 検証フロー（DB スコープ対応版）：**
 
+> **§5.4 vs §5.6 の使い分け**：§5.6 の 6 ステップフローは Phase 1〜6 の実装基準（`dbs` クレーム不使用）。§5.4 の 7 ステップフローは Phase 7 以降の拡張版（`dbs` クレームによる DB スコープ権限を追加）。実装フェーズに応じて参照するセクションを切り替える。
+
 ```
 1. Authorization: Bearer <JWT> ヘッダを取得
    → なし → 401 AUTH_REQUIRED
@@ -787,14 +816,17 @@ adlaire-db token create --secret "my-secret" \
 4. sub クレーム（token_id）を tokens.json と照合
    → revoked=true → 401 AUTH_INVALID
 
-5. a クレームと要求権限を照合
-   → ro トークンで書き込み → 403 PERMISSION_DENIED
+5. resolve_access(db_name) でアクセスレベルを解決
+     dbs[db_name] が存在する → その値を使用（Phase 7〜）
+     存在しない / dbs なし → a クレームを使用
+   → Ro かつ書き込み操作 → 403 PERMISSION_DENIED
 
 6. 検証通過 → リクエスト処理へ
 ```
 
 **パフォーマンス：**
 - サーバー起動時に `tokens.json` をメモリへロードする
+- 失効済みトークン ID の集合はメモリ上に `RwLock<HashSet<String>>` で保持する（`AuthState` 内）
 - `DELETE /admin/v1/tokens/{id}` 受信時にメモリ上の失効リストを更新し `tokens.json` を書き直す
 - メモリロード後は `tokens.json` の再読み込みは行わない（サーバー再起動で反映）
 
@@ -1212,7 +1244,7 @@ DELETE /admin/v1/databases/{name}/branches/{branch-name}   ブランチ削除
 
 1. `GET /admin/v1/databases/{name}/backup` と同じ Online Backup API でスナップショットを取得
 2. `{data-dir}/databases/{name}___{branch-name}/data.db` へ書き込む
-3. 新 DB を通常の DB として登録し sqld でオープンする
+3. 新 DB を通常の DB として登録し libsql::Builder::new_local() でオープンする
 
 処理フロー（`from: {timestamp}` または `{frame_no}` の場合）：
 
@@ -1318,8 +1350,8 @@ GET /admin/v1/metrics     全 DB のメトリクス取得
 | `DB_ALREADY_EXISTS` | 409 | 同名 DB が既に存在する |
 | `INVALID_DB_NAME` | 400 | DB 名がバリデーションを通過しない |
 | `INVALID_REQUEST` | 400 | リクエスト JSON が不正 |
-| `SQLITE_ERROR` | 400 | SQL 構文・実行エラー |
-| `SQLITE_CONSTRAINT` | 400 | 制約違反（UNIQUE 等） |
+| `SQLITE_ERROR` | 200※ | SQL 構文・実行エラー |
+| `SQLITE_CONSTRAINT` | 200※ | 制約違反（UNIQUE 等） |
 | `STORAGE_BUSY` | 503 | WAL ロック待機タイムアウト |
 | `REPLICATION_TIMEOUT` | 503 | sync モードでレプリカ ACK タイムアウト |
 | `PITR_NOT_ENABLED` | 503 | PITR 試行時に `wal_retention_days = 0` |
@@ -1328,6 +1360,8 @@ GET /admin/v1/metrics     全 DB のメトリクス取得
 | `RESTORE_FRAME_CORRUPT` | 409 | WAL フレームの CRC32 検証失敗 |
 | `DB_RESERVED_NAME` | 400 | `___` を含む DB 名の直接作成試行 |
 | `INTERNAL_ERROR` | 500 | サーバー内部エラー |
+
+※ `SQLITE_ERROR` / `SQLITE_CONSTRAINT` は `POST /v2/pipeline` の HTTP レスポンスが 200 OK でも、`results[].type = "error"` として返す（hrana プロトコルの仕様）。HTTP 400 を返すのは `INVALID_REQUEST`（JSON 不正等）のみ。
 
 ### 7.4 エラーレスポンステストケース
 
@@ -1468,7 +1502,7 @@ Step 5: メタデータ読み込み（Phase 1〜5 はシングル DB のため�
 Step 6: DB オープン
   【Phase 1〜5 — シングル DB 固定】
   6-1. {data-dir}/databases/default/ が存在しなければ作成（初回起動時）
-  6-2. {data-dir}/databases/default/data.db を sqld::Database::open()
+  6-2. {data-dir}/databases/default/data.db を libsql::Builder::new_local() でオープン（§14.19 参照）
   6-3. WAL モードを設定（PRAGMA journal_mode = WAL）
   6-4. busy timeout を設定（busy_timeout_ms）
   6-5. synchronous を設定（PRAGMA synchronous = NORMAL）
@@ -1478,7 +1512,7 @@ Step 6: DB オープン
 
   【Phase 6 以降 — マルチ DB】
   6-1. {data-dir}/databases/ 以下の各 DB ディレクトリを列挙
-  6-2. 各 DB の data.db を sqld::Database::open()（整合性チェック含む）
+  6-2. 各 DB の data.db を libsql::Builder::new_local() でオープン（整合性チェック含む）
   ※ databases/default/ が存在しない場合も自動作成して後方互換を維持
 
 Step 7: HTTP サーバー起動
@@ -1502,8 +1536,8 @@ Step 2: 新規リクエスト受付を停止
   タイムアウト超過の場合は強制終了する（WARN ログを出力）。
 
 Step 3: DB クローズ
-  各 sqld::Connection を drop する（WAL をフラッシュ）
-  各 sqld::Database を drop する（チェックポイント + ファイルクローズ）
+  Arc<libsql::Database> の最後の参照が drop される（WAL チェックポイント + ファイルクローズ）
+  ※ Connection は execute() 呼び出しのたびに都度生成・即 drop するため、シャットダウン時点では保持していない
 
 Step 4: プロセスロック解放
   {data-dir}/.lock の flock を解放する（プロセス終了で自動解放されるが明示的に行う）
@@ -1543,7 +1577,7 @@ Step 5: 停止完了
 | フェーズ | 内容 | テストケース | 実装タスク |
 |----------|------|------------|----------|
 | **Phase 1** | ビルド基盤・CLI | — | T-1〜T-2 (2件) |
-| **Phase 2** | データディレクトリ・sqld 統合 | — | T-3〜T-4 (2件) |
+| **Phase 2** | データディレクトリ・libsql 統合 | — | T-3〜T-4 (2件) |
 | **Phase 3** | HTTP サーバー・hrana パイプライン | TC-1, TC-2, TC-6 (3件) | T-5〜T-6 (2件) |
 | **Phase 4** | JWT 認証・token コマンド | TC-3 (1件) | T-7〜T-9 (3件) |
 | **Phase 5** | ログ・統合テスト | TC-4, TC-5 (2件) | T-10〜T-11 (2件) |
@@ -1563,14 +1597,19 @@ Step 5: 停止完了
 
 全フェーズで共有される型定義・モジュール構成を以下に示す。
 
+> **§14.x 番号規則**：§14 以下のサブセクション番号は実装順ではなく参照便宜のための固定 ID。欠番（§14.x が存在しない番号）は将来追加のために予約している。各フェーズの実装詳細は対応フェーズ節の直下に配置するが、§14.x 番号で相互参照できる。
+
 #### 14.1 モジュール構成
 
 ```
-crates/adlaire-server/src/
-├── main.rs              ← エントリポイント・tokio ランタイム起動・CLI パース
+adlaire-server/src/
+├── main.rs              ← エントリポイント・tokio ランタイム起動・run_serve / run_token_create
+├── cli.rs               ← Cli / CliCommand / ServeArgs / TokenCreateArgs（clap derive）
 ├── config.rs            ← Config struct・CLI フラグと config.toml のマージ
+├── data_dir.rs          ← DataDir::init()・ProcessLock::acquire()（flock）
 ├── error.rs             ← AppError enum（thiserror）・HTTP レスポンス変換
 ├── state.rs             ← AppState struct・Arc<> ラッパー定義
+├── metrics.rs           ← Metrics struct（Phase 9 スタブ）
 ├── db/
 │   ├── mod.rs           ← DB 名バリデーション・DbInfo 型
 │   ├── manager.rs       ← DbManager struct・open/close/create/delete ロジック
@@ -1578,22 +1617,19 @@ crates/adlaire-server/src/
 │   └── sqld_adapter.rs  ← SqldAdapter トレイト・RealSqldAdapter 実装（§14.19）
 ├── auth/
 │   ├── mod.rs           ← JWT 検証ロジック・Claims / AuthState struct
-│   └── middleware.rs    ← axum extractor: Authenticated
+│   └── middleware.rs    ← extract_claims() 関数: JWT → Claims
+├── token/
+│   └── util.rs          ← parse_expiry() / generate_token_id()（Phase 4）
 ├── http/
-│   ├── mod.rs           ← axum Router 組み立て（build_router / build_admin_router）
+│   ├── mod.rs           ← route() / admin_route() 手動ルーティング・hyper サーバー起動
 │   ├── pipeline.rs      ← POST /v2/pipeline ハンドラ
 │   ├── health.rs        ← GET /v2/health ハンドラ
 │   └── admin/
-│       ├── mod.rs       ← 管理 API Router・admin_auth_middleware
-│       ├── databases.rs ← DB CRUD ハンドラ（Phase 6）
-│       ├── tokens.rs    ← トークン CRUD ハンドラ（Phase 7）
-│       ├── metrics.rs   ← GET /admin/v1/metrics（Phase 9）
-│       ├── backup.rs    ← バックアップ・リストア・PITR（Phase 12〜13）
-│       └── branches.rs  ← ブランチ管理（Phase 14）
+│       └── mod.rs       ← 管理 API Router・admin_auth_middleware・各ハンドラスタブ（Phase 6〜14）
 ├── hrana/
 │   ├── mod.rs           ← hrana-http v2 型の re-export
 │   ├── types.rs         ← PipelineRequest / PipelineResponse / Value 等
-│   └── convert.rs       ← sqld::QueryResult → hrana 型変換
+│   └── convert.rs       ← libsql 行・カラム型 → hrana 型変換
 ├── ws/
 │   ├── mod.rs           ← hrana-ws v3 WebSocket ハンドラ（Phase 8）
 │   ├── session.rs       ← WsSession・stream_id ごとの状態管理
@@ -1628,11 +1664,12 @@ pub struct AppState {
 
 pub type SharedState = Arc<AppState>;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub enum ServerRole {
     Standalone,
     Primary { primary_port: u16 },
-    // Phase 10: Replica { primary_url: url::Url },
+    // Phase 10: 下記を有効化（url クレート追加が前提）
+    // Replica { primary_url: url::Url },
 }
 ```
 
@@ -1649,8 +1686,7 @@ pub struct Config {
     pub admin_auth_token:  Option<String>,   // None = 認証無効（開発用）
     pub jwt_secret_bytes:  Option<Vec<u8>>, // 32 バイト以上。None = 認証無効
     pub shutdown_timeout:  u64,             // グレースフルシャットダウン最大秒数（デフォルト 30）
-    pub skip_integrity_check: bool,         // 起動時整合性チェックをスキップ（デフォルト false）
-    pub storage:           StorageConfig,
+    pub storage:           StorageConfig,   // skip_integrity_check は StorageConfig に移管
     pub replication:       ReplicationConfig,
 }
 
@@ -1960,9 +1996,9 @@ pub enum AppError {
     Internal(#[from] anyhow::Error),
 }
 
-impl axum::response::IntoResponse for AppError {
-    fn into_response(self) -> axum::response::Response {
-        use axum::http::StatusCode;
+impl AppError {
+    pub fn into_response(self) -> Response<Full<Bytes>> {
+        use http::StatusCode;
         let (status, code) = match &self {
             Self::AuthRequired          => (StatusCode::UNAUTHORIZED,            "AUTH_REQUIRED"),
             Self::AuthInvalid           => (StatusCode::UNAUTHORIZED,            "AUTH_INVALID"),
@@ -1985,11 +2021,15 @@ impl axum::response::IntoResponse for AppError {
             Self::Sqld(_)              => (StatusCode::INTERNAL_SERVER_ERROR,   "INTERNAL_ERROR"),
             Self::Internal(_)           => (StatusCode::INTERNAL_SERVER_ERROR,   "INTERNAL_ERROR"),
         };
-        let body = axum::Json(serde_json::json!({
+        let body = serde_json::to_vec(&serde_json::json!({
             "error": self.to_string(),
             "code":  code,
-        }));
-        (status, body).into_response()
+        })).unwrap_or_default();
+        Response::builder()
+            .status(status)
+            .header("content-type", "application/json")
+            .body(Full::from(body))
+            .unwrap()
     }
 }
 ```
@@ -2017,6 +2057,7 @@ pub enum StreamRequest {
 #[derive(Debug, serde::Deserialize)]
 pub struct Stmt {
     pub sql:        String,
+    #[serde(default)]
     pub args:       Vec<Value>,
     #[serde(default)]
     pub named_args: Vec<NamedArg>,
@@ -2159,10 +2200,10 @@ pub struct DbMetrics {
 
 ### Phase 1：ビルド基盤・CLI
 
-**目標**：Cargo ワークスペースと libSQL サブモジュールを確立し、CLI の骨格を動かす
+**目標**：Cargo ワークスペースを確立し、CLI の骨格を動かす
 
 **スコープ：**
-- Cargo workspace 初期化（adlaire-server crate + libsql submodule）
+- Cargo workspace 初期化（adlaire-server crate + libsql crate）
 - clap による `serve` / `token` サブコマンド骨格
 - config.toml 3-way マージ（CLI > TOML > デフォルト）
 - CI: cargo build / cargo test が通る状態を維持
@@ -2171,9 +2212,9 @@ pub struct DbMetrics {
 
 ```
 T-1: リポジトリ・ビルド基盤
-  [ ] Cargo workspace 初期化（adlaire-server crate + libsql submodule）
-  [ ] libSQL フォークを git submodule として追加
-  [ ] sqld crate が core feature でビルドできることを確認
+  [ ] Cargo workspace 初期化（adlaire-server crate）
+  [ ] libsql = "0.6" を [workspace.dependencies] に追加
+  [ ] cargo build が通ることを確認
   [ ] CI: cargo build / cargo test が通る状態を維持
   参照: §3.3.1
 
@@ -2194,7 +2235,7 @@ T-2: CLI フレームワーク
 #### 14.12 CLI 構造体
 
 ```rust
-// main.rs
+// cli.rs
 #[derive(Parser)]
 #[command(name = "adlaire-db", version, about = "Self-hosted libSQL-compatible DB server")]
 pub struct Cli { #[command(subcommand)] pub command: CliCommand }
@@ -2208,7 +2249,7 @@ pub enum CliCommand {
 #[derive(Subcommand)]
 pub enum TokenSubcommand { Create(TokenCreateArgs) }
 
-#[derive(Parser)]
+#[derive(Parser, Default)]
 pub struct ServeArgs {
     #[arg(long, required = true)] pub data:                    PathBuf,
     #[arg(long)] pub port:                                     Option<u16>,
@@ -2262,7 +2303,7 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
 
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "Adlaire DB starting");
 
-    if config.skip_integrity_check {
+    if config.storage.skip_integrity_check {
         tracing::warn!("--skip-integrity-check is set; startup integrity check disabled");
     }
 
@@ -2310,24 +2351,58 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
     );
 
     // Step 9: グレースフルシャットダウン付きでサーバー起動
-    let api_router   = build_router(Arc::clone(&state));
-    let admin_router = build_admin_router(Arc::clone(&state));
     let shutdown_timeout = config.shutdown_timeout;
 
     let (sd_tx, mut sd_rx) = tokio::sync::watch::channel(false);
     let mut sd_rx2 = sd_rx.clone();
 
-    let api_task = tokio::spawn(async move {
-        axum::serve(api_listener, api_router)
-            .with_graceful_shutdown(async move { sd_rx.changed().await.ok(); })
-            .await
-            .ok();
+    let api_task = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move {
+            loop {
+                tokio::select! {
+                    Ok((stream, _)) = api_listener.accept() => {
+                        let state = Arc::clone(&state);
+                        tokio::spawn(async move {
+                            let _ = http1::Builder::new()
+                                .serve_connection(
+                                    TokioIo::new(stream),
+                                    service_fn(move |req| {
+                                        let state = Arc::clone(&state);
+                                        async move { http::route(req, state).await }
+                                    }),
+                                )
+                                .await;
+                        });
+                    }
+                    _ = sd_rx.changed() => break,
+                }
+            }
+        }
     });
-    let admin_task = tokio::spawn(async move {
-        axum::serve(admin_listener, admin_router)
-            .with_graceful_shutdown(async move { sd_rx2.changed().await.ok(); })
-            .await
-            .ok();
+    let admin_task = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move {
+            loop {
+                tokio::select! {
+                    Ok((stream, _)) = admin_listener.accept() => {
+                        let state = Arc::clone(&state);
+                        tokio::spawn(async move {
+                            let _ = http1::Builder::new()
+                                .serve_connection(
+                                    TokioIo::new(stream),
+                                    service_fn(move |req| {
+                                        let state = Arc::clone(&state);
+                                        async move { http::admin_route(req, state).await }
+                                    }),
+                                )
+                                .await;
+                        });
+                    }
+                    _ = sd_rx2.changed() => break,
+                }
+            }
+        }
     });
 
     let sig_name = shutdown_signal_named().await;
@@ -2389,6 +2464,8 @@ async fn shutdown_signal_named() -> &'static str {
 
 #### 14.13 Config 解決ロジック
 
+> **フィールドマッピング注意**：`busy_timeout_ms` は TOML では `[server]` セクションに書くが（§4.2）、Rust の型システムでは `StorageConfig::busy_timeout_ms` に格納する。これは「ストレージに近い設定」として内部的に分類しているためで、TOML の `[storage]` に書いても無視される。
+
 ```rust
 // config.rs
 
@@ -2424,8 +2501,10 @@ pub struct TomlAdmin {
 
 #[derive(Debug, serde::Deserialize, Default)]
 pub struct TomlStorage {
-    pub wal_mode:              Option<String>,
-    pub skip_integrity_check:  Option<bool>,
+    pub wal_mode:                          Option<String>,
+    pub skip_integrity_check:              Option<bool>,
+    pub wal_retention_days:                Option<u64>,
+    pub integrity_check_interval_hours:    Option<u64>,
 }
 
 #[derive(Debug, serde::Deserialize, Default)]
@@ -2481,8 +2560,10 @@ impl Config {
         // 4. 3-way マージ（CLI > TOML > デフォルト）
         let port       = args.port.or(srv.port).unwrap_or(8080);
         let admin_port = args.admin_port.or(srv.admin_port).unwrap_or(8081);
+        let log_level_env = std::env::var("ADLAIRE_LOG_LEVEL").ok();
         let log_level  = args.log_level.as_deref()
             .or(srv.log_level.as_deref())
+            .or(log_level_env.as_deref())
             .unwrap_or("info")
             .to_string();
         let busy_timeout_ms: u64  = args.busy_timeout.or(srv.busy_timeout_ms).unwrap_or(5000);
@@ -2510,7 +2591,6 @@ impl Config {
             admin_auth_token,
             jwt_secret_bytes:     raw_secret,
             shutdown_timeout,
-            skip_integrity_check,
             storage: StorageConfig {
                 busy_timeout_ms:              busy_timeout_ms,
                 wal_checkpoint_pages:         1000,
@@ -2548,14 +2628,14 @@ fn parse_write_mode(s: &str) -> anyhow::Result<ReplicationWriteMode> {
 ---
 
 
-### Phase 2：データディレクトリ・sqld 統合
+### Phase 2：データディレクトリ・libsql 統合
 
-**目標**：データディレクトリを初期化し、sqld でシングル DB を開ける状態にする
+**目標**：データディレクトリを初期化し、libsql でシングル DB を開ける状態にする
 
 **スコープ：**
 - `--data` パスのディレクトリ作成・パーミッション設定
 - flock による排他プロセスロック
-- sqld::Database::open()・WAL モード設定
+- libsql::Builder::new_local() による DB オープン・WAL モード設定
 
 **実装タスク：**
 
@@ -2567,12 +2647,12 @@ T-3: データディレクトリ初期化
   [ ] ディレクトリパーミッション警告（700 未満で WARN）
   参照: §3.2, §8.1 Step 3〜4, §10.3
 
-T-4: sqld 統合・DB オープン
-  [ ] sqld::Database::open() でシングル DB を開く
+T-4: libsql 統合・DB オープン
+  [ ] libsql::Builder::new_local() でシングル DB を開く
   [ ] PRAGMA journal_mode = WAL を起動時に適用
   [ ] busy_timeout を設定
   [ ] PRAGMA synchronous = NORMAL を設定
-  [ ] サーバーシャットダウン時に drop（WAL flush + close）
+  [ ] サーバーシャットダウン時に Arc<libsql::Database> を drop（WAL flush + close）
   参照: §3.3.2, §13, §8.1 Step 6, §8.2 Step 3
   検証: TC-5（データ永続性）
 ```
@@ -2669,6 +2749,14 @@ pub struct SqlResult {
 
 #[async_trait::async_trait]
 pub trait SqldAdapter: Send + Sync {
+    /// 新規 Connection を生成して返す。
+    /// Phase 8 の WebSocket セッション（WsStream）が永続コネクションとして保持するために使用する。
+    fn connect(&self) -> Result<libsql::Connection, AppError>;
+
+    /// 単一ステートメントを実行する。
+    /// **注記**: RealSqldAdapter の実装では呼び出しのたびに新規 Connection を生成する。
+    /// そのため、execute() を複数回呼び出しても同一トランザクション内に収まる保証はない。
+    /// インタラクティブトランザクション（BEGIN/COMMIT を跨ぐ操作）は WsStream の conn フィールド経由で行う。
     async fn execute(
         &self,
         sql:       &str,
@@ -2721,6 +2809,10 @@ fn libsql_err(e: libsql::Error) -> AppError {
 
 #[async_trait::async_trait]
 impl SqldAdapter for RealSqldAdapter {
+    fn connect(&self) -> Result<libsql::Connection, AppError> {
+        self.db.connect().map_err(|e| AppError::Sqld(e.to_string()))
+    }
+
     async fn execute_batch(&self, sql: &str) -> Result<(), AppError> {
         let conn = self.db.connect().map_err(|e| AppError::Sqld(e.to_string()))?;
         conn.execute_batch(sql).await.map(|_| ()).map_err(libsql_err)
@@ -2752,7 +2844,7 @@ impl SqldAdapter for RealSqldAdapter {
     }
 }
 
-fn to_libsql_params(args: Vec<SqlValue>) -> Vec<libsql::Value> {
+pub(crate) fn to_libsql_params(args: Vec<SqlValue>) -> Vec<libsql::Value> {
     args.into_iter().map(|v| match v {
         SqlValue::Null       => libsql::Value::Null,
         SqlValue::Integer(n) => libsql::Value::Integer(n),
@@ -2762,7 +2854,7 @@ fn to_libsql_params(args: Vec<SqlValue>) -> Vec<libsql::Value> {
     }).collect()
 }
 
-fn from_libsql_value(v: libsql::Value) -> SqlValue {
+pub(crate) fn from_libsql_value(v: libsql::Value) -> SqlValue {
     match v {
         libsql::Value::Null       => SqlValue::Null,
         libsql::Value::Integer(n) => SqlValue::Integer(n),
@@ -2778,6 +2870,9 @@ pub struct MockSqldAdapter;
 
 #[async_trait::async_trait]
 impl SqldAdapter for MockSqldAdapter {
+    fn connect(&self) -> Result<libsql::Connection, AppError> {
+        unimplemented!("MockSqldAdapter::connect")
+    }
     async fn execute_batch(&self, _sql: &str) -> Result<(), AppError> { Ok(()) }
     async fn execute(&self, _sql: &str, _args: Vec<SqlValue>, _want_rows: bool) -> Result<SqlResult, AppError> {
         Ok(SqlResult::default())
@@ -2793,7 +2888,7 @@ impl SqldAdapter for MockSqldAdapter {
 **目標**：libSQL クライアント SDK が Adlaire DB に接続して SQL を実行できる最小構成
 
 **スコープ：**
-- axum HTTP サーバー起動・SIGINT/SIGTERM ハンドラ
+- hyper HTTP サーバー起動・SIGINT/SIGTERM ハンドラ
 - GET `/v2/health`
 - POST `/v2/pipeline`（hrana-http v2 完全実装）
 
@@ -2825,9 +2920,9 @@ TC-6: 起動・停止
 **実装タスク：**
 
 ```
-T-5: HTTP サーバー骨格（axum）
+T-5: HTTP サーバー骨格（hyper）
   [ ] tokio ランタイム起動
-  [ ] axum Router: POST /v2/pipeline, GET /v2/health
+  [ ] hyper service_fn + route(): POST /v2/pipeline, GET /v2/health
   [ ] --port でバインドアドレスを指定
   [ ] SIGINT / SIGTERM ハンドラ登録（graceful shutdown）
   [ ] "Adlaire DB listening" INFO ログ出力
@@ -2837,8 +2932,8 @@ T-5: HTTP サーバー骨格（axum）
 T-6: hrana-http v2 パイプライン実装
   [ ] POST /v2/pipeline のリクエスト JSON デシリアライズ
       （baton, requests[].type, requests[].stmt.sql/args/want_rows）
-  [ ] requests を sqld::Connection.execute_batch() に渡す
-  [ ] sqld::QueryResult を hrana-http v2 results[] 形式に変換
+  [ ] requests を libsql::Connection.query() / execute() / execute_batch() に渡す
+  [ ] libsql の行・カラム型を hrana-http v2 results[] 形式に変換
       （cols, rows, rows_affected, last_insert_rowid）
   [ ] SQL エラーを results[i].type="error" として返す（HTTP 200 のまま）
   [ ] "close" type リクエストを正しく処理する
@@ -2851,53 +2946,123 @@ T-6: hrana-http v2 パイプライン実装
 
 #### 実装詳細
 
-#### 14.4 axum Router 設計
+#### 14.4 ルーティング設計
 
 ```rust
 // http/mod.rs
-pub fn build_router(state: SharedState) -> axum::Router {
-    axum::Router::new()
+
+use hyper::{Request, Response, body::Incoming};
+use http_body_util::Full;
+use bytes::Bytes;
+use std::convert::Infallible;
+
+/// API リクエストを (メソッド, パス) でハンドラに振り分ける
+pub async fn route(
+    req: Request<Incoming>,
+    state: SharedState,
+) -> Result<Response<Full<Bytes>>, Infallible> {
+    let method = req.method().as_str();
+    let path   = req.uri().path();
+
+    match (method, path) {
         // Phase 1: シングル DB
-        .route("/v2/pipeline",           axum::routing::post(pipeline::handle))
-        .route("/v2/health",             axum::routing::get(health::handle))
+        ("GET",  "/v2/health")   => health::handle(req, state).await,
+        ("POST", "/v2/pipeline") => pipeline::handle(req, state, "default").await,
         // Phase 6: パスベース DB ルーティング
-        .route("/:db_name/v2/pipeline",  axum::routing::post(pipeline::handle_db))
-        // Phase 8: WebSocket
-        .route("/v3/baton",              axum::routing::get(ws::handle))
-        .route("/:db_name/v3/baton",     axum::routing::get(ws::handle_db))
-        .with_state(state)
+        ("POST", p) if p.ends_with("/v2/pipeline") => {
+            let db = extract_db_name(p).unwrap_or("default");
+            pipeline::handle(req, state, db).await
+        }
+        // Phase 8: WebSocket upgrade
+        ("GET", "/v3/baton")   => ws::handle(req, state).await,
+        ("GET", p) if p.ends_with("/v3/baton") => {
+            let db = extract_db_name(p).unwrap_or("default");
+            ws::handle_db(req, state, db).await
+        }
+        _ => Ok(not_found()),
+    }
 }
 
-pub fn build_admin_router(state: SharedState) -> axum::Router {
-    use axum::routing::{delete, get, post};
-    axum::Router::new()
-        .nest("/admin/v1", axum::Router::new()
-            // Phase 6: DB CRUD
-            .route("/databases",
-                get(admin::databases::list).post(admin::databases::create))
-            .route("/databases/:name",
-                get(admin::databases::get).delete(admin::databases::delete))
-            // Phase 7: トークン CRUD
-            .route("/tokens",
-                get(admin::tokens::list).post(admin::tokens::create))
-            .route("/tokens/:id",
-                get(admin::tokens::get).delete(admin::tokens::revoke))
-            // Phase 9: メトリクス
-            .route("/metrics",           get(admin::metrics::get))
-            // Phase 12〜13: バックアップ・PITR
-            .route("/databases/:name/backup",                    get(admin::backup::backup))
-            .route("/databases/:name/restore",                   post(admin::backup::restore))
-            .route("/databases/:name/restore/point-in-time",     post(admin::backup::pitr))
-            // Phase 14: ブランチ
-            .route("/databases/:name/branches",
-                get(admin::branches::list).post(admin::branches::create))
-            .route("/databases/:name/branches/:branch",          delete(admin::branches::delete))
-        )
-        .layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&state),
-            admin::admin_auth_middleware,
-        ))
-        .with_state(state)
+/// 管理 API リクエストを振り分ける（認証チェック込み）
+pub async fn admin_route(
+    req: Request<Incoming>,
+    state: SharedState,
+) -> Result<Response<Full<Bytes>>, Infallible> {
+    // 認証チェック
+    if let Some(expected) = &state.config.admin_auth_token {
+        let provided = req.headers()
+            .get(http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "));
+        match provided {
+            Some(token) if token == expected.as_str() => {}
+            _ => return Ok(json_error(
+                http::StatusCode::UNAUTHORIZED,
+                "AUTH_REQUIRED",
+                "admin authentication required",
+            )),
+        }
+    }
+
+    let method = req.method().as_str();
+    let path   = req.uri().path();
+
+    match (method, path) {
+        // Phase 6: DB CRUD
+        ("GET",    "/admin/v1/databases")        => admin::databases::list(req, state).await,
+        ("POST",   "/admin/v1/databases")        => admin::databases::create(req, state).await,
+        ("GET",    p) if is_db_path(p)           => admin::databases::get(req, state).await,
+        ("DELETE", p) if is_db_path(p)           => admin::databases::delete(req, state).await,
+        // Phase 7: トークン CRUD
+        ("GET",    "/admin/v1/tokens")           => admin::tokens::list(req, state).await,
+        ("POST",   "/admin/v1/tokens")           => admin::tokens::create(req, state).await,
+        ("GET",    p) if is_token_path(p)        => admin::tokens::get(req, state).await,
+        ("DELETE", p) if is_token_path(p)        => admin::tokens::revoke(req, state).await,
+        // Phase 9: メトリクス
+        ("GET",    "/admin/v1/metrics")          => admin::metrics::get(req, state).await,
+        // Phase 12〜13: バックアップ・PITR
+        ("GET",    p) if p.ends_with("/backup")  => admin::backup::backup(req, state).await,
+        ("POST",   p) if p.ends_with("/restore") => admin::backup::restore(req, state).await,
+        ("POST",   p) if p.ends_with("/restore/point-in-time") => admin::backup::pitr(req, state).await,
+        // Phase 14: ブランチ
+        ("GET",    p) if p.ends_with("/branches")        => admin::branches::list(req, state).await,
+        ("POST",   p) if p.ends_with("/branches")        => admin::branches::create(req, state).await,
+        ("DELETE", p) if p.contains("/branches/")        => admin::branches::delete(req, state).await,
+        _ => Ok(not_found()),
+    }
+}
+
+/// パスから db_name を抽出する（"/{db_name}/v2/pipeline" 形式）
+fn extract_db_name(path: &str) -> Option<&str> {
+    path.trim_start_matches('/').split('/').next()
+}
+
+fn is_db_path(p: &str) -> bool {
+    let segs: Vec<_> = p.trim_start_matches('/').split('/').collect();
+    matches!(segs.as_slice(), ["admin", "v1", "databases", _])
+}
+
+fn is_token_path(p: &str) -> bool {
+    let segs: Vec<_> = p.trim_start_matches('/').split('/').collect();
+    matches!(segs.as_slice(), ["admin", "v1", "tokens", _])
+}
+
+fn not_found() -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(http::StatusCode::NOT_FOUND)
+        .body(Full::default())
+        .unwrap()
+}
+
+fn json_error(status: http::StatusCode, code: &str, msg: &str) -> Response<Full<Bytes>> {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "error": msg, "code": code
+    })).unwrap_or_default();
+    Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(Full::from(body))
+        .unwrap()
 }
 ```
 
@@ -2928,6 +3093,11 @@ pub fn hrana_to_sql(v: &Value) -> Result<SqlValue, AppError> {
             SqlValue::Blob(bytes)
         }
     })
+}
+
+/// hrana `Value` のスライスを `SqlValue` の `Vec` に変換する（ws/session.rs から呼び出す）
+pub fn hrana_values_to_params(args: &[Value]) -> Result<Vec<SqlValue>, AppError> {
+    args.iter().map(hrana_to_sql).collect()
 }
 
 /// `SqlResult` → hrana `StmtResult`
@@ -2961,53 +3131,63 @@ fn sql_val_to_hrana(v: SqlValue) -> Value {
 #### 14.15 HTTP ハンドラ実装
 
 ```rust
-// handlers/pipeline.rs
+// http/pipeline.rs
 
-/// JSON パース失敗を 400 INVALID_REQUEST で返すカスタムエクストラクタ
-/// axum::Json は 422 を返すが、仕様は 400 INVALID_REQUEST を要求するため独自実装
-pub struct JsonPayload<T>(pub T);
+use hyper::{Request, Response, body::Incoming};
+use http_body_util::{Full, BodyExt};
+use bytes::Bytes;
+use std::convert::Infallible;
 
-#[async_trait::async_trait]
-impl<T, S> axum::extract::FromRequest<S> for JsonPayload<T>
-where
-    T: serde::de::DeserializeOwned,
-    S: Send + Sync,
-{
-    type Rejection = AppError;
+/// リクエストボディを読み切り JSON にデシリアライズする
+/// デシリアライズ失敗は 400 INVALID_REQUEST
+async fn parse_json_body<T: serde::de::DeserializeOwned>(
+    req: Request<Incoming>,
+) -> Result<T, AppError> {
+    let bytes = req.into_body().collect().await
+        .map_err(|_| AppError::InvalidRequest)?.to_bytes();
+    serde_json::from_slice::<T>(&bytes).map_err(|_| AppError::InvalidRequest)
+}
 
-    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
-        let bytes = axum::body::Bytes::from_request(req, state)
-            .await
-            .map_err(|_| AppError::InvalidRequest)?;
-        serde_json::from_slice::<T>(&bytes)
-            .map(JsonPayload)
-            .map_err(|_| AppError::InvalidRequest)
-    }
+fn json_ok<T: serde::Serialize>(body: &T) -> Response<Full<Bytes>> {
+    let bytes = serde_json::to_vec(body).unwrap_or_default();
+    Response::builder()
+        .status(http::StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Full::from(bytes))
+        .unwrap()
 }
 
 // 単一 DB ハンドラ（Phase 1）
 pub async fn handle(
-    State(state): State<SharedState>,
-    Authenticated(claims): Authenticated,
-    JsonPayload(req): JsonPayload<PipelineRequest>,
-) -> Result<Json<PipelineResponse>, AppError> {
-    let db = state.db_mgr.get("default").await
-        .ok_or_else(|| AppError::DbNotFound("default".to_string()))?;
-    let results = execute_pipeline(&db, &claims, &req.requests, "default").await?;
-    Ok(Json(PipelineResponse { baton: None, base_url: None, results }))
+    req: Request<Incoming>,
+    state: SharedState,
+    db_name: &str,
+) -> Result<Response<Full<Bytes>>, Infallible> {
+    let claims = match extract_claims(&req, &state) {
+        Ok(c)  => c,
+        Err(e) => return Ok(e.into_response()),
+    };
+    let pipeline_req = match parse_json_body::<PipelineRequest>(req).await {
+        Ok(r)  => r,
+        Err(e) => return Ok(e.into_response()),
+    };
+    let db = match state.db_mgr.get(db_name).await {
+        Some(d) => d,
+        None    => return Ok(AppError::DbNotFound(db_name.to_string()).into_response()),
+    };
+    match execute_pipeline(&db, &claims, &pipeline_req.requests, db_name).await {
+        Ok(results) => Ok(json_ok(&PipelineResponse { baton: None, base_url: None, results })),
+        Err(e)      => Ok(e.into_response()),
+    }
 }
 
-// マルチ DB ハンドラ（Phase 6）
+// マルチ DB ハンドラ（Phase 6）— db_name をパスから受け取る
 pub async fn handle_db(
-    State(state): State<SharedState>,
-    Authenticated(claims): Authenticated,
-    axum::extract::Path(db_name): axum::extract::Path<String>,
-    JsonPayload(req): JsonPayload<PipelineRequest>,
-) -> Result<Json<PipelineResponse>, AppError> {
-    let db = state.db_mgr.get(&db_name).await
-        .ok_or_else(|| AppError::DbNotFound(db_name.clone()))?;
-    let results = execute_pipeline(&db, &claims, &req.requests, &db_name).await?;
-    Ok(Json(PipelineResponse { baton: None, base_url: None, results }))
+    req: Request<Incoming>,
+    state: SharedState,
+    db_name: &str,
+) -> Result<Response<Full<Bytes>>, Infallible> {
+    handle(req, state, db_name).await
 }
 
 async fn execute_pipeline(
@@ -3020,7 +3200,7 @@ async fn execute_pipeline(
     for req in requests {
         match req {
             StreamRequest::Execute { stmt } => {
-                if is_write_stmt(&stmt.sql) && !claims.can_write_db(db_name) {
+                if is_write_stmt(&stmt.sql) && claims.resolve_access(db_name) != AccessLevel::Rw {
                     responses.push(StreamResult::Error {
                         error: HranaError { message: "write not permitted".into(), code: "PERMISSION_DENIED".into() },
                     });
@@ -3087,9 +3267,12 @@ fn is_write_stmt(sql: &str) -> bool {
 }
 
 // ヘルスチェックハンドラ
-// handlers/health.rs
-pub async fn handle() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok" }))
+// http/health.rs
+pub async fn handle(
+    _req: Request<Incoming>,
+    _state: SharedState,
+) -> Result<Response<Full<Bytes>>, Infallible> {
+    Ok(json_ok(&serde_json::json!({ "status": "ok" })))
 }
 ```
 
@@ -3108,14 +3291,16 @@ pub async fn handle() -> Json<serde_json::Value> {
 **完了条件（テストケース）：**
 
 ```
-TC-3: JWT 認証ありモード
-  $ SECRET="test-secret"
+TC-3: JWT 認証ありモード（Phase 4 CLI 手動確認）
+  $ SECRET="test-secret-at-least-32bytes-long"
   $ TOKEN=$(./adlaire-db token create --secret "$SECRET")
   $ ./adlaire-db serve --data ./testdb --port 8080 --auth-jwt-secret "$SECRET"
   （a）有効なトークンで SQL 実行 → 200 OK
   （b）Authorization ヘッダなし → 401 AUTH_REQUIRED
   （c）不正なトークン → 401 AUTH_INVALID
 ```
+
+> **注意**：TC-3 の自動化（tokens.json CRUD + revoke フローを含む完全検証）は Phase 7 の TC-2-4〜TC-2-5 で行う。Phase 4 では上記の CLI ベース手動確認が完了条件。自動テストは `tests/integration/auth.rs` として Phase 7 で追加する。
 
 **実装タスク：**
 
@@ -3152,69 +3337,37 @@ T-9: `token create` サブコマンド
 
 #### 実装詳細
 
-#### 14.3 axum 認証 Extractor
+#### 14.3 JWT 認証関数
 
 ```rust
 // auth/middleware.rs
 
-/// リクエストごとに JWT を検証し、Claims を抽出する axum Extractor
-pub struct Authenticated(pub Claims);
-// 利用側: Authenticated(claims): Authenticated
+use hyper::{Request, body::Incoming};
 
-impl axum::extract::FromRequestParts<SharedState> for Authenticated {
-    type Rejection = AppError;
-
-    async fn from_request_parts(
-        parts: &mut http::request::Parts,
-        state: &SharedState,
-    ) -> Result<Self, Self::Rejection> {
-        // 認証無効モード（jwt_secret 未設定）はスキップ
-        if !state.auth.is_auth_enabled() {
-            tracing::debug!("auth disabled — passing unauthenticated claims");
-            return Ok(Authenticated(Claims::unauthenticated()));
-        }
-
-        let raw = parts.headers
-            .get(http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "))
-            .ok_or(AppError::AuthRequired)?;
-
-        let claims = state.auth.verify(raw).await?;
-        Ok(Authenticated(claims))
+/// Authorization ヘッダから JWT を検証し Claims を返す
+/// 認証無効モード（jwt_secret 未設定）は Claims::unauthenticated() を返す
+pub async fn extract_claims<B>(
+    req: &Request<B>,
+    state: &SharedState,
+) -> Result<Claims, AppError> {
+    if !state.auth.is_auth_enabled() {
+        tracing::debug!("auth disabled — passing unauthenticated claims");
+        return Ok(Claims::unauthenticated());
     }
-}
 
-/// 管理 API 認証ミドルウェア（Bearer 文字列完全一致）
-/// build_admin_router で layer として適用するため、全ハンドラに自動適用される
-pub async fn admin_auth_middleware(
-    State(state): State<SharedState>,
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    if let Some(expected) = &state.config.admin_auth_token {
-        let provided = req
-            .headers()
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "));
+    let raw = req.headers()
+        .get(http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .ok_or(AppError::AuthRequired)?;
 
-        match provided {
-            Some(token) if token == expected.as_str() => {}
-            _ => {
-                return (
-                    axum::http::StatusCode::UNAUTHORIZED,
-                    axum::Json(serde_json::json!({
-                        "error": "admin authentication required",
-                        "code":  "AUTH_REQUIRED"
-                    })),
-                ).into_response();
-            }
-        }
-    }
-    next.run(req).await
+    state.auth.verify(raw).await
 }
 ```
+
+#### 14.3b 管理 API 認証
+
+管理 API の認証は `http/mod.rs` の `admin_route()` 内で行う（§14.4 参照）。固定トークンの Bearer 文字列完全一致。
 
 
 #### 14.16 AuthState 実装（Phase 3 スタブ）
@@ -3237,8 +3390,37 @@ impl AuthState {
     }
 }
 
+// NOTE: `revoked` フィールドおよび `load_with(secret, revoked_subs)` の完全版は Phase 4 で追加される。
+#[cfg(test)]
+impl AuthState {
+    /// テスト用: 秘密鍵を直接指定して AuthState を構築する（Phase 3 版）
+    pub fn load_with(secret: &[u8]) -> Self {
+        Self { secret_bytes: Some(secret.to_vec()) }
+    }
+
+    /// テスト用: 有効期限なしのテストトークンを発行する
+    pub fn issue_test_token(&self, access: AccessLevel) -> String {
+        // Phase 4 で実装
+        let _ = access;
+        unimplemented!("issue_test_token は Phase 4 で実装")
+    }
+
+    /// テスト用: 任意の exp を持つテストトークンを発行する
+    pub fn issue_test_token_exp(&self, access: AccessLevel, exp: Option<chrono::DateTime<chrono::Utc>>) -> String {
+        let _ = (access, exp);
+        unimplemented!("issue_test_token_exp は Phase 4 で実装")
+    }
+
+    /// テスト用: 指定 sub を同期的に失効リストへ追加する
+    pub fn revoke_sync(&self, sub: &str) {
+        // Phase 4 で実装（tokio::sync::RwLock は非同期。テスト用に try_write を使用）
+        let _ = sub;
+        unimplemented!("revoke_sync は Phase 4 で実装")
+    }
+}
+
 /// Phase 4 スタブ。tokens.json の読み込みは Phase 4 で実装する。
-pub fn load_tokens(_config: &Config) -> anyhow::Result<Vec<()>> {
+pub fn load_tokens(_config: &Config) -> anyhow::Result<Vec<TokenRecord>> {
     Ok(vec![])
 }
 ```
@@ -3275,7 +3457,8 @@ pub fn generate_token_id() -> String {
     let mut f = std::fs::File::open("/dev/urandom").expect("cannot open /dev/urandom");
     use std::io::Read;
     f.read_exact(&mut buf).expect("cannot read /dev/urandom");
-    format!("tok_{}", hex::encode(buf))
+    let n = u64::from_le_bytes(buf);
+    format!("tok_{:016x}", n)
 }
 
 #[cfg(test)]
@@ -3391,7 +3574,7 @@ mod tests {
     fn secret() -> Vec<u8> { "a".repeat(32).into_bytes() }
 
     fn make_auth() -> AuthState {
-        AuthState::load_with(&secret(), vec![])
+        AuthState::load_with(&secret())
     }
 
     #[tokio::test]
@@ -3629,15 +3812,15 @@ async fn tc3_jwt_auth() {
 
 ```
 T2-1: パスベース DB ルーター
-  [ ] axum Router を /{db-name}/v2/pipeline にマッチするように拡張
+  [ ] route() を /{db-name}/v2/pipeline にマッチするように拡張
   [ ] パスセグメントから db-name を抽出し、DB 名バリデーションを適用
   [ ] 存在しない db-name → 404 DB_NOT_FOUND
   [ ] Phase 1〜5 の単一 DB ルート（/v2/pipeline）との共存（後方互換）
   参照: §6.1, §3.4
 
 T2-2: マルチ DB マネージャ
-  [ ] 起動時に databases.json を読み込み、全 DB を sqld でオープン
-  [ ] DB 名 → sqld::Database のマップをメモリ上で管理（RwLock<HashMap>）
+  [ ] 起動時に databases.json を読み込み、全 DB を libsql::Builder::new_local() でオープン
+  [ ] DB 名 → Arc<dyn SqldAdapter> のマップをメモリ上で管理（RwLock<HashMap>）
   [ ] 新規 DB 作成時にマップへ追加・databases.json を更新
   [ ] DB 削除時にマップから除去・ファイル削除・databases.json を更新
   参照: §3.4, §8.1 Step 5〜6
@@ -3781,9 +3964,9 @@ TC-2-6: データディレクトリ永続化（マルチ DB）
 ```
 T2-3: 管理 API — DB CRUD
   [ ] GET /admin/v1/databases → databases.json の一覧を返す
-  [ ] POST /admin/v1/databases — DB 名バリデーション・ディレクトリ作成・sqld オープン
+  [ ] POST /admin/v1/databases — DB 名バリデーション・ディレクトリ作成・libsql オープン
   [ ] GET /admin/v1/databases/{name} → 個別情報（name・created_at・size_bytes）
-  [ ] DELETE /admin/v1/databases/{name} — sqld クローズ・ディレクトリ削除
+  [ ] DELETE /admin/v1/databases/{name} — Arc<libsql::Database> drop・ディレクトリ削除
   [ ] size_bytes は data.db のファイルサイズを返す
   参照: §6.4（DB 管理）
 
@@ -3812,66 +3995,52 @@ T2-6: 統合テスト TC-2-1〜TC-2-6（TC-2-5b 含む）
 // http/admin/mod.rs
 // Phase 6〜7 で各ハンドラを実装する。現時点はすべて 501 を返す stub。
 
-pub async fn admin_auth_middleware(
-    State(state): State<SharedState>,
-    req: Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    if let Some(expected) = &state.config.admin_auth_token {
-        let provided = req
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "));
-        match provided {
-            Some(token) if token == expected.as_str() => {}
-            _ => {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    axum::Json(serde_json::json!({
-                        "error": "admin authentication required",
-                        "code":  "AUTH_REQUIRED"
-                    })),
-                ).into_response();
-            }
-        }
-    }
-    next.run(req).await
+use hyper::{Request, Response, body::Incoming};
+use http_body_util::Full;
+use bytes::Bytes;
+use std::convert::Infallible;
+use crate::state::SharedState;
+
+fn not_implemented() -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(http::StatusCode::NOT_IMPLEMENTED)
+        .body(Full::default())
+        .unwrap()
 }
 
 pub mod databases {
-    use axum::http::StatusCode;
-    pub async fn list()   -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn create() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn get()    -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn delete() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+    use super::*;
+    pub async fn list(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
+    pub async fn create(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
+    pub async fn get(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
+    pub async fn delete(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
 }
 
 pub mod tokens {
-    use axum::http::StatusCode;
-    pub async fn list()   -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn create() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn get()    -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn revoke() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+    use super::*;
+    pub async fn list(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
+    pub async fn create(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
+    pub async fn get(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
+    pub async fn revoke(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
 }
 
 pub mod metrics {
-    use axum::http::StatusCode;
-    pub async fn get() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+    use super::*;
+    pub async fn get(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
 }
 
 pub mod backup {
-    use axum::http::StatusCode;
-    pub async fn backup()  -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn restore() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn pitr()    -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+    use super::*;
+    pub async fn backup(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
+    pub async fn restore(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
+    pub async fn pitr(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
 }
 
 pub mod branches {
-    use axum::http::StatusCode;
-    pub async fn list()   -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn create() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn delete() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+    use super::*;
+    pub async fn list(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
+    pub async fn create(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
+    pub async fn delete(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
 }
 ```
 
@@ -3960,17 +4129,17 @@ close_stream(stream_id=1)
 
 複数の stream を同一 WebSocket 接続上で多重化できる（stream_id で識別）。
 
-#### sqld との統合（Phase 8）
+#### libsql との統合（Phase 8）
 
-Phase 1〜7 と同様、sqld の WebSocket サーバーループは起動しない。**Adlaire 独自の hrana-ws プロトコル変換レイヤーを実装する**（§3.3.3 の hrana-http 変換層と同じ設計方針）。
+Phase 1〜7 と同様、**Adlaire 独自の hrana-ws プロトコル変換レイヤーを実装する**（§3.3.3 の hrana-http 変換層と同じ設計方針）。libsql crate には WebSocket サーバー機能はないため、Adlaire が全て実装する。
 
 採用理由：
 
-- sqld の WebSocket ハンドラはセッション管理・認証と密結合しており、ライブラリとして分離が困難
+- hrana-ws プロトコルのセッション管理・認証は Adlaire が既に制御している（hrana-http と同じ構造）
 - Phase 1〜7 で構築した hrana-http 変換レイヤー（§3.3.3）の延長として実装でき、アーキテクチャの一貫性を保てる
 - WebSocket コネクションのライフサイクル（hello / stream_id / baton 管理）を Adlaire が完全制御できる
 
-WebSocket フレームの受受信・送信には `tokio-tungstenite` クレートを使用する。クエリ実行は Phase 1〜7 と同じ `sqld::Connection::execute_batch()` を経由する（§3.3.2）。
+WebSocket フレームの受受信・送信には `tokio-tungstenite` クレートを使用する。クエリ実行は Phase 1〜7 と同じ `libsql::Connection::execute_batch()` を経由する（§3.3.2）。
 
 **完了条件（テストケース）：**
 
@@ -4045,16 +4214,51 @@ pub struct DescribeParam { pub name: Option<String> }
 ```rust
 // ws/session.rs
 use std::collections::HashMap;
-use crate::hrana::convert::hrana_values_to_params;
+use crate::hrana::convert::{hrana_values_to_params, sql_to_stmt_result};
+use crate::db::sqld_adapter::{SqldAdapter, SqlResult, SqlValue, to_libsql_params, from_libsql_value};
+
+// sql_to_stmt_result のローカルエイリアス（ws 内での可読性向上）
+fn to_stmt_result(r: SqlResult) -> StmtResult { sql_to_stmt_result(r) }
+
+/// WsStream の永続コネクション上で単一 Stmt を実行し SqlResult を返す。
+/// stmt.want_rows が true なら query()、false なら execute() を使い分ける。
+async fn exec_stmt_on_conn(
+    conn: &libsql::Connection,
+    stmt: &Stmt,
+) -> Result<SqlResult, AppError> {
+    let sql_args = hrana_values_to_params(&stmt.args)?;
+    let params   = to_libsql_params(sql_args);
+    if stmt.want_rows {
+        let mut rows = conn.query(&stmt.sql, params).await
+            .map_err(|e| AppError::Sqld(e.to_string()))?;
+        let col_count = rows.column_count();
+        let cols: Vec<(Option<String>, Option<String>)> = (0..col_count)
+            .map(|i| (rows.column_name(i).map(|s| s.to_string()), None))
+            .collect();
+        let mut result_rows: Vec<Vec<SqlValue>> = vec![];
+        while let Some(row) = rows.next().await.map_err(|e| AppError::Sqld(e.to_string()))? {
+            let cells = (0..col_count)
+                .map(|i| from_libsql_value(row.get_value(i).unwrap_or(libsql::Value::Null)))
+                .collect();
+            result_rows.push(cells);
+        }
+        Ok(SqlResult { cols, rows: result_rows, rows_affected: 0, last_insert_rowid: None })
+    } else {
+        let rows_affected     = conn.execute(&stmt.sql, params).await
+            .map_err(|e| AppError::Sqld(e.to_string()))?;
+        let last_insert_rowid = conn.last_insert_rowid();
+        Ok(SqlResult { cols: vec![], rows: vec![], rows_affected, last_insert_rowid: Some(last_insert_rowid) })
+    }
+}
 
 pub struct WsSession {
-    db:      std::sync::Arc<sqld::Database>,
-    streams: HashMap<u32, WsStream>,  // stream_id → WsStream
+    db:      std::sync::Arc<dyn SqldAdapter>,  // Arc<libsql::Database> ではなくアダプタ経由
+    streams: HashMap<u32, WsStream>,           // stream_id → WsStream
     auth:    Claims,
 }
 
 pub struct WsStream {
-    conn:    sqld::Connection,
+    conn:    libsql::Connection,
     tx_mode: TransactionMode,
 }
 
@@ -4062,7 +4266,7 @@ pub struct WsStream {
 pub enum TransactionMode { None, ReadOnly, ReadWrite }
 
 impl WsSession {
-    pub fn new(db: std::sync::Arc<sqld::Database>, auth: Claims) -> Self {
+    pub fn new(db: std::sync::Arc<dyn SqldAdapter>, auth: Claims) -> Self {
         Self { db, streams: HashMap::new(), auth }
     }
 
@@ -4092,9 +4296,7 @@ impl WsSession {
                 } else if sql_upper.starts_with("COMMIT") || sql_upper.starts_with("ROLLBACK") {
                     stream.tx_mode = TransactionMode::None;
                 }
-                let params = hrana_values_to_params(&stmt.args);
-                let result = stream.conn.execute(&stmt.sql, params).await
-                    .map_err(|e| AppError::Sqld(e.to_string()))?;
+                let result = exec_stmt_on_conn(&stream.conn, &stmt).await?;
                 Ok(ResponseBody::Execute { result: to_stmt_result(result) })
             }
             RequestBody::CloseStream => {
@@ -4103,10 +4305,9 @@ impl WsSession {
             }
             RequestBody::Sequence { sql } => {
                 let stream = self.streams.get_mut(&stream_id).ok_or(AppError::InvalidRequest)?;
-                for stmt_sql in split_sql_statements(&sql) {
-                    stream.conn.execute(&stmt_sql, libsql::params![]).await
-                        .map_err(|e| AppError::Sqld(e.to_string()))?;
-                }
+                // execute_batch に丸ごと渡すことで文字列リテラル内のセミコロンを誤分割しない
+                stream.conn.execute_batch(&sql).await
+                    .map_err(|e| AppError::Sqld(e.to_string()))?;
                 Ok(ResponseBody::Sequence)
             }
             RequestBody::Describe { stmt } => {
@@ -4123,8 +4324,7 @@ impl WsSession {
                 let mut step_results = Vec::with_capacity(batch.len());
                 let mut step_errors  = Vec::with_capacity(batch.len());
                 for stmt in &batch {
-                    let params = hrana_values_to_params(&stmt.args);
-                    match stream.conn.execute(&stmt.sql, params).await {
+                    match exec_stmt_on_conn(&stream.conn, stmt).await {
                         Ok(r)  => { step_results.push(Some(to_stmt_result(r))); step_errors.push(None); }
                         Err(e) => { step_results.push(None); step_errors.push(Some(HranaError { message: e.to_string(), code: "SQLITE_ERROR".into() })); }
                     }
@@ -4156,7 +4356,7 @@ Turso Cloud と同様に、Adlaire が管理する DB 間に限り `ATTACH DATAB
 
 **実装方針：**
 - hrana-http v2 の `execute` リクエストで ATTACH SQL を受け取った際、Adlaire 側でインターセプトして DB 名を解決する
-- sqld の Connection に対してパス解決済みの ATTACH を発行する
+- libsql の Connection に対してパス解決済みの ATTACH を発行する
 - 対象 DB の接続が未オープンの場合はその場でオープンする
 
 **追加テストケース：**
@@ -4217,10 +4417,10 @@ TC-3-6: メトリクス API
 **Phase 8 実装タスク：**
 
 ```
-T3-1: WebSocket サーバー追加（axum の WebSocket upgrade）
+T3-1: WebSocket サーバー追加（hyper の WebSocket upgrade）
 T3-2: hrana-ws v3 hello ハンドシェイク + JWT 認証
 T3-3: ストリーム多重化レイヤー実装（stream_id ごとの接続状態管理）
-T3-4: execute / batch / sequence / describe リクエスト処理（sqld 境界再利用）
+T3-4: execute / batch / sequence / describe リクエスト処理（libsql Connection 経由）
 T3-5: インタラクティブトランザクション状態管理（BEGIN/COMMIT/ROLLBACK）
 ```
 
@@ -4242,7 +4442,7 @@ T3-8: 統合テスト TC-3-1〜TC-3-6
 /// foo が Adlaire 管理外（バリデーション失敗 or 未登録）なら Err を返す。
 pub async fn resolve_attach(
     sql: &str,
-    db_mgr: &dyn DbManager,
+    db_mgr: &DbManager,
     data_dir: &std::path::Path,
 ) -> Result<String, AppError> {
     let re = regex::Regex::new(
@@ -4281,13 +4481,13 @@ pub fn record_metrics(metrics: &DbMetrics, results: &[StreamResult]) {
     }
 }
 
-// handlers/admin/metrics.rs
+// http/admin/metrics.rs
 
 /// GET /admin/v1/metrics  → プロセス起動からの累積カウンター
 pub async fn get_metrics(
-    State(state): State<Arc<AppState>>,
-    _auth: AdminAuth,
-) -> Json<serde_json::Value> {
+    req: Request<Incoming>,
+    state: SharedState,
+) -> Result<Response<Full<Bytes>>, Infallible> {
     use std::sync::atomic::Ordering::Relaxed;
     let uptime = state.metrics.started_at.elapsed().as_secs();
     let databases: Vec<serde_json::Value> = state.metrics.databases.iter().map(|e| {
@@ -4310,12 +4510,12 @@ pub async fn get_metrics(
             "rows_written_total":m.rows_written_total.load(Relaxed),
         })
     }).collect();
-    Json(serde_json::json!({
+    Ok(json_ok(&serde_json::json!({
         "uptime_seconds":  uptime,
         "databases":       databases,
         "tokens_total":    state.metrics.tokens_total.load(Relaxed),
         "tokens_revoked":  state.metrics.tokens_revoked.load(Relaxed),
-    }))
+    })))
 }
 ```
 
@@ -4596,38 +4796,44 @@ T4-7: 統合テスト TC-4-1〜TC-4-5
 ```rust
 // middleware/replica_redirect.rs
 
+use hyper::{Request, Response, body::Incoming};
+use http_body_util::Full;
+use bytes::Bytes;
+
 /// レプリカモードで書き込みリクエストを受けた際に primary-url へ 307 リダイレクト
-pub async fn maybe_redirect_write(
-    State(state): State<Arc<AppState>>,
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
+/// route() の先頭で呼び出し、Some(response) が返った場合はそれを返す
+pub fn maybe_redirect_write(
+    req: &Request<Incoming>,
+    state: &SharedState,
+) -> Option<Response<Full<Bytes>>> {
     if let ServerRole::Replica { primary_url } = &state.role {
-        if is_mutating_request(&req) {
+        if is_mutating_request(req) {
             let target = format!(
                 "{}{}",
                 primary_url.as_str().trim_end_matches('/'),
                 req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("")
             );
-            return axum::response::Response::builder()
-                .status(axum::http::StatusCode::TEMPORARY_REDIRECT)
-                .header(axum::http::header::LOCATION, target)
-                .body(axum::body::Body::empty())
-                .unwrap();
+            return Some(Response::builder()
+                .status(http::StatusCode::TEMPORARY_REDIRECT)
+                .header(http::header::LOCATION, target)
+                .body(Full::default())
+                .unwrap());
         }
     }
-    next.run(req).await
+    None
 }
 
 /// POST / PUT / DELETE は書き込みリクエストとみなす
-fn is_mutating_request(req: &axum::extract::Request) -> bool {
+fn is_mutating_request(req: &Request<Incoming>) -> bool {
     matches!(
         req.method(),
-        &axum::http::Method::POST | &axum::http::Method::PUT | &axum::http::Method::DELETE
+        &http::Method::POST | &http::Method::PUT | &http::Method::DELETE
     )
 }
 
-// handlers/health.rs（Phase 11 拡張）
+// http/health.rs（Phase 11 拡張）
+// Phase 10 前提: ServerRole::Replica 有効化・ReplicationState 型の確定後に実装
+// Phase 10 完了後は ServerRole のコメントアウトを解除する（§14.2 AppState 参照）
 
 #[derive(serde::Serialize)]
 pub struct HealthResponse {
@@ -4636,18 +4842,21 @@ pub struct HealthResponse {
     pub replication_lag_frames: Option<u64>,  // replica のみ
 }
 
-pub async fn handle(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
+pub async fn handle(
+    _req: Request<Incoming>,
+    state: SharedState,
+) -> Result<Response<Full<Bytes>>, Infallible> {
     let lag = state.replication.as_ref()
         .map(|r| r.lag_frames.load(std::sync::atomic::Ordering::Relaxed));
     let status = match lag {
         Some(lag) if lag > 1000 => "degraded",
         _ => "ok",
     };
-    Json(HealthResponse {
+    Ok(json_ok(&HealthResponse {
         status,
         role: state.role.clone(),
         replication_lag_frames: lag,
-    })
+    }))
 }
 ```
 
@@ -4677,7 +4886,7 @@ TC-5-8: 保持期間超過フレームのクリーンアップ
 
 ```
 T5-1: WAL フレームアーカイブ書き込み
-  [ ] sqld チェックポイント前フックで WAL フレームを wal-archive/ へコピー
+  [ ] libsql チェックポイント前フックで WAL フレームを wal-archive/ へコピー
   [ ] フレームごとに CRC32 チェックサムを計算・付与
   [ ] manifest.json へフレームメタデータを追記
   参照: §3.2, §3.6.3, §6.4（PITR）
@@ -4844,7 +5053,7 @@ T5-6: リストア API
   [ ] POST /admin/v1/databases/{name}/restore → アップロードされた SQLite ファイルを適用
   [ ] PRAGMA integrity_check でファイル整合性検証
   [ ] 検証失敗時: 元 DB を復元し 409 RESTORE_INTEGRITY_FAILED を返す
-  [ ] 成功時: sqld をリロードしてサービス再開
+  [ ] 成功時: libsql::Builder::new_local() で DB を再オープンしてサービス再開
   参照: §6.4, §7.3
   検証: TC-5-2, TC-5-3
 
@@ -4943,7 +5152,7 @@ T6-3: `from: "current"` ブランチ作成
   [ ] {data-dir}/databases/{name}___{branch}/ ディレクトリ作成
   [ ] スナップショットを data.db として配置
   [ ] branches.json へメタデータを追加
-  [ ] 新 DB を sqld でオープン・マルチ DB マネージャへ登録
+  [ ] 新 DB を libsql::Builder::new_local() でオープン・マルチ DB マネージャへ登録
   参照: §6.4（ブランチ）
   検証: TC-6-1, TC-6-2
 
@@ -4958,12 +5167,12 @@ T6-4: `from: {timestamp}/{frame_no}` ブランチ作成
 T6-5: ブランチ一覧・削除 API
   [ ] GET /admin/v1/databases/{name}/branches → branches.json からフィルタして返す
   [ ] DELETE /admin/v1/databases/{name}/branches/{branch-name}
-        → sqld クローズ・ディレクトリ削除・branches.json 更新
+        → Arc<libsql::Database> drop・ディレクトリ削除・branches.json 更新
   参照: §6.4（ブランチ）
   検証: TC-6-4, TC-6-5
 
 T6-6: 起動時ブランチ自動復元ロジック
-  [ ] branches.json を読み込み、各 db_name の DB ディレクトリが存在すれば sqld でオープン
+  [ ] branches.json を読み込み、各 db_name の DB ディレクトリが存在すれば libsql::Builder::new_local() でオープン
   [ ] ディレクトリが存在しないエントリは WARN ログを出力してスキップ
   参照: §8.1 Step 5-3
   検証: TC-6-7
@@ -5151,10 +5360,10 @@ PRAGMA journal_mode = WAL;
 
 | パラメータ | デフォルト | CLI フラグ | config.toml キー | 説明 |
 |---|---|---|---|---|
-| busy timeout | 5000 ms | `--busy-timeout` | `[storage] busy_timeout_ms` | ロック待機タイムアウト。超過時 503 BUSY |
-| WAL checkpoint interval | 1000 pages | — | `[storage] wal_checkpoint_pages` | 自動チェックポイントのページ閾値 |
-| WAL checkpoint mode | `PASSIVE` | — | `[storage] wal_checkpoint_mode` | `PASSIVE` / `FULL` / `RESTART` |
-| synchronous | `NORMAL` | — | `[storage] synchronous` | `OFF` は非サポート（I-4 違反） |
+| busy timeout | 5000 ms | `--busy-timeout` | `[server] busy_timeout_ms` | ロック待機タイムアウト。超過時 503 BUSY |
+| WAL checkpoint interval | 1000 pages | — | `[storage] wal_checkpoint_pages`（未実装・Phase 10） | 自動チェックポイントのページ閾値 |
+| WAL checkpoint mode | `passive` | — | `[storage] wal_mode` | `passive` / `full` / `restart` |
+| synchronous | `NORMAL` | — | `[storage] synchronous`（未実装・Phase 10） | `OFF` は非サポート（I-4 違反） |
 
 ### 13.3 チェックポイント挙動
 
@@ -5185,8 +5394,8 @@ HTTP ステータス：503
 |------|------|
 | Turso Cloud | libSQL のマネージドホスティングサービス。Adlaire DB の hrana プロトコル互換の参照実装 |
 | libSQL | SQLite フォーク。HTTP API・WAL レプリケーション等を追加した OSS DB ライブラリ |
-| sqld | libSQL のサーバーコンポーネント。HTTP API・WebSocket API を提供する |
-| libSQL フォーク | Adlaire DB 専用に改変した libSQL（sqld 含む）。本プロジェクトの全体基盤 |
+| sqld | libSQL プロジェクトのサーバーコンポーネント（参考情報）。Adlaire DB は sqld を使用せず、libsql crate（embedded モード）を使用する |
+| libsql crate | Rust の libSQL クライアントライブラリ（crates.io）。embedded SQLite モードで使用する |
 | hrana | Turso / libSQL のワイヤプロトコル名。hrana-http（HTTP版）と hrana-ws（WebSocket版）がある |
 | baton | hrana プロトコルにおけるセッション継続識別子 |
 

@@ -17,6 +17,7 @@ pub enum StreamRequest {
 #[derive(Debug, serde::Deserialize)]
 pub struct Stmt {
     pub sql:        String,
+    #[serde(default)]
     pub args:       Vec<Value>,
     #[serde(default)]
     pub named_args: Vec<NamedArg>,
