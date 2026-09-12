@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.43  
+**バージョン：** 0.44  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-12  
 
@@ -241,7 +241,7 @@ regex              = "1"
 # dashmap = "5"
 bytes              = "1"
 # Phase 10〜 で追加予定
-# url   = "2"
+# url = { version = "2", features = ["serde"] }   # ServerRole::Replica の primary_url + HealthResponse シリアライズに必要
 # crc32fast = "1"
 ```
 
@@ -2562,8 +2562,8 @@ impl Config {
         let admin_port = args.admin_port.or(srv.admin_port).unwrap_or(8081);
         let log_level_env = std::env::var("ADLAIRE_LOG_LEVEL").ok();
         let log_level  = args.log_level.as_deref()
+            .or(log_level_env.as_deref())    // env（§8.4: CLI > env > TOML）
             .or(srv.log_level.as_deref())
-            .or(log_level_env.as_deref())
             .unwrap_or("info")
             .to_string();
         let busy_timeout_ms: u64  = args.busy_timeout.or(srv.busy_timeout_ms).unwrap_or(5000);
@@ -4477,15 +4477,16 @@ T3-8: 統合テスト TC-3-1〜TC-3-6
 
 /// "ATTACH DATABASE 'foo' AS alias" を検出して解決済みパスに書き換える。
 /// foo が Adlaire 管理外（バリデーション失敗 or 未登録）なら Err を返す。
+static ATTACH_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)ATTACH\s+(?:DATABASE\s+)?'([^']+)'\s+AS\s+(\w+)"#).unwrap()
+});
+
 pub async fn resolve_attach(
     sql: &str,
     db_mgr: &DbManager,
     data_dir: &std::path::Path,
 ) -> Result<String, AppError> {
-    let re = regex::Regex::new(
-        r#"(?i)ATTACH\s+(?:DATABASE\s+)?'([^']+)'\s+AS\s+(\w+)"#
-    ).unwrap();
-    if let Some(caps) = re.captures(sql) {
+    if let Some(caps) = ATTACH_RE.captures(sql) {
         let db_name = &caps[1];
         let alias   = &caps[2];
         validate_db_name(db_name)?;
