@@ -1421,6 +1421,15 @@ GET /admin/v1/metrics     全 DB のメトリクス取得
 | `PERMISSION_DENIED` | 403 | ro トークンで書き込み操作 |
 | `DB_NOT_FOUND` | 404 | 指定 DB が存在しない |
 | `TOKEN_NOT_FOUND` | 404 | 指定トークン ID が存在しない |
+| `ORG_NOT_FOUND` | 404 | 指定 organization が存在しない |
+| `GROUP_NOT_FOUND` | 404 | 指定 group が存在しない |
+| `LOCATION_NOT_FOUND` | 404 | 指定 location が存在しない |
+| `ORG_ALREADY_EXISTS` | 409 | 同名 organization または slug が既に存在する |
+| `GROUP_ALREADY_EXISTS` | 409 | 同一 organization 内に同名 group または slug が既に存在する |
+| `LOCATION_ALREADY_EXISTS` | 409 | 同名 location が既に存在する |
+| `QUOTA_EXCEEDED` | 403 | quota 上限を超える操作 |
+| `USAGE_UNAVAILABLE` | 503 | usage 計測値を取得できない |
+| `ORG_SCOPE_DENIED` | 403 | organization/group scope 外の操作 |
 | `DB_ALREADY_EXISTS` | 409 | 同名 DB が既に存在する |
 | `INVALID_DB_NAME` | 400 | DB 名がバリデーションを通過しない |
 | `INVALID_REQUEST` | 400 | リクエスト JSON が不正 |
@@ -1668,7 +1677,7 @@ Step 5: 停止完了
 | **Phase 5** | ログ・統合テスト | TC-4, TC-5 (2件) | T-10〜T-11 (2件) |
 | **Phase 6** | マルチ DB ルーター・DB マネージャ | — | T2-1〜T2-2 (2件) |
 | **Phase 7** | 管理 API・トークン CRUD・DB スコープ JWT | TC-2-1〜TC-2-6（TC-2-5b 含む）(7件) | T2-3〜T2-6 (4件) |
-| **Phase 8** | Turso Cloud 互換管理モデル | TBD by Phase 8 spec PR | TBD by Phase 8 spec PR |
+| **Phase 8** | Turso Cloud 互換管理モデル | TC-8-1〜TC-8-8 (8件) | T8-1〜T8-7 (7件) |
 | **Phase 9** | WebSocket（hrana-ws v3） | TC-3-1〜TC-3-4 (4件) | T3-1〜T3-5 (5件) |
 | **Phase 10** | ATTACH DB・メトリクス | TC-3-5, TC-3-6 (2件) | T3-6〜T3-8 (3件) |
 | **Phase 11** | レプリケーション基盤（WAL ストリーム・スナップショット） | — | T4-1〜T4-3 (3件) |
@@ -1751,7 +1760,7 @@ Step 5: 停止完了
 | Phase 5 | 構造化 JSON ログ、HTTP request ログ、Phase 1〜5 の統合テスト、TypeScript SDK 互換テスト、再起動後の永続化テストが通る | マルチ DB、WebSocket、replication、backup |
 | Phase 6 | `/{db-name}/v2/pipeline` が動き、DB 名バリデーション、DbManager の create/list/get/delete 内部機構、databases.json のアトミック更新が動く。`/v2/pipeline` は default fallback のまま維持される | 管理 API route の完全実装、DB スコープ JWT、backup |
 | Phase 7 | 管理 API の DB CRUD、token CRUD、DB スコープ JWT、管理 API 認証、revoke 即時反映が動く。全管理 API は §6.4 の status/body に一致する | WebSocket、ATTACH、replication、backup |
-| Phase 8 | Turso Cloud 互換管理モデルとして location、organization/group、quota/usage の API・metadata・権限・エラー・既存 admin API への影響が仕様化され、実装される。既存 Phase 1〜7 の API と metadata migration は後方互換を維持する | WebSocket、ATTACH、replication、backup、branch、SQLite 拡張、内製化 |
+| Phase 8 | Turso Cloud 互換管理モデルとして location、organization/group、quota/usage の API、metadata、migration、権限、quota 判定、エラーが Phase 8 詳細節の契約通り実装される。既存 Phase 1〜7 の API と metadata migration は後方互換を維持する | WebSocket、ATTACH、replication、backup、branch、SQLite 拡張、内製化 |
 | Phase 9 | hrana-ws v3 の hello/open_stream/execute/sequence/close_stream/store_sql/close_sql が動き、同一 stream 内の interactive transaction が同一接続で保持される | ATTACH、metrics、replication、backup |
 | Phase 10 | 管理下 DB のみを対象に ATTACH が動き、任意パス ATTACH を拒否する。metrics API は counters/gauges を返し、HTTP/DB/WebSocket 経路から値が更新される | WAL replication、backup、branch |
 | Phase 11 | primary role で replication API（log/snapshot/heartbeat/status）が起動し、WAL frame 番号、CRC32、snapshot header が仕様通り返る。replica 受信・適用はまだ完了条件に含めない | replica 同期完了、書き込みリダイレクト、WAL archive retention |
@@ -1810,7 +1819,7 @@ API を実装する場合は、各 endpoint について必ず次を仕様本文
 |-------|----------|----------|--------|-------------|------------|
 | Phase 6 | `db/manager.rs`, `db/meta.rs`, `http/mod.rs`, `http/pipeline.rs` | `POST /{db-name}/v2/pipeline` を追加する。`/v2/pipeline` は `default` のまま。管理 API はまだ完了対象外 | `meta/databases.json` に DB 追加/削除を atomic update。各 DB は `databases/{name}/data.db` | invalid DB name は `INVALID_DB_NAME`、予約名は `DB_RESERVED_NAME`、未存在は `DB_NOT_FOUND` | DB 名 validation、複数 DB 分離、default fallback、再起動後 DB 復元 |
 | Phase 7 | `http/admin/*`, `auth/*`, `token/*`, `db/manager.rs` | `/admin/v1/databases`, `/admin/v1/tokens` を §6.4 通り実装する。Admin token は Bearer 完全一致。DB scope JWT を有効化 | `databases.json` と `tokens.json` を API 経由で更新する。削除はファイル/ディレクトリと metadata を整合させる | 管理 API 認証失敗は `401 AUTH_REQUIRED`。重複 DB は `409 DB_ALREADY_EXISTS`。revoke は即時反映 | TC-2-1〜TC-2-6。admin auth、DB CRUD、token CRUD、DB scope ro/rw |
-| Phase 8 | `http/admin/*`, `db/meta.rs`, `auth/*`, `quota/*`, `location/*`, `org/*` | Turso Cloud 互換の location、organization/group、quota/usage API と既存 DB/token admin API の拡張を仕様化して実装する | location、organization/group、quota/usage の metadata を atomic update。既存 `databases.json` / `tokens.json` との migration と後方互換を保証する | Turso Cloud 互換の quota 超過、所属不整合、location 不正、権限不一致エラーを §7.3 に追加して返す。secret と課金相当情報はログ出力禁止 | Phase 8 spec PR で定義した API/metadata/auth/quota/migration tests。Phase 1〜7 regression と SDK 互換を必須 |
+| Phase 8 | `http/admin/*`, `db/meta.rs`, `auth/*`, `quota/*`, `location/*`, `org/*` | §9.5 と Phase 8 詳細節に定義した organization/group/location/quota/usage API と、既存 DB/token admin API の scope 拡張を実装する | `organizations.json`、`groups.json`、`locations.json`、`quotas.json`、`usage.json` を §9.6 通り更新し、既存 `databases.json` / `tokens.json` の migration と後方互換を保証する | `ORG_NOT_FOUND`、`GROUP_NOT_FOUND`、`LOCATION_NOT_FOUND`、`QUOTA_EXCEEDED`、`USAGE_UNAVAILABLE`、`ORG_SCOPE_DENIED` を §7.3 通り返す。secret と課金相当情報はログ出力禁止 | Phase 8 API/metadata/auth/quota/migration tests。Phase 1〜7 regression と SDK 互換を必須 |
 | Phase 9 | `ws/*`, `hrana/*`, `db/sqld_adapter.rs`, `http/mod.rs` | `GET /v3/baton` と `GET /{db-name}/v3/baton` で WebSocket upgrade。hrana-ws v3 messages を実装 | SQL 実行による DB 永続化のみ。WebSocket session state はプロセス内メモリでよく、再起動復元しない | hello 前 request は protocol error。stream 未存在は hrana error。接続 close 時に未完了 transaction は rollback | TC-3-1〜TC-3-4。interactive transaction、store_sql/close_sql、auth failure、multi stream |
 | Phase 10 | `attach/*`, `metrics.rs`, `http/admin/metrics`, `db/sqld_adapter.rs` | 管理下 DB の ATTACH のみ許可。`GET /admin/v1/metrics` を実装する | 新規ファイルなし。metrics はプロセス内 counters/gauges でよく再起動リセット | 任意パス ATTACH は `PERMISSION_DENIED` または `INVALID_REQUEST`。metrics 取得は admin auth 対象 | TC-3-5, TC-3-6。ATTACH 成功/拒否、metrics counters 更新 |
 
@@ -1889,6 +1898,21 @@ Phase 16 の実装 PR は、上表を具体化する仕様変更 PR と分ける
 | `POST /admin/v1/tokens` | 7 | Admin token | `{access, expiry?, dbs?}` | 201 `{id, token, ...}`。token は作成時のみ返す | 400 `INVALID_REQUEST` | `tokens.json` | No |
 | `GET /admin/v1/tokens/{id}` | 7 | Admin token | body なし | 200 token metadata。JWT 文字列は返さない | 404 `TOKEN_NOT_FOUND` | なし | Yes |
 | `DELETE /admin/v1/tokens/{id}` | 7 | Admin token | body なし | 204 empty body | 404 `TOKEN_NOT_FOUND` | `tokens.json`, in-memory revoke set | Yes: 既に revoked は 204 |
+| `GET /admin/v1/organizations` | 8 | Admin token | body なし | 200 `{organizations:[...]}` | 401 `AUTH_REQUIRED` | なし | Yes |
+| `POST /admin/v1/organizations` | 8 | Admin token | `{name, slug?}` | 201 `OrganizationInfo` | 400 `INVALID_REQUEST`, 409 `ORG_ALREADY_EXISTS` | `organizations.json` | No |
+| `GET /admin/v1/organizations/{org}` | 8 | Admin token | body なし | 200 `OrganizationInfo` | 404 `ORG_NOT_FOUND` | なし | Yes |
+| `DELETE /admin/v1/organizations/{org}` | 8 | Admin token | body なし | 204 empty body | 404 `ORG_NOT_FOUND`, 403 `ORG_SCOPE_DENIED` | `organizations.json`, related group/quota metadata | Yes: missing org remains 404 |
+| `GET /admin/v1/groups` | 8 | Admin token | query `organization?` | 200 `{groups:[...]}` | 404 `ORG_NOT_FOUND` | なし | Yes |
+| `POST /admin/v1/groups` | 8 | Admin token | `{organization, name, slug?, location?}` | 201 `GroupInfo` | 400 `INVALID_REQUEST`, 404 `ORG_NOT_FOUND`/`LOCATION_NOT_FOUND`, 409 `GROUP_ALREADY_EXISTS` | `groups.json` | No |
+| `GET /admin/v1/groups/{group}` | 8 | Admin token | body なし | 200 `GroupInfo` | 404 `GROUP_NOT_FOUND` | なし | Yes |
+| `DELETE /admin/v1/groups/{group}` | 8 | Admin token | body なし | 204 empty body | 404 `GROUP_NOT_FOUND`, 403 `ORG_SCOPE_DENIED` | `groups.json`, related quota metadata | Yes: missing group remains 404 |
+| `GET /admin/v1/locations` | 8 | Admin token | body なし | 200 `{locations:[...]}` | 401 `AUTH_REQUIRED` | なし | Yes |
+| `POST /admin/v1/locations` | 8 | Admin token | `{name, provider?, region?, primary?}` | 201 `LocationInfo` | 400 `INVALID_REQUEST`, 409 `LOCATION_ALREADY_EXISTS` | `locations.json` | No |
+| `GET /admin/v1/locations/{location}` | 8 | Admin token | body なし | 200 `LocationInfo` | 404 `LOCATION_NOT_FOUND` | なし | Yes |
+| `DELETE /admin/v1/locations/{location}` | 8 | Admin token | body なし | 204 empty body | 404 `LOCATION_NOT_FOUND`, 403 `ORG_SCOPE_DENIED` | `locations.json` | Yes: missing location remains 404 |
+| `GET /admin/v1/quotas` | 8 | Admin token | query `organization?`, `group?`, `database?` | 200 `{quotas:[...]}` | 404 `ORG_NOT_FOUND`/`GROUP_NOT_FOUND`/`DB_NOT_FOUND` | なし | Yes |
+| `PUT /admin/v1/quotas/{scope}` | 8 | Admin token | `{storage_bytes, rows?, write_ops_per_minute?}` | 200 `QuotaInfo` | 400 `INVALID_REQUEST`, 404 `ORG_NOT_FOUND`/`GROUP_NOT_FOUND`/`DB_NOT_FOUND` | `quotas.json` | Yes |
+| `GET /admin/v1/usage` | 8 | Admin token | query `organization?`, `group?`, `database?` | 200 `{usage:[...]}` | 404 `ORG_NOT_FOUND`/`GROUP_NOT_FOUND`/`DB_NOT_FOUND`, 503 `USAGE_UNAVAILABLE` | `usage.json` snapshot | Yes |
 | `GET /admin/v1/metrics` | 10 | Admin token | body なし | 200 metrics JSON | 401 `AUTH_REQUIRED` | なし | Yes |
 | `GET /replication/v1/log?from_frame=N` | 11 | replication token | query `from_frame` | 200 SSE frames | 400 `INVALID_REQUEST`, 401 `AUTH_INVALID`, 404 `FRAME_NOT_FOUND` | なし | 接続単位 |
 | `GET /replication/v1/snapshot` | 11 | replication token | query/body なし | 200 octet-stream + replication headers | auth 系, 500 | なし | Yes |
@@ -1908,6 +1932,11 @@ Phase 16 の実装 PR は、上表を具体化する仕様変更 PR と分ける
 | `{data-dir}/.lock` | 2 | `ProcessLock` | 空ファイル可 | open + flock。内容は意味を持たない | 不要 | flock が取れれば続行。削除不要 | No |
 | `{data-dir}/meta/databases.json` | 2 / 6 / 7 | `DbManager` | `{"databases":[]}` | tmp write + fsync + rename | 必須 | 起動失敗。自動修復しない | Yes |
 | `{data-dir}/meta/tokens.json` | 2 / 4 / 7 | `AuthState` / token 管理 | `{"tokens":[]}` | tmp write + fsync + rename | 必須 | 起動失敗。空で上書きしない | Yes |
+| `{data-dir}/meta/organizations.json` | 8 | organization 管理 | `{"organizations":[{"id":"default","name":"default","slug":"default","created_at":...}]}` | tmp write + fsync + rename | 必須 | 起動失敗。自動修復しない | Yes |
+| `{data-dir}/meta/groups.json` | 8 | group 管理 | `{"groups":[{"id":"default","organization":"default","name":"default","slug":"default","location":"default"}]}` | tmp write + fsync + rename | 必須 | 起動失敗。自動修復しない | Yes |
+| `{data-dir}/meta/locations.json` | 8 | location 管理 | `{"locations":[{"id":"default","name":"default","provider":"self-hosted","region":"local","primary":true}]}` | tmp write + fsync + rename | 必須 | 起動失敗。自動修復しない | Yes |
+| `{data-dir}/meta/quotas.json` | 8 | quota 管理 | `{"quotas":[]}` | tmp write + fsync + rename | 必須 | 起動失敗。自動修復しない | Yes |
+| `{data-dir}/meta/usage.json` | 8 | usage snapshot | `{"usage":[],"updated_at":null}` | tmp write + fsync + rename | 任意。fsync 失敗時は WARN + `USAGE_UNAVAILABLE` | 破損時は起動 WARN 後に再計測。空上書きは禁止 | No |
 | `{data-dir}/meta/branches.json` | 2 / 15 | branch 管理 | `{"branches":[]}` | tmp write + fsync + rename | 必須 | Phase 15 以降は起動失敗。Phase 14 以前は初期化のみ | Yes |
 | `{data-dir}/databases/{name}/data.db` | 2+ | libsql / DbManager | libsql 作成 | libsql commit | libsql に委譲 | integrity_check NG なら起動失敗 | Yes |
 | `{data-dir}/databases/{name}/data.db-wal` | 2+ | SQLite WAL | SQLite 作成 | SQLite WAL | SQLite に委譲 | SQLite recovery に委譲。integrity_check で検出 | Yes |
@@ -1935,6 +1964,15 @@ Phase 16 の実装 PR は、上表を具体化する仕様変更 PR と分ける
 | `PERMISSION_DENIED` | 4+ / 10 | ro 書き込み、任意パス ATTACH 等 | No | 権限または request を変更 |
 | `DB_NOT_FOUND` | 6+ | DB path, 管理 API, branch/backup | No | DB 名を確認または作成 |
 | `TOKEN_NOT_FOUND` | 7+ | token get/delete | No | token id を確認 |
+| `ORG_NOT_FOUND` | 8+ | organization get/delete, group/quota scope | No | organization id/slug を確認または作成 |
+| `GROUP_NOT_FOUND` | 8+ | group get/delete, DB/token/quota scope | No | group id/slug を確認または作成 |
+| `LOCATION_NOT_FOUND` | 8+ | location get/delete, DB/group create | No | location id/slug を確認または作成 |
+| `ORG_ALREADY_EXISTS` | 8+ | organization create | No | 別の organization name/slug を使う |
+| `GROUP_ALREADY_EXISTS` | 8+ | group create | No | 同一 organization 内で別の group name/slug を使う |
+| `LOCATION_ALREADY_EXISTS` | 8+ | location create | No | 別の location name を使う |
+| `QUOTA_EXCEEDED` | 8+ | write/import/restore/replication apply/branch create | No | quota を増やすか使用量を削減 |
+| `USAGE_UNAVAILABLE` | 8+ | usage API, quota 判定不能時 | Yes | usage 再計測またはサーバーログ確認 |
+| `ORG_SCOPE_DENIED` | 8+ | organization/group scope 外の admin/JWT 操作 | No | token scope または対象 scope を修正 |
 | `DB_ALREADY_EXISTS` | 7+ | DB create | No | 別名を使う |
 | `INVALID_DB_NAME` | 6+ | DB/branch create/path validation | No | name を修正 |
 | `DB_RESERVED_NAME` | 6+ / 15 | `meta`, `admin`, `___` 含有名 | No | name を修正 |
@@ -4727,18 +4765,134 @@ Phase 8 は Turso Cloud 互換を優先するための前倒しフェーズで�
 - 既存 `/admin/v1/databases`、`/admin/v1/tokens` の互換拡張
 - 既存 `databases.json`、`tokens.json` からの metadata migration
 
-**Phase 8 実装前に必ず仕様化する項目：**
+**Phase 8 API 契約：**
 
-| 項目 | 必須内容 |
-|------|----------|
-| Turso Cloud 互換 API | method/path、request/response schema、unknown field、pagination、filter、sort |
-| metadata | location、organization、group、quota、usage の永続化ファイル、初期値、migration、破損時挙動 |
-| 権限 | admin token、JWT claim、DB scope、organization/group scope の優先順位 |
-| quota | quota 単位、usage 計測方法、超過時に拒否する操作、restore/replication/backup との関係 |
-| エラー | §7.3 に追加する code、HTTP status、message 粒度、部分成功の有無 |
-| 互換テスト | Turso Cloud 互換 API schema、既存 SDK 互換、Phase 1〜7 regression、metadata migration |
+Phase 8 で公開する API は §9.5 の Phase 8 行を正とする。すべて Admin token 必須とし、unknown field は `INVALID_REQUEST` とする。一覧 API は `limit`（既定 100、最大 500）と `cursor` を受け付ける。Phase 8 では `cursor` は opaque string とし、未指定時は先頭ページを返す。filter query は `organization`、`group`、`database` のみ許可し、不明 query は `INVALID_REQUEST` とする。
 
-Phase 8 の仕様変更 PR は、実装 PR より先に作成する。Phase 8 の実装 PR は、上表を具体化した仕様を満たすことを完了条件とする。
+`PUT /admin/v1/quotas/{scope}` の `{scope}` は URL encode 済みの `organization:{id}`、`group:{id}`、`database:{name}` のいずれかとする。scope type が不明な場合は `INVALID_REQUEST`、scope が存在しない場合は対応する `ORG_NOT_FOUND`、`GROUP_NOT_FOUND`、`DB_NOT_FOUND` を返す。
+
+**既存 API の Phase 8 拡張：**
+
+- `POST /admin/v1/databases` は `{name, organization?, group?, location?, quota?}` を受け付ける。省略時はすべて `"default"` を使う
+- `DbInfo` は Phase 8 以降 `{name, created_at, path, organization, group, location, quota?, usage?}` を返す
+- `POST /admin/v1/tokens` は `{access, expiry?, dbs?, organization_scope?, group_scope?}` を受け付ける
+- token metadata は Phase 8 以降 `organization_scope` と `group_scope` を返す。ただし JWT 文字列は従来通り作成時のみ返す
+- Phase 7 クライアントが送る `{name}`、`{access, expiry?, dbs?}` は後方互換として成功しなければならない
+
+**Phase 8 metadata schema：**
+
+```json
+{
+  "organizations": [
+    { "id": "default", "name": "default", "slug": "default", "created_at": "2026-09-12T00:00:00Z" }
+  ],
+  "groups": [
+    { "id": "default", "organization": "default", "name": "default", "slug": "default", "location": "default", "created_at": "2026-09-12T00:00:00Z" }
+  ],
+  "locations": [
+    { "id": "default", "name": "default", "provider": "self-hosted", "region": "local", "primary": true }
+  ],
+  "quotas": [
+    { "scope_type": "organization|group|database", "scope": "default", "storage_bytes": 10737418240, "rows": null, "write_ops_per_minute": null }
+  ],
+  "usage": [
+    { "scope_type": "organization|group|database", "scope": "default", "storage_bytes": 0, "rows": null, "updated_at": "2026-09-12T00:00:00Z" }
+  ]
+}
+```
+
+実ファイルは §9.6 の通り `organizations.json`、`groups.json`、`locations.json`、`quotas.json`、`usage.json` に分ける。上記 JSON は論理 schema の説明であり、1 ファイルへ統合してはならない。
+
+**Phase 8 migration：**
+
+Phase 8 初回起動時に Phase 7 までの metadata を検出した場合、次を 1 回だけ実行する。
+
+1. `organizations.json`、`groups.json`、`locations.json`、`quotas.json`、`usage.json` がなければ初期値を作る
+2. 既存 `databases.json` の全 DB に `organization:"default"`、`group:"default"`、`location:"default"` を付与する
+3. 既存 `tokens.json` の全 token に `organization_scope:null`、`group_scope:null` を付与し、従来の `dbs` claim は維持する
+4. migration 中に失敗した場合は起動失敗とし、途中で更新済みの metadata を成功扱いにしない
+5. migration は tmp write、fsync、rename の順で行い、全 metadata が整合した後に起動成功とする
+
+**Phase 8 権限優先順位：**
+
+1. Admin token は全 organization/group/location/quota にアクセスできる
+2. JWT に `org` claim がある場合、その organization 外の DB/group/quota 操作は `ORG_SCOPE_DENIED`
+3. JWT に `grp` claim がある場合、その group 外の DB 操作は `ORG_SCOPE_DENIED`
+4. `dbs` claim は DB 単位の最終制限として維持する。`org` / `grp` で許可されても `dbs` が拒否する DB は操作不可
+5. `a:"ro"` は Phase 8 以降も書き込み、restore、replication apply、branch create を禁止する
+
+**Phase 8 quota 判定：**
+
+quota は organization、group、database の順にすべて評価する。1 つでも超過する場合は `QUOTA_EXCEEDED` を返し、DB ファイルや metadata を変更してはならない。usage が取得できず安全に判定できない場合は `USAGE_UNAVAILABLE` を返し、成功扱いにしない。
+
+quota 判定で拒否する操作:
+
+- `POST /v2/pipeline` と `POST /{db-name}/v2/pipeline` の write SQL
+- `sequence` に含まれる write SQL
+- backup restore / PITR restore
+- replication apply
+- branch create
+- 将来の import API
+
+backup download、read-only SELECT、DB/token/location/org/group/quota の一覧取得は quota 超過時でも許可する。
+
+Phase 8 の実装 PR は、上記 API、metadata、migration、権限、quota、エラー契約をすべて満たすことを完了条件とする。
+
+**Phase 8 追加テストケース：**
+
+```
+TC-8-1: organization CRUD
+  （a）POST /admin/v1/organizations {name:"acme"} → 201
+  （b）GET /admin/v1/organizations → acme を含む
+  （c）GET /admin/v1/organizations/acme → 200
+  （d）DELETE /admin/v1/organizations/acme → 204
+
+TC-8-2: group と location の関連
+  （a）POST /admin/v1/locations {name:"local"} → 201
+  （b）POST /admin/v1/groups {organization:"default", name:"app", location:"local"} → 201
+  （c）存在しない organization/location 指定 → 404 ORG_NOT_FOUND / LOCATION_NOT_FOUND
+
+TC-8-3: DB 作成の scope 拡張
+  （a）POST /admin/v1/databases {name:"db1", organization:"default", group:"default", location:"default"} → 201
+  （b）GET /admin/v1/databases/db1 → organization/group/location を含む
+  （c）Phase 7 互換の {name:"db2"} → 201、default scope が付与される
+
+TC-8-4: token scope 拡張
+  （a）POST /admin/v1/tokens {access:"rw", organization_scope:"default"} → 201
+  （b）scope 外 DB への write → 403 ORG_SCOPE_DENIED
+  （c）dbs claim が拒否する DB は org/group scope が許可しても 403
+
+TC-8-5: quota exceeded
+  （a）PUT /admin/v1/quotas/database:db1 {storage_bytes:1} → 200
+  （b）db1 へ write SQL → 403 QUOTA_EXCEEDED
+  （c）SELECT と backup download は quota 超過中も成功
+
+TC-8-6: usage unavailable
+  （a）usage snapshot を取得不能状態にする
+  （b）quota 判定が必要な write → 503 USAGE_UNAVAILABLE
+  （c）GET /admin/v1/usage → 503 USAGE_UNAVAILABLE
+
+TC-8-7: metadata migration
+  （a）Phase 7 の databases.json/tokens.json だけが存在する data-dir で起動
+  （b）Phase 8 metadata が作成され、既存 DB/token に default scope が付与される
+  （c）再起動後も同じ metadata が復元される
+
+TC-8-8: atomicity / rollback
+  （a）organizations/groups/locations/quotas の更新中に失敗を注入
+  （b）起動成功扱いにせず、partial metadata を成功応答しない
+```
+
+**Phase 8 実装タスク：**
+
+```
+T8-1: organization/location/group/quota/usage 型と metadata store を追加
+T8-2: Phase 7 metadata から Phase 8 metadata への migration を実装
+T8-3: organization/group/location CRUD API を実装
+T8-4: quota/usage API と scope parser（organization:{id} / group:{id} / database:{name}）を実装
+T8-5: DB/token API に organization/group/location/quota scope を統合
+T8-6: JWT org/grp claim と dbs claim の権限優先順位を実装
+T8-7: quota 判定を write/restore/replication apply/branch create に接続し、TC-8-1〜TC-8-8 を通す
+```
 
 
 ### Phase 9：WebSocket（hrana-ws v3）
