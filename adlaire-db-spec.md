@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.36  
+**バージョン：** 0.37  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-11  
 
@@ -21,15 +21,15 @@ libSQL クライアント SDK（TypeScript・Rust・Go 等）から接続 URL �
 | 比較対象 | Adlaire DB との関係 |
 |----------|---------------------|
 | Turso Cloud | ワイヤプロトコル（hrana）互換の参照実装。埋め込みレプリカは対象外 |
-| libSQL / sqld | フォーク元。Adlaire DB の全体基盤 |
-| SQLite | libSQL 経由で互換性を維持 |
+| libSQL / libsql crate | ワイヤプロトコルと embedded SQLite の実装参照。libsql 0.6（crates.io）を組み込み利用 |
+| SQLite | libsql crate 経由で互換性を維持 |
 
 ### 1.3 固定制約
 
 | 項目 | 内容 |
 |------|------|
 | 実装言語 | Rust + 標準ライブラリ |
-| ストレージ・SQL 基盤 | libSQL フォーク（sqld 含む）|
+| ストレージ・SQL 基盤 | libsql crate 0.6（embedded SQLite / WAL モード）|
 | 目標機能 | hrana プロトコル互換・サーバー特化機能 |
 | 将来方針 | libSQL 内部の段階的内製化（詳細は各フェーズで検討）|
 | デプロイ形態 | シングルバイナリ起動 |
@@ -130,7 +130,7 @@ libSQL クライアント SDK / curl / WebSocket クライアント
                         │
                         ▼
 ┌──────────────────────────────────────────────────┐
-│              libSQL フォーク（sqld）              │
+│           libsql crate 0.6（embedded SQLite）     │
 │  SQL パーサ / クエリ実行 / WAL / ページストレージ │
 └──────────────────────────────────────────────────┘
 ```
@@ -159,36 +159,35 @@ libSQL クライアント SDK / curl / WebSocket クライアント
     └── branches.json             # ブランチメタデータ（Phase 14）
 ```
 
-### 3.3 libSQL フォークとの統合方式
+### 3.3 libsql crate との統合方式
 
-sqld（libSQL のサーバーコンポーネント）を **Rust ライブラリとして組み込む**。sqld をサブプロセスとして起動してプロキシする方式は採らない。
+`libsql` crate（crates.io, embedded SQLite モード）を **Rust ライブラリとして組み込む**。sqld サブプロセスの起動・git submodule の利用は行わない。
 
 ```
 adlaire-db バイナリ（Rust）
 ├── Adlaire サーバー層（自前実装）
 │   ├── HTTP ルーティング・認証・管理 API
 │   └── マルチDB ルーター
-└── sqld コア（libSQL フォークとして静的リンク）
+└── libsql crate 0.6（embedded SQLite）
     ├── SQL パーサ・クエリエグゼキューター
     ├── WAL 管理
     └── ページストレージ
 ```
 
-**Phase 1 での sqld 改変範囲：**
+**libsql crate の利用範囲：**
 
-| sqld の機能 | Adlaire での扱い |
-|-------------|-----------------|
-| SQL パーサ・クエリ実行 | そのまま使用 |
-| WAL・ページストレージ | そのまま使用 |
-| sqld 内蔵 HTTP サーバー | 無効化。Adlaire サーバー層が代替 |
-| sqld 内蔵認証 | 無効化。Adlaire の JWT 認証が代替 |
-| sqld 内蔵管理 API | 無効化。Adlaire 管理 API が代替 |
-| hrana-http プロトコル実装 | sqld のものを再利用するか Adlaire で再実装するかは実装時に判断 |
+| libsql の機能 | Adlaire での扱い |
+|--------------|-----------------|
+| SQL パーサ・クエリ実行 | `libsql::Connection::query / execute / execute_batch` を使用 |
+| WAL・ページストレージ | libsql が内部処理。`PRAGMA` で設定（journal_mode / synchronous / busy_timeout） |
+| HTTP サーバー | libsql は持たない。Adlaire が axum で実装 |
+| 認証 | libsql は持たない。Adlaire が JWT で実装 |
+| hrana-http プロトコル | libsql は持たない。Adlaire 独自型（hrana/types.rs）で実装 |
 
-**改変の基本方針：**
-- Phase 1 では sqld への変更を最小限に留める
-- sqld の `Connection` / `Database` 型を直接呼び出す形で統合する
-- sqld の HTTP サーバーループは起動しない（Adlaire サーバーが HTTP を受け付ける）
+**統合の基本方針：**
+- `libsql::Builder::new_local(path).build().await?` でデータベースをオープンする
+- `db.connect()?` でコネクションを取得し、クエリを実行する
+- HTTP・認証・管理 API は Adlaire が完全に実装し libsql には依存しない
 
 #### 3.3.1 Cargo ワークスペース構成
 
@@ -388,7 +387,7 @@ POST /v2/pipeline
 
 1. `POST /admin/v1/databases` を受信
 2. `databases/{name}/` ディレクトリを作成（既存なら `DB_ALREADY_EXISTS` エラー）
-3. sqld で `data.db` を初期化（空の SQLite DB）
+3. `libsql::Builder::new_local()` で `data.db` を初期化（空の SQLite DB）
 4. `meta/databases.json` にメタデータを追記
 5. 成功レスポンスを返す
 
@@ -404,44 +403,37 @@ POST /v2/pipeline
 
 #### 3.5.1 hrana-http 変換層の方針
 
-sqld は hrana-http の型（ステートメント・カラム・行・エラー）を Rust の struct として持つ。Adlaire ではこの**型だけを借用**し、sqld の HTTP サーバーは起動しない。
+Adlaire は hrana-http の型（ステートメント・カラム・行・エラー）を**自前で定義**し、JSON の受け取りから libsql への受け渡し、結果の返却までを独自実装する。
 
-**採用する方式：sqld 型流用 + Adlaire 独自シリアライズ**
+**採用する方式：Adlaire 独自型 + libsql 直接呼び出し**
 
 ```
 POST /v2/pipeline
-  ↓ Adlaire: JSON → sqld の Statement 型にデシリアライズ
-  ↓ sqld: Connection::execute() を呼び出す
-  ↓ sqld: QueryResult 型を返す
-  ↓ Adlaire: QueryResult → hrana-http v2 JSON にシリアライズ
+  ↓ Adlaire: JSON → Adlaire 独自型（hrana/types.rs の Stmt 等）にデシリアライズ
+  ↓ Adlaire: libsql::Connection::execute() / query() / execute_batch() を呼び出す
+  ↓ Adlaire: libsql の行・カラム型を hrana-http v2 JSON にシリアライズ
   ↓ Adlaire: HTTP レスポンスを返す
 ```
 
-sqld の hrana HTTP ハンドラ関数（axum router 等）は使わない。JSON ⇔ sqld 型のシリアライズコードが sqld に存在する場合は `pub use` で再利用することを許容するが、sqld の tokio ランタイムや axum インスタンスには依存しない。
+libsql crate の HTTP サーバーや hrana ハンドラは使用しない（libsql embedded モードにはそれらは存在しない）。
 
-理由：sqld の HTTP サーバーを起動すると認証・管理 API の無効化が困難になり、Adlaire の制御から外れるリスクがある。
-
-#### 3.5.2 libSQL フォーク管理方針
+#### 3.5.2 依存バージョン管理方針
 
 | 項目 | 方針 |
 |------|------|
-| **fork タイミング** | Phase 1 着手直前に `github.com/tursodatabase/libsql` を fork する |
-| **fork リポジトリ名** | `fqwink/libsql`（予定）|
-| **upstream リモート** | `git remote add upstream https://github.com/tursodatabase/libsql` を登録し追従を可能にする |
-| **upstream 追従頻度** | 月 1 回、upstream の `main` をレビューして取り込む。セキュリティパッチは随時 |
-| **独自変更の範囲（Phase 1〜7）** | 最小限。sqld の feature flag 追加のみ。SQL パーサ・WAL・ストレージには触れない |
-| **独自変更の記録** | `ADLAIRE_PATCHES.md` を fork リポジトリに置き、変更の理由と対象コミットを記録する |
-| **upstream との diff 管理** | `git diff upstream/main..HEAD -- sqld/` を CI で常時確認し、意図しない乖離を検出する |
+| **libsql バージョン** | `libsql = "0.6"` を `[workspace.dependencies]` に固定する |
+| **Cargo.lock** | リポジトリにコミットし、依存バージョンをロックする |
+| **バージョン更新** | マイナーアップデートは changelog を確認し、テストが通ることを確認してから更新する |
 
 #### 3.5.3 内製化ロードマップ（Phase 15 以降）
 
-内製化の優先順位は「Adlaire の差別化に直結するか」と「upstream との依存切り離し効果が大きいか」で決める。
+内製化の優先順位は「Adlaire の差別化に直結するか」と「libsql crate への依存切り離し効果が大きいか」で決める。
 
 | 優先 | 対象コンポーネント | 理由 |
 |------|-------------------|----|
-| 1 | HTTP / 認証 / 管理 API | Phase 1〜7 で既に Adlaire 実装済み。sqld 依存なし |
-| 2 | WAL チェックポイント制御 | レプリケーション（Phase 10）に直結。sqld の WAL コードは比較的分離されている |
-| 3 | hrana-http/ws プロトコル変換 | 変換レイヤーを自前化すれば sqld の型依存を完全に排除できる |
+| 1 | HTTP / 認証 / 管理 API | Phase 1〜7 で Adlaire が独自実装済みのため内製化不要 |
+| 2 | WAL チェックポイント制御 | レプリケーション（Phase 10）に直結 |
+| 3 | hrana-http/ws プロトコル変換 | 変換レイヤーは既に Adlaire 独自実装。libsql 型依存を段階的に排除可 |
 | 4 | クエリエグゼキューター | SQLite との境界。libsql-sys（C バインディング）を直接呼ぶ形に移行 |
 | 5 | SQL パーサ | 最もリスクが高い。Phase 15 後半以降に検討 |
 
@@ -467,7 +459,6 @@ jobs:
   lint:     cargo clippy -- -D warnings
   fmt:      cargo fmt --check
   integ:    cargo test --test integration  # adlaire-db を起動して叩く
-  upstream: git diff upstream/main..HEAD -- libsql/sqld/ | wc -l  # diff 行数を記録
 ```
 
 **テストカバレッジ方針：**
@@ -484,8 +475,8 @@ jobs:
 
 ```
 クライアント POST /v2/pipeline INSERT
-  → sqld: WAL フレームをバッファに書く
-  → sqld: fsync（WAL ファイルをディスクに同期）
+  → libsql: WAL フレームをバッファに書く
+  → libsql: fsync（WAL ファイルをディスクに同期）
   → Adlaire: 200 OK を返す
 ```
 
@@ -1232,7 +1223,7 @@ DELETE /admin/v1/databases/{name}/branches/{branch-name}   ブランチ削除
 
 1. `GET /admin/v1/databases/{name}/backup` と同じ Online Backup API でスナップショットを取得
 2. `{data-dir}/databases/{name}___{branch-name}/data.db` へ書き込む
-3. 新 DB を通常の DB として登録し sqld でオープンする
+3. 新 DB を通常の DB として登録し libsql::Builder::new_local() でオープンする
 
 処理フロー（`from: {timestamp}` または `{frame_no}` の場合）：
 
@@ -1488,7 +1479,7 @@ Step 5: メタデータ読み込み（Phase 1〜5 はシングル DB のため�
 Step 6: DB オープン
   【Phase 1〜5 — シングル DB 固定】
   6-1. {data-dir}/databases/default/ が存在しなければ作成（初回起動時）
-  6-2. {data-dir}/databases/default/data.db を sqld::Database::open()
+  6-2. {data-dir}/databases/default/data.db を libsql::Builder::new_local() でオープン（§14.19 参照）
   6-3. WAL モードを設定（PRAGMA journal_mode = WAL）
   6-4. busy timeout を設定（busy_timeout_ms）
   6-5. synchronous を設定（PRAGMA synchronous = NORMAL）
@@ -1498,7 +1489,7 @@ Step 6: DB オープン
 
   【Phase 6 以降 — マルチ DB】
   6-1. {data-dir}/databases/ 以下の各 DB ディレクトリを列挙
-  6-2. 各 DB の data.db を sqld::Database::open()（整合性チェック含む）
+  6-2. 各 DB の data.db を libsql::Builder::new_local() でオープン（整合性チェック含む）
   ※ databases/default/ が存在しない場合も自動作成して後方互換を維持
 
 Step 7: HTTP サーバー起動
@@ -1522,8 +1513,8 @@ Step 2: 新規リクエスト受付を停止
   タイムアウト超過の場合は強制終了する（WARN ログを出力）。
 
 Step 3: DB クローズ
-  各 sqld::Connection を drop する（WAL をフラッシュ）
-  各 sqld::Database を drop する（チェックポイント + ファイルクローズ）
+  Arc<libsql::Database> の最後の参照が drop される（WAL チェックポイント + ファイルクローズ）
+  ※ Connection は execute() 呼び出しのたびに都度生成・即 drop するため、シャットダウン時点では保持していない
 
 Step 4: プロセスロック解放
   {data-dir}/.lock の flock を解放する（プロセス終了で自動解放されるが明示的に行う）
@@ -1563,7 +1554,7 @@ Step 5: 停止完了
 | フェーズ | 内容 | テストケース | 実装タスク |
 |----------|------|------------|----------|
 | **Phase 1** | ビルド基盤・CLI | — | T-1〜T-2 (2件) |
-| **Phase 2** | データディレクトリ・sqld 統合 | — | T-3〜T-4 (2件) |
+| **Phase 2** | データディレクトリ・libsql 統合 | — | T-3〜T-4 (2件) |
 | **Phase 3** | HTTP サーバー・hrana パイプライン | TC-1, TC-2, TC-6 (3件) | T-5〜T-6 (2件) |
 | **Phase 4** | JWT 認証・token コマンド | TC-3 (1件) | T-7〜T-9 (3件) |
 | **Phase 5** | ログ・統合テスト | TC-4, TC-5 (2件) | T-10〜T-11 (2件) |
@@ -2178,10 +2169,10 @@ pub struct DbMetrics {
 
 ### Phase 1：ビルド基盤・CLI
 
-**目標**：Cargo ワークスペースと libSQL サブモジュールを確立し、CLI の骨格を動かす
+**目標**：Cargo ワークスペースを確立し、CLI の骨格を動かす
 
 **スコープ：**
-- Cargo workspace 初期化（adlaire-server crate + libsql submodule）
+- Cargo workspace 初期化（adlaire-server crate + libsql crate）
 - clap による `serve` / `token` サブコマンド骨格
 - config.toml 3-way マージ（CLI > TOML > デフォルト）
 - CI: cargo build / cargo test が通る状態を維持
@@ -2190,9 +2181,9 @@ pub struct DbMetrics {
 
 ```
 T-1: リポジトリ・ビルド基盤
-  [ ] Cargo workspace 初期化（adlaire-server crate + libsql submodule）
-  [ ] libSQL フォークを git submodule として追加
-  [ ] sqld crate が core feature でビルドできることを確認
+  [ ] Cargo workspace 初期化（adlaire-server crate）
+  [ ] libsql = "0.6" を [workspace.dependencies] に追加
+  [ ] cargo build が通ることを確認
   [ ] CI: cargo build / cargo test が通る状態を維持
   参照: §3.3.1
 
@@ -2567,14 +2558,14 @@ fn parse_write_mode(s: &str) -> anyhow::Result<ReplicationWriteMode> {
 ---
 
 
-### Phase 2：データディレクトリ・sqld 統合
+### Phase 2：データディレクトリ・libsql 統合
 
-**目標**：データディレクトリを初期化し、sqld でシングル DB を開ける状態にする
+**目標**：データディレクトリを初期化し、libsql でシングル DB を開ける状態にする
 
 **スコープ：**
 - `--data` パスのディレクトリ作成・パーミッション設定
 - flock による排他プロセスロック
-- sqld::Database::open()・WAL モード設定
+- libsql::Builder::new_local() による DB オープン・WAL モード設定
 
 **実装タスク：**
 
@@ -2586,12 +2577,12 @@ T-3: データディレクトリ初期化
   [ ] ディレクトリパーミッション警告（700 未満で WARN）
   参照: §3.2, §8.1 Step 3〜4, §10.3
 
-T-4: sqld 統合・DB オープン
-  [ ] sqld::Database::open() でシングル DB を開く
+T-4: libsql 統合・DB オープン
+  [ ] libsql::Builder::new_local() でシングル DB を開く
   [ ] PRAGMA journal_mode = WAL を起動時に適用
   [ ] busy_timeout を設定
   [ ] PRAGMA synchronous = NORMAL を設定
-  [ ] サーバーシャットダウン時に drop（WAL flush + close）
+  [ ] サーバーシャットダウン時に Arc<libsql::Database> を drop（WAL flush + close）
   参照: §3.3.2, §13, §8.1 Step 6, §8.2 Step 3
   検証: TC-5（データ永続性）
 ```
@@ -2861,8 +2852,8 @@ T-5: HTTP サーバー骨格（axum）
 T-6: hrana-http v2 パイプライン実装
   [ ] POST /v2/pipeline のリクエスト JSON デシリアライズ
       （baton, requests[].type, requests[].stmt.sql/args/want_rows）
-  [ ] requests を sqld::Connection.execute_batch() に渡す
-  [ ] sqld::QueryResult を hrana-http v2 results[] 形式に変換
+  [ ] requests を libsql::Connection.query() / execute() / execute_batch() に渡す
+  [ ] libsql の行・カラム型を hrana-http v2 results[] 形式に変換
       （cols, rows, rows_affected, last_insert_rowid）
   [ ] SQL エラーを results[i].type="error" として返す（HTTP 200 のまま）
   [ ] "close" type リクエストを正しく処理する
@@ -3668,8 +3659,8 @@ T2-1: パスベース DB ルーター
   参照: §6.1, §3.4
 
 T2-2: マルチ DB マネージャ
-  [ ] 起動時に databases.json を読み込み、全 DB を sqld でオープン
-  [ ] DB 名 → sqld::Database のマップをメモリ上で管理（RwLock<HashMap>）
+  [ ] 起動時に databases.json を読み込み、全 DB を libsql::Builder::new_local() でオープン
+  [ ] DB 名 → Arc<dyn SqldAdapter> のマップをメモリ上で管理（RwLock<HashMap>）
   [ ] 新規 DB 作成時にマップへ追加・databases.json を更新
   [ ] DB 削除時にマップから除去・ファイル削除・databases.json を更新
   参照: §3.4, §8.1 Step 5〜6
@@ -3813,9 +3804,9 @@ TC-2-6: データディレクトリ永続化（マルチ DB）
 ```
 T2-3: 管理 API — DB CRUD
   [ ] GET /admin/v1/databases → databases.json の一覧を返す
-  [ ] POST /admin/v1/databases — DB 名バリデーション・ディレクトリ作成・sqld オープン
+  [ ] POST /admin/v1/databases — DB 名バリデーション・ディレクトリ作成・libsql オープン
   [ ] GET /admin/v1/databases/{name} → 個別情報（name・created_at・size_bytes）
-  [ ] DELETE /admin/v1/databases/{name} — sqld クローズ・ディレクトリ削除
+  [ ] DELETE /admin/v1/databases/{name} — Arc<libsql::Database> drop・ディレクトリ削除
   [ ] size_bytes は data.db のファイルサイズを返す
   参照: §6.4（DB 管理）
 
@@ -3992,17 +3983,17 @@ close_stream(stream_id=1)
 
 複数の stream を同一 WebSocket 接続上で多重化できる（stream_id で識別）。
 
-#### sqld との統合（Phase 8）
+#### libsql との統合（Phase 8）
 
-Phase 1〜7 と同様、sqld の WebSocket サーバーループは起動しない。**Adlaire 独自の hrana-ws プロトコル変換レイヤーを実装する**（§3.3.3 の hrana-http 変換層と同じ設計方針）。
+Phase 1〜7 と同様、**Adlaire 独自の hrana-ws プロトコル変換レイヤーを実装する**（§3.3.3 の hrana-http 変換層と同じ設計方針）。libsql crate には WebSocket サーバー機能はないため、Adlaire が全て実装する。
 
 採用理由：
 
-- sqld の WebSocket ハンドラはセッション管理・認証と密結合しており、ライブラリとして分離が困難
+- hrana-ws プロトコルのセッション管理・認証は Adlaire が既に制御している（hrana-http と同じ構造）
 - Phase 1〜7 で構築した hrana-http 変換レイヤー（§3.3.3）の延長として実装でき、アーキテクチャの一貫性を保てる
 - WebSocket コネクションのライフサイクル（hello / stream_id / baton 管理）を Adlaire が完全制御できる
 
-WebSocket フレームの受受信・送信には `tokio-tungstenite` クレートを使用する。クエリ実行は Phase 1〜7 と同じ `sqld::Connection::execute_batch()` を経由する（§3.3.2）。
+WebSocket フレームの受受信・送信には `tokio-tungstenite` クレートを使用する。クエリ実行は Phase 1〜7 と同じ `libsql::Connection::execute_batch()` を経由する（§3.3.2）。
 
 **完了条件（テストケース）：**
 
@@ -4080,13 +4071,13 @@ use std::collections::HashMap;
 use crate::hrana::convert::hrana_values_to_params;
 
 pub struct WsSession {
-    db:      std::sync::Arc<sqld::Database>,
+    db:      std::sync::Arc<libsql::Database>,
     streams: HashMap<u32, WsStream>,  // stream_id → WsStream
     auth:    Claims,
 }
 
 pub struct WsStream {
-    conn:    sqld::Connection,
+    conn:    libsql::Connection,
     tx_mode: TransactionMode,
 }
 
@@ -4094,7 +4085,7 @@ pub struct WsStream {
 pub enum TransactionMode { None, ReadOnly, ReadWrite }
 
 impl WsSession {
-    pub fn new(db: std::sync::Arc<sqld::Database>, auth: Claims) -> Self {
+    pub fn new(db: std::sync::Arc<libsql::Database>, auth: Claims) -> Self {
         Self { db, streams: HashMap::new(), auth }
     }
 
@@ -4188,7 +4179,7 @@ Turso Cloud と同様に、Adlaire が管理する DB 間に限り `ATTACH DATAB
 
 **実装方針：**
 - hrana-http v2 の `execute` リクエストで ATTACH SQL を受け取った際、Adlaire 側でインターセプトして DB 名を解決する
-- sqld の Connection に対してパス解決済みの ATTACH を発行する
+- libsql の Connection に対してパス解決済みの ATTACH を発行する
 - 対象 DB の接続が未オープンの場合はその場でオープンする
 
 **追加テストケース：**
@@ -4252,7 +4243,7 @@ TC-3-6: メトリクス API
 T3-1: WebSocket サーバー追加（axum の WebSocket upgrade）
 T3-2: hrana-ws v3 hello ハンドシェイク + JWT 認証
 T3-3: ストリーム多重化レイヤー実装（stream_id ごとの接続状態管理）
-T3-4: execute / batch / sequence / describe リクエスト処理（sqld 境界再利用）
+T3-4: execute / batch / sequence / describe リクエスト処理（libsql Connection 経由）
 T3-5: インタラクティブトランザクション状態管理（BEGIN/COMMIT/ROLLBACK）
 ```
 
@@ -4709,7 +4700,7 @@ TC-5-8: 保持期間超過フレームのクリーンアップ
 
 ```
 T5-1: WAL フレームアーカイブ書き込み
-  [ ] sqld チェックポイント前フックで WAL フレームを wal-archive/ へコピー
+  [ ] libsql チェックポイント前フックで WAL フレームを wal-archive/ へコピー
   [ ] フレームごとに CRC32 チェックサムを計算・付与
   [ ] manifest.json へフレームメタデータを追記
   参照: §3.2, §3.6.3, §6.4（PITR）
@@ -4876,7 +4867,7 @@ T5-6: リストア API
   [ ] POST /admin/v1/databases/{name}/restore → アップロードされた SQLite ファイルを適用
   [ ] PRAGMA integrity_check でファイル整合性検証
   [ ] 検証失敗時: 元 DB を復元し 409 RESTORE_INTEGRITY_FAILED を返す
-  [ ] 成功時: sqld をリロードしてサービス再開
+  [ ] 成功時: libsql::Builder::new_local() で DB を再オープンしてサービス再開
   参照: §6.4, §7.3
   検証: TC-5-2, TC-5-3
 
@@ -4975,7 +4966,7 @@ T6-3: `from: "current"` ブランチ作成
   [ ] {data-dir}/databases/{name}___{branch}/ ディレクトリ作成
   [ ] スナップショットを data.db として配置
   [ ] branches.json へメタデータを追加
-  [ ] 新 DB を sqld でオープン・マルチ DB マネージャへ登録
+  [ ] 新 DB を libsql::Builder::new_local() でオープン・マルチ DB マネージャへ登録
   参照: §6.4（ブランチ）
   検証: TC-6-1, TC-6-2
 
@@ -4990,12 +4981,12 @@ T6-4: `from: {timestamp}/{frame_no}` ブランチ作成
 T6-5: ブランチ一覧・削除 API
   [ ] GET /admin/v1/databases/{name}/branches → branches.json からフィルタして返す
   [ ] DELETE /admin/v1/databases/{name}/branches/{branch-name}
-        → sqld クローズ・ディレクトリ削除・branches.json 更新
+        → Arc<libsql::Database> drop・ディレクトリ削除・branches.json 更新
   参照: §6.4（ブランチ）
   検証: TC-6-4, TC-6-5
 
 T6-6: 起動時ブランチ自動復元ロジック
-  [ ] branches.json を読み込み、各 db_name の DB ディレクトリが存在すれば sqld でオープン
+  [ ] branches.json を読み込み、各 db_name の DB ディレクトリが存在すれば libsql::Builder::new_local() でオープン
   [ ] ディレクトリが存在しないエントリは WARN ログを出力してスキップ
   参照: §8.1 Step 5-3
   検証: TC-6-7
@@ -5217,8 +5208,8 @@ HTTP ステータス：503
 |------|------|
 | Turso Cloud | libSQL のマネージドホスティングサービス。Adlaire DB の hrana プロトコル互換の参照実装 |
 | libSQL | SQLite フォーク。HTTP API・WAL レプリケーション等を追加した OSS DB ライブラリ |
-| sqld | libSQL のサーバーコンポーネント。HTTP API・WebSocket API を提供する |
-| libSQL フォーク | Adlaire DB 専用に改変した libSQL（sqld 含む）。本プロジェクトの全体基盤 |
+| sqld | libSQL プロジェクトのサーバーコンポーネント（参考情報）。Adlaire DB は sqld を使用せず、libsql crate（embedded モード）を使用する |
+| libsql crate | Rust の libSQL クライアントライブラリ（crates.io）。embedded SQLite モードで使用する |
 | hrana | Turso / libSQL のワイヤプロトコル名。hrana-http（HTTP版）と hrana-ws（WebSocket版）がある |
 | baton | hrana プロトコルにおけるセッション継続識別子 |
 
