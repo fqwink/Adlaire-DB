@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.67
+**バージョン：** 0.68
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -2084,6 +2084,45 @@ PR は「変更なし」として分類を省略してはならない。仕様�
 | Phase 19 | adapter shadow/active/rollback、Phase 1〜18 regression、SDK 互換、WAL consistency、performance baseline |
 
 証跡は repository 内の test fixture、snapshot、CI log、または PR description の実行結果として追跡可能でなければならない。ローカルで確認しただけの説明は証跡として扱わない。
+
+#### 9.1.7 契約トレーサビリティ固定契約
+
+実装 PR は、変更した仕様契約、対応するテスト、保存された証跡を 1 対 1 以上で追跡できなければならない。追跡不能な契約は未検証として扱い、Phase 完了不可とする。
+
+| 契約種別 | ID 形式 | 例 | 必須対応 |
+|----------|---------|----|----------|
+| API 契約 | `API-P{phase}-{kebab-name}` | `API-P8-turso-database-create` | endpoint test、snapshot、error test |
+| 永続化契約 | `PERSIST-P{phase}-{kebab-name}` | `PERSIST-P14-restore-rollback` | atomic write test、restart/rollback fixture |
+| エラー契約 | `ERR-{code}` | `ERR-QUOTA_EXCEEDED` | 発火 test、HTTP status/body snapshot |
+| 設定契約 | `CFG-P{phase}-{kebab-name}` | `CFG-P11-replication-write-mode` | valid/invalid/default/priority test |
+| セキュリティ境界 | `SEC-{boundary}` | `SEC-admin-api` | auth denial、secret redaction、scope denial |
+| 互換契約 | `COMPAT-P{phase}-{kebab-name}` | `COMPAT-P8-turso-wrapper` | SDK regression または Turso snapshot |
+| 横断ゼロバグ | `ZB-{number}` | `ZB-4` | 該当 Phase の横断 test |
+
+契約 ID は PR description、test 名、snapshot/fixture path のいずれかに含める。完全一致が難しい場合は PR description の traceability table で対応を明示する。
+
+**PR 完了時の追跡表フォーマット：**
+
+| Contract ID | 実装対象 | Test ID / command | Evidence path | Regression | N/A 理由 |
+|-------------|----------|-------------------|---------------|------------|----------|
+| `API-Px-name` | endpoint / config / metadata / auth | `TC-*` / `ZB-*` / command | snapshot / fixture / log | Phase 1〜x | 該当なしの場合だけ理由を書く |
+
+追跡表の各行は、少なくとも `Contract ID`、`Test ID / command`、`Evidence path` を持つ。`N/A` は、その契約種別が変更対象外である場合だけ許可する。失敗した test、未生成 artifact、手元確認だけの項目を `N/A` にしてはならない。
+
+**テスト種別の最低要件：**
+
+| 契約種別 | 単体テストのみ | snapshot のみ | 手動確認のみ | 必須最低ライン |
+|----------|----------------|---------------|--------------|----------------|
+| API 契約 | 不可 | 不可 | 不可 | integration test + response snapshot |
+| 永続化契約 | 不可 | 不可 | 不可 | failure injection または fixture + restart test |
+| エラー契約 | 不可 | 可。ただし発火 test とセット | 不可 | 発火 test + status/body assertion |
+| 設定契約 | 不可 | 不可 | 不可 | valid/invalid/default/priority test |
+| セキュリティ境界 | 不可 | 不可 | 不可 | auth/scope denial + redaction test |
+| Turso 互換 | 不可 | 可。ただし strict compare 必須 | 不可 | Turso snapshot + regression |
+| 破壊的操作 | 不可 | 不可 | 不可 | rollback/restart/concurrency test |
+| 内部 adapter | 不可 | 不可 | 不可 | shadow/rollback/regression/performance artifact |
+
+手動確認は、自動化できない外部環境依存の補助証跡としてのみ許可する。認証、永続化、破壊的操作、Turso 互換、secret redaction、rollback、concurrency は手動確認だけで完了扱いにしてはならない。
 
 ### 9.2 Phase 別完了ゲート
 
