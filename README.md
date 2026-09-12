@@ -16,14 +16,15 @@ Rust + libsql（embedded SQLite）で実装する。外部 Web フレームワ�
 | Phase 5 | ログ・統合テスト | ✅ 完了 |
 | Phase 6 | マルチ DB ルーター | ✅ 完了 |
 | Phase 7 | 管理 API・トークン CRUD・DB スコープ JWT | ✅ 完了 |
-| Phase 8 | WebSocket（hrana-ws v3） | 🔲 未実装 |
-| Phase 9 | ATTACH DB・メトリクス | 🔲 未実装 |
-| Phase 10 | レプリケーション基盤（WAL ストリーム・スナップショット） | 🔲 未実装 |
-| Phase 11 | レプリカ同期・書き込みリダイレクト | 🔲 未実装 |
-| Phase 12 | WAL アーカイブ・manifest 管理 | 🔲 未実装 |
-| Phase 13 | バックアップ・リストア・PITR | 🔲 未実装 |
-| Phase 14 | ブランチ | 🔲 未実装 |
-| Phase 15 | SQLite 拡張・内製化・HA | 🔲 未実装 |
+| Phase 8 | Turso Cloud 互換管理モデル | 🔲 未実装 |
+| Phase 9 | WebSocket（hrana-ws v3） | 🔲 未実装 |
+| Phase 10 | ATTACH DB・メトリクス | 🔲 未実装 |
+| Phase 11 | レプリケーション基盤（WAL ストリーム・スナップショット） | 🔲 未実装 |
+| Phase 12 | レプリカ同期・書き込みリダイレクト | 🔲 未実装 |
+| Phase 13 | WAL アーカイブ・manifest 管理 | 🔲 未実装 |
+| Phase 14 | バックアップ・リストア・PITR | 🔲 未実装 |
+| Phase 15 | ブランチ | 🔲 未実装 |
+| Phase 16 | SQLite 拡張・内製化・HA | 🔲 未実装 |
 
 ## 起動方法
 
@@ -111,9 +112,10 @@ Phase 7 時点では、以下の管理 API が利用できる。
 
 ## 制約（Phase 7 時点）
 
-- WebSocket（hrana-ws v3）は未対応（`GET /v3/baton` は Phase 8 で実装、現在 501 を返す）
-- ATTACH DB・メトリクスは Phase 9 以降
-- レプリケーション、バックアップ、ブランチ、HA は Phase 10 以降
+- Turso Cloud 互換管理モデル（location / organization / group / quota）は Phase 8 以降
+- WebSocket（hrana-ws v3）は未対応（`GET /v3/baton` は Phase 9 で実装、現在 501 を返す）
+- ATTACH DB・メトリクスは Phase 10 以降
+- レプリケーション、バックアップ、ブランチ、HA は Phase 11 以降
 
 ## 仕様書
 
