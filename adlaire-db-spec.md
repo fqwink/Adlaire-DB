@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.65
+**バージョン：** 0.66
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -1988,6 +1988,71 @@ resource の状態を持つ Phase 9 以降の機能は、以下の状態名を�
 | Regression evidence | 当該 Phase より前の TC が通ったこと |
 
 証跡は「何を実装したか」ではなく「仕様のどの契約を満たしたか」で記述する。仕様書にない判断を PR description で補って完了扱いにしてはならない。
+
+#### 9.1.4 Phase 完了不可条件
+
+以下に該当する PR は、該当機能が動作して見える場合でも Phase 完了として扱わない。修正は同一 PR 内で完了させ、後続の「バグ修正」へ分離してはならない。
+
+| 完了不可条件 | 判定 |
+|--------------|------|
+| 対象 Phase の endpoint、metadata、config、error、permission、test artifact のいずれかが仕様未定義 | 実装 PR ではなく仕様修正 PR とする |
+| success response は返るが異常系、権限系、quota/scope 系、破損系、再起動系のいずれかが未検証 | Phase 未完了 |
+| TODO/FIXME/stub/unimplemented/panic/unwrap により production path が残る | Phase 未完了 |
+| `INTERNAL_ERROR`、`INVALID_REQUEST`、`PERMISSION_DENIED` を仕様未定義エラーの代用にしている | Phase 未完了 |
+| 仕様上の `対象外` 機能に成功応答を返している | Phase 未完了 |
+| metadata migration が旧形式、新形式、破損形式、rollback 形式のいずれかを検証していない | Phase 未完了 |
+| destructive operation に rollback、restart recovery、concurrency test がない | Phase 未完了 |
+| Turso Cloud 互換対象 endpoint の snapshot がない、または snapshot 差分理由が仕様本文にない | Phase 未完了 |
+| TypeScript SDK / WebSocket / replication / backup / HA / internal adapter の該当 regression が未実行 | Phase 未完了 |
+| log redaction の確認なしに token、JWT、SQL args、backup body、extension path を扱う | Phase 未完了 |
+| flaky test、手動確認、目視確認、想定結果だけを完了根拠にしている | Phase 未完了 |
+
+「軽微」「一時的」「後で直す」「既知課題」「仕様上問題ないはず」という記述は完了根拠として無効である。Phase 完了は、仕様本文、実装、テスト、証跡が揃った場合だけ認める。
+
+#### 9.1.5 実装差分リスク分類
+
+実装 PR は、変更内容を下表のリスク分類に必ず割り当てる。複数に該当する場合はすべての必須証跡を満たす。分類できない変更は仕様未定義として扱い、先に本表へ分類を追加する。
+
+| リスク分類 | 該当例 | 必須証跡 |
+|------------|--------|----------|
+| API contract | endpoint 追加、status/body/header/error 変更、query/path/body validation 変更 | endpoint snapshot、正常系/異常系/unknown/null/duplicate query test |
+| Auth/permission | JWT claim、admin/platform token、DB scope、org/group scope、quota gate、ro/rw 判定 | auth matrix、scope denial、secret redaction、対象外 resource rejection |
+| Metadata/migration | metadata field 追加、schema 変更、legacy migration、unique constraint 変更 | old/new/corrupt metadata fixture、migration log、rollback/restart recovery |
+| Persistence/rollback | DB 作成削除、restore、branch、WAL archive、extension binary、HA state 更新 | atomic write failure injection、fsync/rename evidence、rollback evidence、concurrency test |
+| Compatibility | Turso Platform API、hrana schema、SDK 挙動、legacy DB 名、response wrapper 変更 | Turso snapshot、TypeScript SDK regression、legacy fixture、差分理由 |
+| Replication/HA | WAL frame、snapshot、redirect、leader election、promotion/demotion、term 更新 | frame/checksum transcript、lag/health snapshot、split-brain rejection、restart recovery |
+| Observability | log field、metric、Prometheus output、request id、audit 相当 record | log redaction sample、metric snapshot、secret 非含有確認 |
+| Internal adapter | WAL/storage/executor adapter、shadow/active/rollback flag、performance baseline | Phase 1〜18 regression、adapter diff snapshot、rollback flag test、baseline comparison |
+
+PR は「変更なし」として分類を省略してはならない。仕様書のみの PR であっても、影響する分類と後続実装で必要になる証跡を明記する。
+
+#### 9.1.6 Phase 別証跡チェックリスト
+
+各 Phase 実装 PR は、§9.1.3 の共通証跡に加えて下表の証跡を残す。該当 Phase の証跡が欠ける場合は Phase 未完了とする。
+
+| Phase | 必須証跡 |
+|-------|----------|
+| Phase 1 | CLI help snapshot、invalid flag stderr、workspace build result |
+| Phase 2 | data-dir 初期化 tree、二重起動拒否、integrity_check 成功/失敗、metadata 破損起動失敗 |
+| Phase 3 | `/v2/health` snapshot、pipeline success/error snapshot、malformed JSON、hrana error body、Web framework 不使用確認 |
+| Phase 4 | JWT valid/expired/revoked/bad signature、ro write denial、token secret redaction、tokens.json atomic update |
+| Phase 5 | JSON Lines log snapshot、Authorization/SQL args 非出力、TypeScript SDK CRUD、restart persistence |
+| Phase 6 | default fallback、`/{db}/v2/pipeline`、DB 名 validation、複数 DB 分離、databases.json recovery |
+| Phase 7 | admin auth matrix、DB CRUD、token CRUD、DB scope ro/rw、revoke 即時反映、concurrent create/delete |
+| Phase 8 | Turso Platform snapshot、organization/group/location/quota migration、legacy metadata fixture、quota exceeded denial、scope denial |
+| Phase 9 | WebSocket hello/subprotocol transcript、stream transaction、store_sql/close_sql、close rollback、multi stream |
+| Phase 10 | ATTACH allow/deny、任意 path 拒否、metrics counter/gauge snapshot、HTTP/WS/pipeline 更新点 |
+| Phase 11 | replication log/snapshot/heartbeat/status snapshot、frame_no 単調増加、CRC32、replication token denial |
+| Phase 12 | replica catch-up、307 redirect、primary down behavior、lag health、checksum mismatch recovery |
+| Phase 13 | manifest/frame 双方向整合、retention cleanup、orphan/missing/corrupt frame、restart recovery |
+| Phase 14 | backup artifact、restore rollback、PITR 範囲外、CRC 破壊、restore lock、元 DB 保持 |
+| Phase 15 | branch create/list/delete、timestamp/frame branch、独立書き込み、source delete denial、restart recovery |
+| Phase 16 | extension manifest、sha256/署名検証、allowlist、任意 path 拒否、load/unload/restart |
+| Phase 17 | metrics snapshot 永続化、Prometheus text snapshot、quota usage 整合、破損 snapshot recovery、secret 非含有 |
+| Phase 18 | leader election、promotion/demotion、network partition、split-brain rejection、term 単調増加、redirect/health |
+| Phase 19 | adapter shadow/active/rollback、Phase 1〜18 regression、SDK 互換、WAL consistency、performance baseline |
+
+証跡は repository 内の test fixture、snapshot、CI log、または PR description の実行結果として追跡可能でなければならない。ローカルで確認しただけの説明は証跡として扱わない。
 
 ### 9.2 Phase 別完了ゲート
 
