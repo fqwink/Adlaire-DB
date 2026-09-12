@@ -33,3 +33,33 @@ pub fn validate_db_name(name: &str) -> Result<(), AppError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::validate_db_name;
+    use crate::error::AppError;
+
+    #[test]
+    fn accepts_valid_db_names() {
+        for name in ["default", "tenant_1", "tenant-2", "A123"] {
+            assert!(validate_db_name(name).is_ok(), "{name}");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_db_names() {
+        for name in ["", "a b", "../evil", "evil/path", "日本語"] {
+            assert!(matches!(validate_db_name(name), Err(AppError::InvalidDbName)), "{name}");
+        }
+
+        let long_name = "a".repeat(128);
+        assert!(matches!(validate_db_name(&long_name), Err(AppError::InvalidDbName)));
+    }
+
+    #[test]
+    fn rejects_reserved_db_names() {
+        for name in ["meta", "admin", "main___feature"] {
+            assert!(matches!(validate_db_name(name), Err(AppError::DbReservedName)), "{name}");
+        }
+    }
+}
