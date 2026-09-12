@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.53  
+**バージョン：** 0.54  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-12  
 
@@ -4498,6 +4498,8 @@ GET /admin/v1/metrics
 ```json
 {
   "uptime_seconds": 3600,
+  "tokens_total": 5,
+  "tokens_revoked": 1,
   "databases": [
     {
       "name": "mydb",
@@ -4508,9 +4510,7 @@ GET /admin/v1/metrics
       "rows_read_total": 8000,
       "rows_written_total": 200
     }
-  ],
-  "tokens_total": 5,
-  "tokens_revoked": 1
+  ]
 }
 ```
 
@@ -4624,9 +4624,9 @@ pub async fn get_metrics(
     }).collect();
     Ok(json_ok(&serde_json::json!({
         "uptime_seconds":  uptime,
-        "databases":       databases,
         "tokens_total":    state.metrics.tokens_total.load(Relaxed),
         "tokens_revoked":  state.metrics.tokens_revoked.load(Relaxed),
+        "databases":       databases,
     })))
 }
 ```
@@ -5453,7 +5453,7 @@ DB 名・ファイルパス生成時に以下を必ず適用する：
 ### 12.3 出力先
 
 - デフォルト：stdout（コンテナ・systemd との親和性）
-- `--log-file <PATH>` 指定時：ファイルへ書き出し（ローテーションは外部ツール任せ）
+- `--log-file <PATH>` 指定時：ファイルへ書き出し（ローテーションは外部ツール任せ）（未実装）
 - stdout とファイルの同時出力は非サポート（Phase 1 時点）
 
 ### 12.4 起動・停止ログ例
