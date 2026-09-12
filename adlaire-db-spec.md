@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.57
+**バージョン：** 0.58
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -1146,6 +1146,8 @@ Phase 8 では、Adlaire 独自の `/admin/v1/*` に加えて Turso Cloud Platfo
 | DB 作成成功 | 201 `DbInfo` | 200 `{"database": TursoDatabaseInfo}` |
 | Group 作成成功 | 201 `GroupInfo` | 200 `{"group": TursoGroupInfo}` |
 | Location 一覧 | 200 `{"locations":[LocationInfo]}` | 200 `{"locations": {"<code>":"<display_name>"}}` |
+| Organization 一覧 | 200 `{"organizations":[OrganizationInfo]}` | 200 `[TursoOrganizationInfo]` |
+| Organization usage | 200 `{"usage":[UsageInfo]}` | 200 `{"organization": TursoOrganizationUsage}` |
 | DB token 作成 | `/admin/v1/tokens` | `/v1/organizations/{organizationSlug}/databases/{databaseName}/auth/tokens` |
 | unknown field | `INVALID_REQUEST` | Turso 互換 endpoint でも `INVALID_REQUEST`。互換のため黙って無視しない |
 | error body | Adlaire error body | Adlaire error body。HTTP status は Turso 互換を優先し、`code` は §7.3 を使う |
@@ -1161,11 +1163,19 @@ Phase 8 では、Adlaire 独自の `/admin/v1/*` に加えて Turso Cloud Platfo
 | database `primaryRegion` | group の `primary` |
 | database `block_reads` | `false` |
 | database `block_writes` | quota 超過または DB disabled 時のみ `true`。Phase 8 では quota 超過時のみ `true` |
-| group `version` | `adlaire-{spec version}`。例: `adlaire-0.57` |
+| group `version` | `adlaire-{spec version}`。例: `adlaire-0.58` |
 | group `uuid` | Adlaire group id |
 | group `locations` | group location の配列。Phase 8 では 1 要素 |
 | group `primary` | group の primary location |
 | group `delete_protection` | `false` |
+| organization `type` | `personal`。自己ホスト単一運営者を Turso personal organization として扱う |
+| organization `overages` | `false` |
+| organization `require_mfa` | `false` |
+| organization `blocked_reads` | `false` |
+| organization `blocked_writes` | quota 超過時のみ `true` |
+| organization `plan_id` | `self-hosted` |
+| organization `plan_timeline` | `none` |
+| organization `platform` | `adlaire` |
 
 #### DB 管理（Phase 7）
 
@@ -1450,6 +1460,7 @@ GET /admin/v1/metrics     全 DB のメトリクス取得
 | 200 OK | 正常処理（SQL エラーも 200 で results に含める）|
 | 400 Bad Request | リクエスト JSON の形式エラー |
 | 401 Unauthorized | JWT なし・JWT 検証失敗 |
+| 402 Payment Required | Turso Platform API 互換面で plan/quota 相当の制限により操作できない |
 | 403 Forbidden | 権限不足（ro トークンで書き込み等）|
 | 404 Not Found | 存在しない DB・エンドポイント |
 | 409 Conflict | 既存 resource との競合・integrity/HA 状態不整合 |
@@ -1483,7 +1494,7 @@ GET /admin/v1/metrics     全 DB のメトリクス取得
 | `ORG_ALREADY_EXISTS` | 409 | 同名 organization または slug が既に存在する |
 | `GROUP_ALREADY_EXISTS` | 409 | 同一 organization 内に同名 group または slug が既に存在する |
 | `LOCATION_ALREADY_EXISTS` | 409 | 同名 location が既に存在する |
-| `QUOTA_EXCEEDED` | 403 | quota 上限を超える操作 |
+| `QUOTA_EXCEEDED` | 403 / 402※ | quota 上限を超える操作 |
 | `USAGE_UNAVAILABLE` | 503 | usage 計測値を取得できない |
 | `ORG_SCOPE_DENIED` | 403 | organization/group scope 外の操作 |
 | `DB_ALREADY_EXISTS` | 409 | 同名 DB が既に存在する |
@@ -1510,6 +1521,8 @@ GET /admin/v1/metrics     全 DB のメトリクス取得
 | `INTERNAL_ERROR` | 500 | サーバー内部エラー |
 
 ※ `SQLITE_ERROR` / `SQLITE_CONSTRAINT` は `POST /v2/pipeline` の HTTP レスポンスが 200 OK でも、`results[].type = "error"` として返す（hrana プロトコルの仕様）。HTTP 400 を返すのは `INVALID_REQUEST`（JSON 不正等）のみ。
+
+※ `QUOTA_EXCEEDED` は `/admin/v1/*` と hrana write では 403、Turso Platform API 互換の `/v1/*` では Turso error status 互換を優先して 402 を返す。`code` はどちらも `QUOTA_EXCEEDED` とする。
 
 ### 7.4 エラーレスポンステストケース
 
@@ -1742,7 +1755,7 @@ Step 5: 停止完了
 | **Phase 5** | ログ・統合テスト | TC-4, TC-5 (2件) | T-10〜T-11 (2件) |
 | **Phase 6** | マルチ DB ルーター・DB マネージャ | — | T2-1〜T2-2 (2件) |
 | **Phase 7** | 管理 API・トークン CRUD・DB スコープ JWT | TC-2-1〜TC-2-6（TC-2-5b 含む）(7件) | T2-3〜T2-6 (4件) |
-| **Phase 8** | Turso Cloud 互換管理モデル | TC-8-1〜TC-8-9 (9件) | T8-1〜T8-9 (9件) |
+| **Phase 8** | Turso Cloud 互換管理モデル | TC-8-1〜TC-8-12 (12件) | T8-1〜T8-12 (12件) |
 | **Phase 9** | WebSocket（hrana-ws v3） | TC-3-1〜TC-3-4 (4件) | T3-1〜T3-5 (5件) |
 | **Phase 10** | ATTACH DB・メトリクス | TC-3-5, TC-3-6 (2件) | T3-6〜T3-8 (3件) |
 | **Phase 11** | レプリケーション基盤（WAL ストリーム・スナップショット） | — | T4-1〜T4-3 (3件) |
@@ -1916,7 +1929,7 @@ API を実装する場合は、各 endpoint について必ず次を仕様本文
 |-------|----------|----------|--------|-------------|------------|
 | Phase 6 | `db/manager.rs`, `db/meta.rs`, `http/mod.rs`, `http/pipeline.rs` | `POST /{db-name}/v2/pipeline` を追加する。`/v2/pipeline` は `default` のまま。管理 API はまだ完了対象外 | `meta/databases.json` に DB 追加/削除を atomic update。各 DB は `databases/{name}/data.db` | invalid DB name は `INVALID_DB_NAME`、予約名は `DB_RESERVED_NAME`、未存在は `DB_NOT_FOUND` | DB 名 validation、複数 DB 分離、default fallback、再起動後 DB 復元 |
 | Phase 7 | `http/admin/*`, `auth/*`, `token/*`, `db/manager.rs` | `/admin/v1/databases`, `/admin/v1/tokens` を §6.4 通り実装する。Admin token は Bearer 完全一致。DB scope JWT を有効化 | `databases.json` と `tokens.json` を API 経由で更新する。削除はファイル/ディレクトリと metadata を整合させる | 管理 API 認証失敗は `401 AUTH_REQUIRED`。重複 DB は `409 DB_ALREADY_EXISTS`。revoke は即時反映 | TC-2-1〜TC-2-6。admin auth、DB CRUD、token CRUD、DB scope ro/rw |
-| Phase 8 | `http/admin/*`, `db/meta.rs`, `auth/*`, `quota/*`, `location/*`, `org/*` | §9.5 と Phase 8 詳細節に定義した organization/group/location/quota/usage API と、既存 DB/token admin API の scope 拡張を実装する | `organizations.json`、`groups.json`、`locations.json`、`quotas.json`、`usage.json` を §9.6 通り更新し、既存 `databases.json` / `tokens.json` の migration と後方互換を保証する | `ORG_NOT_FOUND`、`GROUP_NOT_FOUND`、`LOCATION_NOT_FOUND`、`QUOTA_EXCEEDED`、`USAGE_UNAVAILABLE`、`ORG_SCOPE_DENIED` を §7.3 通り返す。secret と課金相当情報はログ出力禁止 | Phase 8 API/metadata/auth/quota/migration tests。Phase 1〜7 regression と SDK 互換を必須 |
+| Phase 8 | `http/admin/*`, `http/platform/*`, `db/meta.rs`, `auth/*`, `quota/*`, `location/*`, `org/*` | §9.5 と Phase 8 詳細節に定義した organization/group/location/quota/usage API、`/v1/*` Turso Platform API 互換、既存 DB/token admin API の scope 拡張を実装する | `organizations.json`、`groups.json`、`locations.json`、`quotas.json`、`usage.json` を §9.6 通り更新し、既存 `databases.json` / `tokens.json` の migration と後方互換を保証する | `ORG_NOT_FOUND`、`GROUP_NOT_FOUND`、`LOCATION_NOT_FOUND`、`QUOTA_EXCEEDED`、`USAGE_UNAVAILABLE`、`ORG_SCOPE_DENIED`、`NOT_IMPLEMENTED` を §7.3 通り返す。secret と課金相当情報はログ出力禁止 | Phase 8 API/metadata/auth/quota/migration/Turso snapshot tests。Phase 1〜7 regression と SDK 互換を必須 |
 | Phase 9 | `ws/*`, `hrana/*`, `db/sqld_adapter.rs`, `http/mod.rs` | `GET /v3/baton` と `GET /{db-name}/v3/baton` で WebSocket upgrade。hrana-ws v3 messages を実装 | SQL 実行による DB 永続化のみ。WebSocket session state はプロセス内メモリでよく、再起動復元しない | hello 前 request は protocol error。stream 未存在は hrana error。接続 close 時に未完了 transaction は rollback | TC-3-1〜TC-3-4。interactive transaction、store_sql/close_sql、auth failure、multi stream |
 | Phase 10 | `attach/*`, `metrics.rs`, `http/admin/metrics`, `db/sqld_adapter.rs` | 管理下 DB の ATTACH のみ許可。`GET /admin/v1/metrics` を実装する | 新規ファイルなし。metrics はプロセス内 counters/gauges でよく再起動リセット | 任意パス ATTACH は `PERMISSION_DENIED` または `INVALID_REQUEST`。metrics 取得は admin auth 対象 | TC-3-5, TC-3-6。ATTACH 成功/拒否、metrics counters 更新 |
 
@@ -2013,11 +2026,21 @@ API を実装する場合は、各 endpoint について必ず次を仕様本文
 | `PUT /admin/v1/quotas/{scope}` | 8 | Admin token | `{storage_bytes, rows?, write_ops_per_minute?}` | 200 `QuotaInfo` | 400 `INVALID_REQUEST`, 404 `ORG_NOT_FOUND`/`GROUP_NOT_FOUND`/`DB_NOT_FOUND` | `quotas.json` | Yes |
 | `GET /admin/v1/usage` | 8 | Admin token | query `organization?`, `group?`, `database?` | 200 `{usage:[...]}` | 404 `ORG_NOT_FOUND`/`GROUP_NOT_FOUND`/`DB_NOT_FOUND`, 503 `USAGE_UNAVAILABLE` | `usage.json` snapshot | Yes |
 | `GET /v1/locations` | 8 | Platform token | body なし | 200 `{"locations":{code:name}}` | 401 `AUTH_REQUIRED` | なし | Yes |
+| `GET /v1/organizations` | 8 | Platform token | body なし | 200 `[TursoOrganizationInfo]` | 401 `AUTH_REQUIRED` | なし | Yes |
+| `PATCH /v1/organizations/{organizationSlug}` | 8 | Platform token | `{overages?, require_mfa?}` | 200 `{"organization":TursoOrganizationInfo}` | 400 `INVALID_REQUEST`, 404 `ORG_NOT_FOUND` | `organizations.json` | Yes |
+| `GET /v1/organizations/{organizationSlug}/usage` | 8 | Platform token | body なし | 200 `{"organization":TursoOrganizationUsage}` | 404 `ORG_NOT_FOUND`, 503 `USAGE_UNAVAILABLE` | なし | Yes |
 | `GET /v1/organizations/{organizationSlug}/groups` | 8 | Platform token | body なし | 200 `{"groups":[TursoGroupInfo]}` | 404 `ORG_NOT_FOUND` | なし | Yes |
 | `POST /v1/organizations/{organizationSlug}/groups` | 8 | Platform token | `{name, location}` | 200 `{"group":TursoGroupInfo}` | 400 `INVALID_REQUEST`, 404 `ORG_NOT_FOUND`/`LOCATION_NOT_FOUND`, 409 `GROUP_ALREADY_EXISTS` | `groups.json` | No |
+| `GET /v1/organizations/{organizationSlug}/groups/{groupName}` | 8 | Platform token | body なし | 200 `{"group":TursoGroupInfo}` | 404 `GROUP_NOT_FOUND` | なし | Yes |
 | `GET /v1/organizations/{organizationSlug}/databases` | 8 | Platform token | query `group?`, `schema?`, `parent?` | 200 `{"databases":[TursoDatabaseInfo]}` | 404 `ORG_NOT_FOUND` | なし | Yes |
 | `POST /v1/organizations/{organizationSlug}/databases` | 8 | Platform token | `{name, group, size_limit?}` | 200 `{"database":TursoDatabaseInfo}` | 400 `INVALID_DB_NAME`/`INVALID_REQUEST`, 404 `GROUP_NOT_FOUND`, 409 `DB_ALREADY_EXISTS` | `databases.json`, DB directory | No |
+| `GET /v1/organizations/{organizationSlug}/databases/{databaseName}` | 8 | Platform token | body なし | 200 `{"database":TursoDatabaseInfo}` | 404 `DB_NOT_FOUND` | なし | Yes |
 | `POST /v1/organizations/{organizationSlug}/databases/{databaseName}/auth/tokens` | 8 | Platform token | query `expiration?`, `authorization?`; body `{permissions?}` | 200 `{"jwt":string}` | 400 `INVALID_REQUEST`, 404 `DB_NOT_FOUND` | `tokens.json` | No |
+| `/v1/organizations/{organizationSlug}/members*` | 8 | Platform token | any | 501 `NOT_IMPLEMENTED` | 501 `NOT_IMPLEMENTED` | なし | Yes |
+| `/v1/organizations/{organizationSlug}/invites*` | 8 | Platform token | any | 501 `NOT_IMPLEMENTED` | 501 `NOT_IMPLEMENTED` | なし | Yes |
+| `/v1/organizations/{organizationSlug}/plans` | 8 | Platform token | body なし | 501 `NOT_IMPLEMENTED` | 501 `NOT_IMPLEMENTED` | なし | Yes |
+| `/v1/organizations/{organizationSlug}/databases/{databaseName}/stats` | 8 | Platform token | body なし | 501 `NOT_IMPLEMENTED` | 501 `NOT_IMPLEMENTED` | なし | Yes |
+| `/v1/upload` | 8 | Database token | binary | 501 `NOT_IMPLEMENTED` | 501 `NOT_IMPLEMENTED` | なし | Yes |
 | `GET /admin/v1/metrics` | 10 | Admin token | body なし | 200 metrics JSON | 401 `AUTH_REQUIRED` | なし | Yes |
 | `GET /replication/v1/log?from_frame=N` | 11 | replication token | query `from_frame` | 200 SSE frames | 400 `INVALID_REQUEST`, 401 `AUTH_INVALID`, 404 `FRAME_NOT_FOUND` | なし | 接続単位 |
 | `GET /replication/v1/snapshot` | 11 | replication token | query/body なし | 200 octet-stream + replication headers | auth 系, 500 | なし | Yes |
@@ -2088,7 +2111,7 @@ API を実装する場合は、各 endpoint について必ず次を仕様本文
 | `ORG_ALREADY_EXISTS` | 8+ | organization create | No | 別の organization name/slug を使う |
 | `GROUP_ALREADY_EXISTS` | 8+ | group create | No | 同一 organization 内で別の group name/slug を使う |
 | `LOCATION_ALREADY_EXISTS` | 8+ | location create | No | 別の location name を使う |
-| `QUOTA_EXCEEDED` | 8+ | write/import/restore/replication apply/branch create | No | quota を増やすか使用量を削減 |
+| `QUOTA_EXCEEDED` | 8+ | write/import/restore/replication apply/branch create。`/v1/*` では HTTP 402、それ以外は HTTP 403 | No | quota を増やすか使用量を削減 |
 | `USAGE_UNAVAILABLE` | 8+ | usage API, quota 判定不能時 | Yes | usage 再計測またはサーバーログ確認 |
 | `ORG_SCOPE_DENIED` | 8+ | organization/group scope 外の admin/JWT 操作 | No | token scope または対象 scope を修正 |
 | `DB_ALREADY_EXISTS` | 7+ | DB create | No | 別名を使う |
@@ -2242,6 +2265,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | public HTTP | method/path/header/body | size limit、JSON validation、auth、timeout | panic、secret log、silent fallback |
 | hrana SQL | SQL text、args、named_args | parameter conversion、write permission、ATTACH interception | SQL split、任意 path open |
 | admin API | path name、JSON body、admin token | Bearer 完全一致、DB name validation、atomic update | token value の再表示、auth bypass |
+| Turso Platform API | organizationSlug、databaseName、groupName、query、platform token | Bearer 完全一致、Turso name validation、wrapper snapshot、unsupported API 分類 | field casing 変更、success status 変更、body/token log |
 | WebSocket | upgrade headers、frames、stream_id | hello auth、message size limit、stream lifecycle validation | hello 前 request 処理、open tx 放置 |
 | replication API | token、frame_no、frame bytes | replication token、CRC32、range validation | checksum 無視、unauthenticated stream |
 | extension | extension name/version/sha256/filename | allowlist、sha256、固定 directory、manifest validation | 任意 path load、SQL からの直接 load、未署名拡張 |
@@ -4968,11 +4992,57 @@ Phase 8 の `/v1/*` Turso 互換 API は、公式 Turso Platform API の主要 p
   },
   "TursoGroupInfo": {
     "name": "default",
-    "version": "adlaire-0.57",
+    "version": "adlaire-0.58",
     "uuid": "grp_default",
     "locations": ["default"],
     "primary": "default",
     "delete_protection": false
+  },
+  "TursoOrganizationInfo": {
+    "name": "default",
+    "slug": "default",
+    "type": "personal",
+    "overages": false,
+    "require_mfa": false,
+    "blocked_reads": false,
+    "blocked_writes": false,
+    "plan_id": "self-hosted",
+    "plan_timeline": "none",
+    "platform": "adlaire"
+  },
+  "TursoOrganizationUsage": {
+    "uuid": "org_default",
+    "usage": {
+      "rows_read": 0,
+      "rows_written": 0,
+      "databases": 1,
+      "locations": 1,
+      "storage_bytes": 4096,
+      "groups": 1,
+      "bytes_synced": 0
+    },
+    "databases": [
+      {
+        "uuid": "550e8400-e29b-41d4-a716-446655440000",
+        "instances": [
+          {
+            "uuid": "550e8400-e29b-41d4-a716-446655440000",
+            "usage": {
+              "rows_read": 0,
+              "rows_written": 0,
+              "storage_bytes": 4096,
+              "bytes_synced": 0
+            }
+          }
+        ],
+        "total": {
+          "rows_read": 0,
+          "rows_written": 0,
+          "storage_bytes": 4096,
+          "bytes_synced": 0
+        }
+      }
+    ]
   }
 }
 ```
@@ -4980,9 +5050,14 @@ Phase 8 の `/v1/*` Turso 互換 API は、公式 Turso Platform API の主要 p
 | Turso API | Status | Response wrapper | Field casing rule |
 |-----------|--------|------------------|-------------------|
 | `GET /v1/locations` | 200 | `{"locations":{...}}` | location code は object key、display name は string value |
+| `GET /v1/organizations` | 200 | `[TursoOrganizationInfo]` | wrapper object は返さない |
+| `PATCH /v1/organizations/{org}` | 200 | `{"organization":{...}}` | `overages`、`require_mfa` 以外の body field は `INVALID_REQUEST` |
+| `GET /v1/organizations/{org}/usage` | 200 | `{"organization":{...}}` | usage field は snake_case |
 | `GET /v1/organizations/{org}/groups` | 200 | `{"groups":[...]}` | group fields は Turso casing |
+| `GET /v1/organizations/{org}/groups/{group}` | 200 | `{"group":{...}}` | retrieve は list 要素と同じ schema |
 | `POST /v1/organizations/{org}/groups` | 200 | `{"group":{...}}` | 201 を返さない |
 | `GET /v1/organizations/{org}/databases` | 200 | `{"databases":[...]}` | `DbId`、`Hostname`、`Name` は大文字始まりを維持 |
+| `GET /v1/organizations/{org}/databases/{db}` | 200 | `{"database":{...}}` | retrieve は list 要素と同じ schema |
 | `POST /v1/organizations/{org}/databases` | 200 | `{"database":{...}}` | 201 を返さない |
 | `POST /v1/organizations/{org}/databases/{db}/auth/tokens` | 200 | `{"jwt":"..."}` | `token` ではなく `jwt` |
 
@@ -5009,6 +5084,19 @@ response は必ず `{"jwt":"<token>"}` とし、`id`、`access`、`expires_at` �
 | branch parent filter | query は受け付けるが Phase 8 では空配列。Phase 15 以降に branch metadata と接続する | branch は Phase 15 |
 | group delete protection | 常に `false` | 自己ホストでは billing/plan lock を持たない |
 | multiple replica regions per group | Phase 8 は 1 primary location のみ | replication/HA は Phase 11〜18 |
+
+**Phase 8 Turso unsupported API 固定表：**
+
+| API family | Phase 8 response | 理由 |
+|------------|------------------|------|
+| members / invites | 501 `{"error":"not implemented","code":"NOT_IMPLEMENTED"}` | 自己ホスト単一運営者では user directory を持たない |
+| plans / billing / overages | 501 `NOT_IMPLEMENTED`。ただし organization DTO の plan fields は固定値を返す | 課金連動は対象外。quota は Adlaire metadata で管理 |
+| database stats top queries | 501 `NOT_IMPLEMENTED` | SQL text を集計・保存しない秘匿方針を優先 |
+| database upload endpoint `/v1/upload` | 501 `NOT_IMPLEMENTED` | Phase 14 restore API として別管理し、database token upload は Phase 8 対象外 |
+| encrypted database create/upload | 400 `INVALID_REQUEST` | request body feature flag として指定されるため、未対応入力として拒否 |
+| seed / CSV / dump import | 400 `INVALID_REQUEST` | request body feature flag として指定されるため、未対応入力として拒否 |
+
+501 stub は success response ではない。ログは WARN `not implemented endpoint` とし、request body、token、SQL、upload binary はログに出さない。
 
 **既存 API の Phase 8 拡張：**
 
@@ -5141,6 +5229,27 @@ TC-8-9: Turso Platform API 互換 snapshot
   （e）POST /v1/organizations/default/databases/my-db/auth/tokens?expiration=2w&authorization=read-only → 200 {"jwt":"..."}
   （f）uppercase / underscore DB 名 → 400 INVALID_DB_NAME
   （g）Phase 7 legacy DB 名は接続・削除可能だが、Phase 8 新規作成では拒否
+
+TC-8-10: Turso organization API
+  （a）GET /v1/organizations → 200 [TursoOrganizationInfo]
+  （b）PATCH /v1/organizations/default {overages:false,require_mfa:false} → 200 {"organization":TursoOrganizationInfo}
+  （c）PATCH unknown field → 400 INVALID_REQUEST
+  （d）GET /v1/organizations/default/usage → 200 {"organization":TursoOrganizationUsage}
+  （e）usage 計測不能 → 503 USAGE_UNAVAILABLE
+
+TC-8-11: Turso retrieve API
+  （a）GET /v1/organizations/default/groups/app → 200 {"group":TursoGroupInfo}
+  （b）GET /v1/organizations/default/databases/my-db → 200 {"database":TursoDatabaseInfo}
+  （c）存在しない group → 404 GROUP_NOT_FOUND
+  （d）存在しない database → 404 DB_NOT_FOUND
+
+TC-8-12: Turso unsupported API
+  （a）GET /v1/organizations/default/plans → 501 NOT_IMPLEMENTED
+  （b）POST /v1/organizations/default/members → 501 NOT_IMPLEMENTED
+  （c）GET /v1/organizations/default/databases/my-db/stats → 501 NOT_IMPLEMENTED
+  （d）POST /v1/upload → 501 NOT_IMPLEMENTED
+  （e）POST /v1/organizations/default/databases {name:"seeded",group:"default",seed:{...}} → 400 INVALID_REQUEST
+  （f）unsupported API の log に token/body/upload binary が出ない
 ```
 
 **Phase 8 実装タスク：**
@@ -5154,7 +5263,10 @@ T8-5: DB/token API に organization/group/location/quota scope を統合
 T8-6: JWT org/grp claim と dbs claim の権限優先順位を実装
 T8-7: quota 判定を write/restore/replication apply/branch create に接続する
 T8-8: Turso Platform API 互換 `/v1/*` route と response wrapper を実装
-T8-9: TC-8-1〜TC-8-9 を通す
+T8-9: Turso organization list/update/usage API を実装
+T8-10: Turso group/database retrieve API を実装
+T8-11: Turso unsupported API の 501/400 分類を実装
+T8-12: TC-8-1〜TC-8-12 を通す
 ```
 
 
