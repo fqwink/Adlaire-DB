@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.41  
+**バージョン：** 0.42  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-12  
 
@@ -277,6 +277,7 @@ tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid               = { workspace = true }
 regex              = { workspace = true }
+bytes              = { workspace = true }
 
 [dev-dependencies]
 reqwest  = { version = "0.12", features = ["json"] }
@@ -2302,7 +2303,7 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
 
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "Adlaire DB starting");
 
-    if config.skip_integrity_check {
+    if config.storage.skip_integrity_check {
         tracing::warn!("--skip-integrity-check is set; startup integrity check disabled");
     }
 
@@ -2590,7 +2591,6 @@ impl Config {
             admin_auth_token,
             jwt_secret_bytes:     raw_secret,
             shutdown_timeout,
-            skip_integrity_check,
             storage: StorageConfig {
                 busy_timeout_ms:              busy_timeout_ms,
                 wal_checkpoint_pages:         1000,
@@ -2749,11 +2749,14 @@ pub struct SqlResult {
 
 #[async_trait::async_trait]
 pub trait SqldAdapter: Send + Sync {
+    /// 新規 Connection を生成して返す。
+    /// Phase 8 の WebSocket セッション（WsStream）が永続コネクションとして保持するために使用する。
+    fn connect(&self) -> Result<libsql::Connection, AppError>;
+
     /// 単一ステートメントを実行する。
     /// **注記**: RealSqldAdapter の実装では呼び出しのたびに新規 Connection を生成する。
     /// そのため、execute() を複数回呼び出しても同一トランザクション内に収まる保証はない。
-    /// インタラクティブトランザクション（BEGIN/COMMIT を跨ぐ操作）は Phase 8 の WebSocket
-    /// セッション設計時に再検討する。
+    /// インタラクティブトランザクション（BEGIN/COMMIT を跨ぐ操作）は WsStream の conn フィールド経由で行う。
     async fn execute(
         &self,
         sql:       &str,
@@ -2806,6 +2809,10 @@ fn libsql_err(e: libsql::Error) -> AppError {
 
 #[async_trait::async_trait]
 impl SqldAdapter for RealSqldAdapter {
+    fn connect(&self) -> Result<libsql::Connection, AppError> {
+        self.db.connect().map_err(|e| AppError::Sqld(e.to_string()))
+    }
+
     async fn execute_batch(&self, sql: &str) -> Result<(), AppError> {
         let conn = self.db.connect().map_err(|e| AppError::Sqld(e.to_string()))?;
         conn.execute_batch(sql).await.map(|_| ()).map_err(libsql_err)
@@ -2837,7 +2844,7 @@ impl SqldAdapter for RealSqldAdapter {
     }
 }
 
-fn to_libsql_params(args: Vec<SqlValue>) -> Vec<libsql::Value> {
+pub(crate) fn to_libsql_params(args: Vec<SqlValue>) -> Vec<libsql::Value> {
     args.into_iter().map(|v| match v {
         SqlValue::Null       => libsql::Value::Null,
         SqlValue::Integer(n) => libsql::Value::Integer(n),
@@ -2847,7 +2854,7 @@ fn to_libsql_params(args: Vec<SqlValue>) -> Vec<libsql::Value> {
     }).collect()
 }
 
-fn from_libsql_value(v: libsql::Value) -> SqlValue {
+pub(crate) fn from_libsql_value(v: libsql::Value) -> SqlValue {
     match v {
         libsql::Value::Null       => SqlValue::Null,
         libsql::Value::Integer(n) => SqlValue::Integer(n),
@@ -2863,6 +2870,9 @@ pub struct MockSqldAdapter;
 
 #[async_trait::async_trait]
 impl SqldAdapter for MockSqldAdapter {
+    fn connect(&self) -> Result<libsql::Connection, AppError> {
+        unimplemented!("MockSqldAdapter::connect")
+    }
     async fn execute_batch(&self, _sql: &str) -> Result<(), AppError> { Ok(()) }
     async fn execute(&self, _sql: &str, _args: Vec<SqlValue>, _want_rows: bool) -> Result<SqlResult, AppError> {
         Ok(SqlResult::default())
@@ -3380,16 +3390,12 @@ impl AuthState {
     }
 }
 
+// NOTE: `revoked` フィールドおよび `load_with(secret, revoked_subs)` の完全版は Phase 4 で追加される。
 #[cfg(test)]
 impl AuthState {
-    /// テスト用: 秘密鍵と失効済み sub リストを直接指定して AuthState を構築する
-    pub fn load_with(secret: &[u8], revoked_subs: Vec<String>) -> Self {
-        let mut revoked = std::collections::HashSet::new();
-        for sub in revoked_subs { revoked.insert(sub); }
-        Self {
-            secret_bytes: Some(secret.to_vec()),
-            revoked:      tokio::sync::RwLock::new(revoked),
-        }
+    /// テスト用: 秘密鍵を直接指定して AuthState を構築する（Phase 3 版）
+    pub fn load_with(secret: &[u8]) -> Self {
+        Self { secret_bytes: Some(secret.to_vec()) }
     }
 
     /// テスト用: 有効期限なしのテストトークンを発行する
@@ -3568,7 +3574,7 @@ mod tests {
     fn secret() -> Vec<u8> { "a".repeat(32).into_bytes() }
 
     fn make_auth() -> AuthState {
-        AuthState::load_with(&secret(), vec![])
+        AuthState::load_with(&secret())
     }
 
     #[tokio::test]
@@ -4209,10 +4215,41 @@ pub struct DescribeParam { pub name: Option<String> }
 // ws/session.rs
 use std::collections::HashMap;
 use crate::hrana::convert::{hrana_values_to_params, sql_to_stmt_result};
-use crate::db::sqld_adapter::SqldAdapter;
+use crate::db::sqld_adapter::{SqldAdapter, SqlResult, SqlValue, to_libsql_params, from_libsql_value};
 
 // sql_to_stmt_result のローカルエイリアス（ws 内での可読性向上）
 fn to_stmt_result(r: SqlResult) -> StmtResult { sql_to_stmt_result(r) }
+
+/// WsStream の永続コネクション上で単一 Stmt を実行し SqlResult を返す。
+/// stmt.want_rows が true なら query()、false なら execute() を使い分ける。
+async fn exec_stmt_on_conn(
+    conn: &libsql::Connection,
+    stmt: &Stmt,
+) -> Result<SqlResult, AppError> {
+    let sql_args = hrana_values_to_params(&stmt.args)?;
+    let params   = to_libsql_params(sql_args);
+    if stmt.want_rows {
+        let mut rows = conn.query(&stmt.sql, params).await
+            .map_err(|e| AppError::Sqld(e.to_string()))?;
+        let col_count = rows.column_count();
+        let cols: Vec<(Option<String>, Option<String>)> = (0..col_count)
+            .map(|i| (rows.column_name(i).map(|s| s.to_string()), None))
+            .collect();
+        let mut result_rows: Vec<Vec<SqlValue>> = vec![];
+        while let Some(row) = rows.next().await.map_err(|e| AppError::Sqld(e.to_string()))? {
+            let cells = (0..col_count)
+                .map(|i| from_libsql_value(row.get_value(i).unwrap_or(libsql::Value::Null)))
+                .collect();
+            result_rows.push(cells);
+        }
+        Ok(SqlResult { cols, rows: result_rows, rows_affected: 0, last_insert_rowid: None })
+    } else {
+        let rows_affected     = conn.execute(&stmt.sql, params).await
+            .map_err(|e| AppError::Sqld(e.to_string()))?;
+        let last_insert_rowid = conn.last_insert_rowid();
+        Ok(SqlResult { cols: vec![], rows: vec![], rows_affected, last_insert_rowid: Some(last_insert_rowid) })
+    }
+}
 
 pub struct WsSession {
     db:      std::sync::Arc<dyn SqldAdapter>,  // Arc<libsql::Database> ではなくアダプタ経由
@@ -4259,9 +4296,7 @@ impl WsSession {
                 } else if sql_upper.starts_with("COMMIT") || sql_upper.starts_with("ROLLBACK") {
                     stream.tx_mode = TransactionMode::None;
                 }
-                let params = hrana_values_to_params(&stmt.args);
-                let result = stream.conn.execute(&stmt.sql, params).await
-                    .map_err(|e| AppError::Sqld(e.to_string()))?;
+                let result = exec_stmt_on_conn(&stream.conn, &stmt).await?;
                 Ok(ResponseBody::Execute { result: to_stmt_result(result) })
             }
             RequestBody::CloseStream => {
@@ -4289,8 +4324,7 @@ impl WsSession {
                 let mut step_results = Vec::with_capacity(batch.len());
                 let mut step_errors  = Vec::with_capacity(batch.len());
                 for stmt in &batch {
-                    let params = hrana_values_to_params(&stmt.args);
-                    match stream.conn.execute(&stmt.sql, params).await {
+                    match exec_stmt_on_conn(&stream.conn, stmt).await {
                         Ok(r)  => { step_results.push(Some(to_stmt_result(r))); step_errors.push(None); }
                         Err(e) => { step_results.push(None); step_errors.push(Some(HranaError { message: e.to_string(), code: "SQLITE_ERROR".into() })); }
                     }
