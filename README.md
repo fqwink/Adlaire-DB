@@ -5,17 +5,17 @@ Rust + libsql（embedded SQLite）で実装する。外部 Web フレームワ�
 
 ## 現在の状態
 
-**Phase 3 実装済み** — HTTP サーバー・hrana-http v2 パイプライン・シングル DB モードが動作する。
+**Phase 7 実装済み** — HTTP サーバー・hrana-http v2 パイプライン・JWT 認証・ログ・マルチ DB ルーター・管理 API が動作する。
 
 | フェーズ | 内容 | 状態 |
 |----------|------|------|
 | Phase 1 | Cargo ワークスペース・clap CLI 骨格 | ✅ 完了 |
 | Phase 2 | データディレクトリ初期化・libsql 統合・プロセスロック | ✅ 完了 |
 | Phase 3 | HTTP サーバー・hrana-http v2 パイプライン・シングル DB | ✅ 完了 |
-| Phase 4 | JWT 認証・`token create` コマンド | 🔲 未実装 |
-| Phase 5 | ログ・統合テスト | 🔲 未実装 |
-| Phase 6 | マルチ DB ルーター | 🔲 未実装 |
-| Phase 7 | 管理 API・トークン CRUD・DB スコープ JWT | 🔲 未実装 |
+| Phase 4 | JWT 認証・`token create` コマンド | ✅ 完了 |
+| Phase 5 | ログ・統合テスト | ✅ 完了 |
+| Phase 6 | マルチ DB ルーター | ✅ 完了 |
+| Phase 7 | 管理 API・トークン CRUD・DB スコープ JWT | ✅ 完了 |
 | Phase 8 | WebSocket（hrana-ws v3） | 🔲 未実装 |
 | Phase 9 | ATTACH DB・メトリクス | 🔲 未実装 |
 | Phase 10 | レプリケーション基盤（WAL ストリーム・スナップショット） | 🔲 未実装 |
@@ -31,7 +31,8 @@ Rust + libsql（embedded SQLite）で実装する。外部 Web フレームワ�
 # 認証なし（開発用）
 adlaire-db serve --data ./data --port 8080
 
-# JWT 認証は Phase 4 で実装予定。現在は --auth-jwt-secret を指定すると起動を拒否する。
+# JWT 認証あり
+adlaire-db serve --data ./data --port 8080 --auth-jwt-secret "change-me"
 ```
 
 ## 動作確認
@@ -95,12 +96,24 @@ const result = await db.execute("SELECT 1");
 | CLI | `clap` 4（derive API）|
 | 対象 OS | Linux |
 
-## 制約（Phase 3 時点）
+## 管理 API
 
-- JWT 認証は未実装（`--auth-jwt-secret` を指定すると起動拒否）
-- 管理 API（`/admin/v1/...`）はすべて 501 を返す
-- "default" データベースのみ利用可能（マルチ DB は Phase 6 以降）
+Phase 7 時点では、以下の管理 API が利用できる。
+
+- `GET /admin/v1/databases`
+- `POST /admin/v1/databases`
+- `GET /admin/v1/databases/{name}`
+- `DELETE /admin/v1/databases/{name}`
+- `GET /admin/v1/tokens`
+- `POST /admin/v1/tokens`
+- `GET /admin/v1/tokens/{id}`
+- `DELETE /admin/v1/tokens/{id}`
+
+## 制約（Phase 7 時点）
+
 - WebSocket（hrana-ws v3）は未対応（`GET /v3/baton` は Phase 8 で実装、現在 501 を返す）
+- ATTACH DB・メトリクスは Phase 9 以降
+- レプリケーション、バックアップ、ブランチ、HA は Phase 10 以降
 
 ## 仕様書
 
