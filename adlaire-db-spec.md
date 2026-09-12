@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.50  
+**バージョン：** 0.51  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-12  
 
@@ -216,6 +216,7 @@ resolver = "2"
 [workspace.dependencies]
 # ── Phase 1〜3（常時有効） ──────────────────────────────────────────────────
 anyhow             = "1"
+async-trait        = "0.1"
 base64             = "0.22"
 bytes              = "1"
 chrono             = { version = "0.4",  features = ["serde"] }
@@ -267,6 +268,7 @@ path = "src/main.rs"
 [dependencies]
 # Phase 1〜3
 anyhow             = { workspace = true }
+async-trait        = { workspace = true }
 base64             = { workspace = true }
 bytes              = { workspace = true }
 chrono             = { workspace = true }
@@ -368,21 +370,22 @@ POST /v2/pipeline
 | `hyper-util` | 0.1 | tokio IO アダプタ（`TokioIo`）| 1 |
 | `serde` / `serde_json` | 1 | JSON シリアライズ・デシリアライズ | 1 |
 | `jsonwebtoken` | 9 | JWT HS256 署名・検証 | 4 |
-| `thiserror` | 1 | `AppError` derive | 1 |
+| `thiserror` | 2 | `AppError` derive | 1 |
 | `anyhow` | 1 | 内部エラーラッパー・`main()` 戻り値 | 1 |
 | `clap` | 4 | CLI パース（derive マクロ） | 1 |
 | `tracing` | 0.1 | 構造化ログ計装 | 1 |
 | `tracing-subscriber` | 0.3 | JSON Lines ログ出力 | 1 |
 | `chrono` | 0.4 | `DateTime<Utc>`・タイムスタンプ処理 | 1 |
 | `regex` | 1 | DB 名バリデーション（`LazyLock<Regex>`） | 1 |
-| `tokio-tungstenite` | 0.21 | WebSocket フレーム送受信 | 8 |
+| `tokio-tungstenite` | 0.24 | WebSocket フレーム送受信 | 8 |
 | `toml` | 0.8 | `config.toml` デシリアライズ | 1 |
 | `libc` | 0.2 | `flock` による排他プロセスロック | 1 |
 | `base64` | 0.22 | Blob フィールドの Base64 エンコード | 1 |
 | `uuid` | 1 | DB ID・トークン ID 生成（v4） | 1 |
 | `async-trait` | 0.1 | `SqldAdapter` トレイトの async fn | 1 |
-| `dashmap` | 5 | `Metrics`・`ReplicationState` の並行マップ | 9 |
+| `dashmap` | 6 | `Metrics`・`ReplicationState` の並行マップ | 9 |
 | `url` | 2 | `ServerRole::Replica` の `primary_url` 型 | 10 |
+| `crc32fast` | 1 | WAL フレーム CRC32 チェックサム | 12 |
 | `bytes` | 1 | WAL フレームバッファ（`WalFrame::data`）・hyper レスポンスボディ | 1 |
 | `crc32fast` | 1 | WAL フレーム CRC32 チェックサム | 10 |
 | `cc`（推移的ビルド依存） | 1 | `libsql-sys` → `libsql` の推移的依存。`libsql-sys` が SQLite C ソースをコンパイルするために使用。`Cargo.toml` には書かない | 1 |
@@ -2495,6 +2498,17 @@ async fn shutdown_signal_named() -> &'static str {
         _ = sigterm.recv() => "SIGTERM",
     }
 }
+
+fn init_tracing(log_level: &str) {
+    use tracing_subscriber::{fmt, EnvFilter};
+    let filter = EnvFilter::try_new(log_level)
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+    fmt()
+        .json()
+        .with_env_filter(filter)
+        .with_current_span(false)
+        .init();
+}
 ```
 
 
@@ -2738,6 +2752,12 @@ impl DataDir {
                 );
             }
         }
+        // §8.1 Step 5-1: databases.json が存在しなければ空で初期化する
+        let databases_path = data_dir.join("meta").join("databases.json");
+        if !databases_path.exists() {
+            std::fs::write(&databases_path, r#"{"databases":[]}"#)?;
+        }
+
         // §8.1 Step 5-2: tokens.json が存在しなければ空で初期化する
         let tokens_path = data_dir.join("meta").join("tokens.json");
         if !tokens_path.exists() {
