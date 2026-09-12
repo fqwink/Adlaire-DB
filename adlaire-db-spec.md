@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.66
+**バージョン：** 0.67
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -1802,6 +1802,11 @@ Step 5: 停止完了
 | 「対象外」 | その Phase では実装しない。route を生やす場合は 501 または仕様で定めた stub 応答に限定する |
 | 「将来」「検討」 | 実装禁止。対象 Phase が明記されるまでコードに入れない |
 | 「スタブ」 | レスポンス形式・ステータス・ログ有無を本仕様に従って固定する |
+| 「よい」「できる」「可能」 | 明示された条件下でだけ許可。条件、Phase、完了ゲートが同じ節にない場合は実装根拠にしない |
+| 「原則」 | 例外条件が同じ節または参照先表に明記されている場合だけ例外を許可。例外条件がなければ MUST と同じ |
+| 「推奨」「非推奨」 | 運用 guidance であり、実装完了条件にはしない。ただし security / persistence / compatibility に関係する場合は §9 の契約表を優先する |
+| 「未実装」 | 指定 Phase に到達するまで成功応答を返してはならない。設定値や route を受け取る場合の挙動は §9.0.1 と §9.13.1 に従う |
+| 「など」 | 例示であり、実装範囲を拡張しない。列挙外の機能は仕様未定義として扱う |
 
 **仕様の正本性：**
 
@@ -1813,6 +1818,15 @@ Step 5: 停止完了
 | Rust コード例 | 中 | 実装方針の参考。本文・表と矛盾する場合は本文・表を正とする |
 | 将来方針・候補・検討事項 | 低 | 実装根拠にしてはならない。実装する場合は先に仕様変更 PR を作る |
 
+**コード例・stub の扱い：**
+
+| 対象 | 実装上の扱い |
+|------|--------------|
+| Rust コード例の `unwrap()` / `expect()` | 説明用に限定する。request、disk、network、metadata、config、auth、replication、backup、extension、HA 由来の失敗を production path で panic にしてはならない |
+| Rust コード例の `not_implemented()` | 対象 Phase 前の stub 例であり、対象 Phase 完了後の production path に残してはならない |
+| コメント内の Phase 名 | 実装境界の説明であり、本文・表の Phase 契約と矛盾する場合は本文・表を優先する |
+| sample config の commented key | その key の実装許可ではない。§9.13 に Phase と挙動がない限り実装禁止 |
+
 **未定義に遭遇した場合の処理：**
 
 1. API の method/path/auth/status/body/error が未定義なら、実装を開始しない
@@ -1822,7 +1836,24 @@ Step 5: 停止完了
 5. やむを得ず先行実装が必要な場合は、同じ PR の先頭 commit で仕様を更新し、その後に実装 commit を積む
 6. 仕様変更を伴う PR は、PR description に「変更した契約」「影響 Phase」「追加テスト」を明記する
 
-#### 9.0.1 実装前仕様固定プロトコル
+#### 9.0.1 stub / NOT_IMPLEMENTED 固定契約
+
+未来 Phase の route、CLI、config、内部 hook を先に配置する場合は、本節を必ず満たす。stub は success response ではなく、互換性・探索性・routing 明確化のための失敗応答である。
+
+| 対象 | 許可条件 | 必須応答 | 禁止 |
+|------|----------|----------|------|
+| HTTP route stub | §9.5 または該当 Phase 節に method/path が定義済み | `501 NOT_IMPLEMENTED` と `{"error":"not implemented","code":"NOT_IMPLEMENTED"}`。body なしが明記された Turso 互換 endpoint は該当節を優先 | 2xx、部分成功、metadata 更新、DB file 更新 |
+| unsupported method | path は既知だが method が未定義 | `405 METHOD_NOT_ALLOWED` と `METHOD_NOT_ALLOWED` | 501 で method 不一致を隠す |
+| unknown path | path が仕様未定義 | `404 ENDPOINT_NOT_FOUND` | 501 で未知 path を許可済みに見せる |
+| CLI stub | subcommand 名と Phase が定義済み | 起動前 validation 後に非 0 終了。stderr に対象 Phase と未実装理由を出す | 0 終了、token/secret/metadata 生成 |
+| config stub | §9.13.1 で対象 Phase 前の扱いが定義済み | 起動失敗または明示 WARN のどちらか。silent ignore 禁止 | 成功扱いで値を保存、将来 Phase の挙動を部分実行 |
+| internal hook stub | production path から到達しない、または到達時に仕様済み error を返す | `NOT_IMPLEMENTED` または対象 error code | panic、unwrap、silent no-op |
+
+stub の log は WARN `not implemented endpoint` / `not implemented command` / `not implemented config` のいずれかとし、request body、Authorization、JWT、admin/platform/replication/HA token、生 SQL args、backup body、extension path を出力してはならない。
+
+対象 Phase の完了 PR では、その Phase の completion path にある stub をすべて実装済み処理へ置き換える。stub が残る場合は、対象外節または unsupported 固定表に残存理由、status、body、log、test を明記する。
+
+#### 9.0.2 実装前仕様固定プロトコル
 
 各 Phase の実装開始前に、実装者は該当 Phase について以下の契約表を作成または既存節から確認し、全項目が仕様書本文に存在することを確認する。1 つでも欠ける場合、その Phase の実装を開始してはならない。
 
@@ -2607,6 +2638,22 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | WAL mode | なし | なし | `[storage] wal_mode` | `passive` | 2 | unknown は起動失敗 |
 | WAL retention | なし | なし | `[storage] wal_retention_days` | `0` | 13 | parse 失敗で起動失敗 |
 | replication sync timeout | なし | なし | `[replication] sync_timeout_ms` | `5000` | 11 | `0` は起動失敗 |
+
+#### 9.13.1 対象 Phase 前の設定値固定契約
+
+設定値契約表に存在するが、現在の実装 Phase より後の Phase に属する設定値は、先取り実装の根拠にしてはならない。対象 Phase 前に指定された場合の挙動は下表を正とする。
+
+| 設定分類 | 対象 Phase 前に指定された場合 | 理由 |
+|----------|------------------------------|------|
+| security / auth / HA / replication token | 起動失敗 | secret を受理して未使用にすると運用者が保護済みと誤認するため |
+| persistence / WAL / restore / branch / archive | 起動失敗 | 値を受理して未適用にすると durability と recovery の保証が曖昧になるため |
+| observability / log output / metrics | 明示 WARN を出して無効化。ただし仕様表に WARN 可と書かれている場合だけ | 監視値は data path を変えないが、silent ignore は禁止 |
+| internal adapter | 起動失敗 | 互換性差分と rollback flag が未定義の状態で production path を変えないため |
+| commented sample key | 指定不可。TOML に実値として書かれた場合は上記分類に従う | sample コメントは実装許可ではないため |
+
+対象 Phase 前に設定値を受け取っても default と同じ挙動で silent ignore してはならない。起動失敗時は `INVALID_CONFIG` 相当の起動エラーとして扱い、HTTP error code には変換しない。WARN 許可の設定でも、log には key 名、対象 Phase、無効化理由だけを出し、secret 値や path の絶対値は出力しない。
+
+対象 Phase 到達時は、§9.13 の default、不正値、優先順位、§9.1.6 の Phase 別証跡を満たすまで完了扱いにしない。設定値を実装した PR は、指定あり/なし、不正値、対象 Phase 前 fixture、config/env/CLI 優先順位のテストを必須とする。
 
 ### 9.14 セキュリティ境界表
 
