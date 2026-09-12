@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.39  
+**バージョン：** 0.40  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-12  
 
@@ -184,7 +184,7 @@ adlaire-db バイナリ（Rust）
 |--------------|-----------------|
 | SQL パーサ・クエリ実行 | `libsql::Connection::query / execute / execute_batch` を使用 |
 | WAL・ページストレージ | libsql が内部処理。`PRAGMA` で設定（journal_mode / synchronous / busy_timeout） |
-| HTTP サーバー | libsql は持たない。Adlaire が axum で実装 |
+| HTTP サーバー | libsql は持たない。Adlaire が hyper で実装 |
 | 認証 | libsql は持たない。Adlaire が JWT で実装 |
 | hrana-http プロトコル | libsql は持たない。Adlaire 独自型（hrana/types.rs）で実装 |
 
@@ -217,8 +217,10 @@ resolver = "2"
 anyhow             = "1"
 async-trait        = "0.1"
 base64             = "0.22"
-axum               = { version = "0.7", features = ["json", "macros"] }
 chrono             = { version = "0.4", features = ["serde"] }
+http-body-util     = "0.1"
+hyper              = { version = "1", features = ["full"] }
+hyper-util         = { version = "0.1", features = ["tokio"] }
 clap               = { version = "4", features = ["derive"] }
 libc               = "0.2"
 libsql             = "0.6"   # embedded SQLite（WAL モード）
@@ -260,8 +262,10 @@ path = "src/main.rs"
 anyhow             = { workspace = true }
 async-trait        = { workspace = true }
 base64             = { workspace = true }
-axum               = { workspace = true }
 chrono             = { workspace = true }
+http-body-util     = { workspace = true }
+hyper              = { workspace = true }
+hyper-util         = { workspace = true }
 clap               = { workspace = true }
 libc               = { workspace = true }
 libsql             = { workspace = true }
@@ -339,7 +343,9 @@ POST /v2/pipeline
 |---------|-----------|------|------------|
 | `libsql` | 0.6 | 組み込み SQLite（WAL モード）| 1 |
 | `tokio` | 1 | 非同期ランタイム | 1 |
-| `axum` | 0.7 | HTTP フレームワーク・ルーティング | 1 |
+| `hyper` | 1 | 低レベル HTTP ライブラリ | 1 |
+| `http-body-util` | 0.1 | リクエストボディ読み取りユーティリティ | 1 |
+| `hyper-util` | 0.1 | tokio IO アダプタ（`TokioIo`）| 1 |
 | `serde` / `serde_json` | 1 | JSON シリアライズ・デシリアライズ | 1 |
 | `jsonwebtoken` | 9 | JWT HS256 署名・検証 | 4 |
 | `thiserror` | 1 | `AppError` derive | 1 |
@@ -1598,11 +1604,11 @@ adlaire-server/src/
 │   └── sqld_adapter.rs  ← SqldAdapter トレイト・RealSqldAdapter 実装（§14.19）
 ├── auth/
 │   ├── mod.rs           ← JWT 検証ロジック・Claims / AuthState struct
-│   └── middleware.rs    ← axum extractor: Authenticated
+│   └── middleware.rs    ← extract_claims() 関数: JWT → Claims
 ├── token/
 │   └── util.rs          ← parse_expiry() / generate_token_id()（Phase 4）
 ├── http/
-│   ├── mod.rs           ← axum Router 組み立て（build_router / build_admin_router）
+│   ├── mod.rs           ← route() / admin_route() 手動ルーティング・hyper サーバー起動
 │   ├── pipeline.rs      ← POST /v2/pipeline ハンドラ
 │   ├── health.rs        ← GET /v2/health ハンドラ
 │   └── admin/
@@ -1977,9 +1983,9 @@ pub enum AppError {
     Internal(#[from] anyhow::Error),
 }
 
-impl axum::response::IntoResponse for AppError {
-    fn into_response(self) -> axum::response::Response {
-        use axum::http::StatusCode;
+impl AppError {
+    pub fn into_response(self) -> Response<Full<Bytes>> {
+        use http::StatusCode;
         let (status, code) = match &self {
             Self::AuthRequired          => (StatusCode::UNAUTHORIZED,            "AUTH_REQUIRED"),
             Self::AuthInvalid           => (StatusCode::UNAUTHORIZED,            "AUTH_INVALID"),
@@ -2002,11 +2008,15 @@ impl axum::response::IntoResponse for AppError {
             Self::Sqld(_)              => (StatusCode::INTERNAL_SERVER_ERROR,   "INTERNAL_ERROR"),
             Self::Internal(_)           => (StatusCode::INTERNAL_SERVER_ERROR,   "INTERNAL_ERROR"),
         };
-        let body = axum::Json(serde_json::json!({
+        let body = serde_json::to_vec(&serde_json::json!({
             "error": self.to_string(),
             "code":  code,
-        }));
-        (status, body).into_response()
+        })).unwrap_or_default();
+        Response::builder()
+            .status(status)
+            .header("content-type", "application/json")
+            .body(Full::from(body))
+            .unwrap()
     }
 }
 ```
@@ -2328,24 +2338,58 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
     );
 
     // Step 9: グレースフルシャットダウン付きでサーバー起動
-    let api_router   = build_router(Arc::clone(&state));
-    let admin_router = build_admin_router(Arc::clone(&state));
     let shutdown_timeout = config.shutdown_timeout;
 
     let (sd_tx, mut sd_rx) = tokio::sync::watch::channel(false);
     let mut sd_rx2 = sd_rx.clone();
 
-    let api_task = tokio::spawn(async move {
-        axum::serve(api_listener, api_router)
-            .with_graceful_shutdown(async move { sd_rx.changed().await.ok(); })
-            .await
-            .ok();
+    let api_task = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move {
+            loop {
+                tokio::select! {
+                    Ok((stream, _)) = api_listener.accept() => {
+                        let state = Arc::clone(&state);
+                        tokio::spawn(async move {
+                            let _ = http1::Builder::new()
+                                .serve_connection(
+                                    TokioIo::new(stream),
+                                    service_fn(move |req| {
+                                        let state = Arc::clone(&state);
+                                        async move { http::route(req, state).await }
+                                    }),
+                                )
+                                .await;
+                        });
+                    }
+                    _ = sd_rx.changed() => break,
+                }
+            }
+        }
     });
-    let admin_task = tokio::spawn(async move {
-        axum::serve(admin_listener, admin_router)
-            .with_graceful_shutdown(async move { sd_rx2.changed().await.ok(); })
-            .await
-            .ok();
+    let admin_task = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move {
+            loop {
+                tokio::select! {
+                    Ok((stream, _)) = admin_listener.accept() => {
+                        let state = Arc::clone(&state);
+                        tokio::spawn(async move {
+                            let _ = http1::Builder::new()
+                                .serve_connection(
+                                    TokioIo::new(stream),
+                                    service_fn(move |req| {
+                                        let state = Arc::clone(&state);
+                                        async move { http::admin_route(req, state).await }
+                                    }),
+                                )
+                                .await;
+                        });
+                    }
+                    _ = sd_rx2.changed() => break,
+                }
+            }
+        }
     });
 
     let sig_name = shutdown_signal_named().await;
@@ -2816,7 +2860,7 @@ impl SqldAdapter for MockSqldAdapter {
 **目標**：libSQL クライアント SDK が Adlaire DB に接続して SQL を実行できる最小構成
 
 **スコープ：**
-- axum HTTP サーバー起動・SIGINT/SIGTERM ハンドラ
+- hyper HTTP サーバー起動・SIGINT/SIGTERM ハンドラ
 - GET `/v2/health`
 - POST `/v2/pipeline`（hrana-http v2 完全実装）
 
@@ -2848,9 +2892,9 @@ TC-6: 起動・停止
 **実装タスク：**
 
 ```
-T-5: HTTP サーバー骨格（axum）
+T-5: HTTP サーバー骨格（hyper）
   [ ] tokio ランタイム起動
-  [ ] axum Router: POST /v2/pipeline, GET /v2/health
+  [ ] hyper service_fn + route(): POST /v2/pipeline, GET /v2/health
   [ ] --port でバインドアドレスを指定
   [ ] SIGINT / SIGTERM ハンドラ登録（graceful shutdown）
   [ ] "Adlaire DB listening" INFO ログ出力
@@ -2874,53 +2918,123 @@ T-6: hrana-http v2 パイプライン実装
 
 #### 実装詳細
 
-#### 14.4 axum Router 設計
+#### 14.4 ルーティング設計
 
 ```rust
 // http/mod.rs
-pub fn build_router(state: SharedState) -> axum::Router {
-    axum::Router::new()
+
+use hyper::{Request, Response, body::Incoming};
+use http_body_util::Full;
+use bytes::Bytes;
+use std::convert::Infallible;
+
+/// API リクエストを (メソッド, パス) でハンドラに振り分ける
+pub async fn route(
+    req: Request<Incoming>,
+    state: SharedState,
+) -> Result<Response<Full<Bytes>>, Infallible> {
+    let method = req.method().as_str();
+    let path   = req.uri().path();
+
+    match (method, path) {
         // Phase 1: シングル DB
-        .route("/v2/pipeline",           axum::routing::post(pipeline::handle))
-        .route("/v2/health",             axum::routing::get(health::handle))
+        ("GET",  "/v2/health")   => health::handle(req, state).await,
+        ("POST", "/v2/pipeline") => pipeline::handle(req, state, "default").await,
         // Phase 6: パスベース DB ルーティング
-        .route("/:db_name/v2/pipeline",  axum::routing::post(pipeline::handle_db))
-        // Phase 8: WebSocket
-        .route("/v3/baton",              axum::routing::get(ws::handle))
-        .route("/:db_name/v3/baton",     axum::routing::get(ws::handle_db))
-        .with_state(state)
+        ("POST", p) if p.ends_with("/v2/pipeline") => {
+            let db = extract_db_name(p).unwrap_or("default");
+            pipeline::handle(req, state, db).await
+        }
+        // Phase 8: WebSocket upgrade
+        ("GET", "/v3/baton")   => ws::handle(req, state).await,
+        ("GET", p) if p.ends_with("/v3/baton") => {
+            let db = extract_db_name(p).unwrap_or("default");
+            ws::handle_db(req, state, db).await
+        }
+        _ => Ok(not_found()),
+    }
 }
 
-pub fn build_admin_router(state: SharedState) -> axum::Router {
-    use axum::routing::{delete, get, post};
-    axum::Router::new()
-        .nest("/admin/v1", axum::Router::new()
-            // Phase 6: DB CRUD
-            .route("/databases",
-                get(admin::databases::list).post(admin::databases::create))
-            .route("/databases/:name",
-                get(admin::databases::get).delete(admin::databases::delete))
-            // Phase 7: トークン CRUD
-            .route("/tokens",
-                get(admin::tokens::list).post(admin::tokens::create))
-            .route("/tokens/:id",
-                get(admin::tokens::get).delete(admin::tokens::revoke))
-            // Phase 9: メトリクス
-            .route("/metrics",           get(admin::metrics::get))
-            // Phase 12〜13: バックアップ・PITR
-            .route("/databases/:name/backup",                    get(admin::backup::backup))
-            .route("/databases/:name/restore",                   post(admin::backup::restore))
-            .route("/databases/:name/restore/point-in-time",     post(admin::backup::pitr))
-            // Phase 14: ブランチ
-            .route("/databases/:name/branches",
-                get(admin::branches::list).post(admin::branches::create))
-            .route("/databases/:name/branches/:branch",          delete(admin::branches::delete))
-        )
-        .layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&state),
-            admin::admin_auth_middleware,
-        ))
-        .with_state(state)
+/// 管理 API リクエストを振り分ける（認証チェック込み）
+pub async fn admin_route(
+    req: Request<Incoming>,
+    state: SharedState,
+) -> Result<Response<Full<Bytes>>, Infallible> {
+    // 認証チェック
+    if let Some(expected) = &state.config.admin_auth_token {
+        let provided = req.headers()
+            .get(http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "));
+        match provided {
+            Some(token) if token == expected.as_str() => {}
+            _ => return Ok(json_error(
+                http::StatusCode::UNAUTHORIZED,
+                "AUTH_REQUIRED",
+                "admin authentication required",
+            )),
+        }
+    }
+
+    let method = req.method().as_str();
+    let path   = req.uri().path();
+
+    match (method, path) {
+        // Phase 6: DB CRUD
+        ("GET",    "/admin/v1/databases")        => admin::databases::list(req, state).await,
+        ("POST",   "/admin/v1/databases")        => admin::databases::create(req, state).await,
+        ("GET",    p) if is_db_path(p)           => admin::databases::get(req, state).await,
+        ("DELETE", p) if is_db_path(p)           => admin::databases::delete(req, state).await,
+        // Phase 7: トークン CRUD
+        ("GET",    "/admin/v1/tokens")           => admin::tokens::list(req, state).await,
+        ("POST",   "/admin/v1/tokens")           => admin::tokens::create(req, state).await,
+        ("GET",    p) if is_token_path(p)        => admin::tokens::get(req, state).await,
+        ("DELETE", p) if is_token_path(p)        => admin::tokens::revoke(req, state).await,
+        // Phase 9: メトリクス
+        ("GET",    "/admin/v1/metrics")          => admin::metrics::get(req, state).await,
+        // Phase 12〜13: バックアップ・PITR
+        ("GET",    p) if p.ends_with("/backup")  => admin::backup::backup(req, state).await,
+        ("POST",   p) if p.ends_with("/restore") => admin::backup::restore(req, state).await,
+        ("POST",   p) if p.ends_with("/restore/point-in-time") => admin::backup::pitr(req, state).await,
+        // Phase 14: ブランチ
+        ("GET",    p) if p.ends_with("/branches")        => admin::branches::list(req, state).await,
+        ("POST",   p) if p.ends_with("/branches")        => admin::branches::create(req, state).await,
+        ("DELETE", p) if p.contains("/branches/")        => admin::branches::delete(req, state).await,
+        _ => Ok(not_found()),
+    }
+}
+
+/// パスから db_name を抽出する（"/{db_name}/v2/pipeline" 形式）
+fn extract_db_name(path: &str) -> Option<&str> {
+    path.trim_start_matches('/').split('/').next()
+}
+
+fn is_db_path(p: &str) -> bool {
+    let segs: Vec<_> = p.trim_start_matches('/').split('/').collect();
+    matches!(segs.as_slice(), ["admin", "v1", "databases", _])
+}
+
+fn is_token_path(p: &str) -> bool {
+    let segs: Vec<_> = p.trim_start_matches('/').split('/').collect();
+    matches!(segs.as_slice(), ["admin", "v1", "tokens", _])
+}
+
+fn not_found() -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(http::StatusCode::NOT_FOUND)
+        .body(Full::default())
+        .unwrap()
+}
+
+fn json_error(status: http::StatusCode, code: &str, msg: &str) -> Response<Full<Bytes>> {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "error": msg, "code": code
+    })).unwrap_or_default();
+    Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(Full::from(body))
+        .unwrap()
 }
 ```
 
@@ -2986,51 +3100,61 @@ fn sql_val_to_hrana(v: SqlValue) -> Value {
 ```rust
 // handlers/pipeline.rs
 
-/// JSON パース失敗を 400 INVALID_REQUEST で返すカスタムエクストラクタ
-/// axum::Json は 422 を返すが、仕様は 400 INVALID_REQUEST を要求するため独自実装
-pub struct JsonPayload<T>(pub T);
+use hyper::{Request, Response, body::Incoming};
+use http_body_util::{Full, BodyExt};
+use bytes::Bytes;
+use std::convert::Infallible;
 
-#[async_trait::async_trait]
-impl<T, S> axum::extract::FromRequest<S> for JsonPayload<T>
-where
-    T: serde::de::DeserializeOwned,
-    S: Send + Sync,
-{
-    type Rejection = AppError;
+/// リクエストボディを読み切り JSON にデシリアライズする
+/// デシリアライズ失敗は 400 INVALID_REQUEST
+async fn parse_json_body<T: serde::de::DeserializeOwned>(
+    req: Request<Incoming>,
+) -> Result<T, AppError> {
+    let bytes = req.into_body().collect().await
+        .map_err(|_| AppError::InvalidRequest)?.to_bytes();
+    serde_json::from_slice::<T>(&bytes).map_err(|_| AppError::InvalidRequest)
+}
 
-    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
-        let bytes = axum::body::Bytes::from_request(req, state)
-            .await
-            .map_err(|_| AppError::InvalidRequest)?;
-        serde_json::from_slice::<T>(&bytes)
-            .map(JsonPayload)
-            .map_err(|_| AppError::InvalidRequest)
-    }
+fn json_ok<T: serde::Serialize>(body: &T) -> Response<Full<Bytes>> {
+    let bytes = serde_json::to_vec(body).unwrap_or_default();
+    Response::builder()
+        .status(http::StatusCode::OK)
+        .header("content-type", "application/json")
+        .body(Full::from(bytes))
+        .unwrap()
 }
 
 // 単一 DB ハンドラ（Phase 1）
 pub async fn handle(
-    State(state): State<SharedState>,
-    Authenticated(claims): Authenticated,
-    JsonPayload(req): JsonPayload<PipelineRequest>,
-) -> Result<Json<PipelineResponse>, AppError> {
-    let db = state.db_mgr.get("default").await
-        .ok_or_else(|| AppError::DbNotFound("default".to_string()))?;
-    let results = execute_pipeline(&db, &claims, &req.requests, "default").await?;
-    Ok(Json(PipelineResponse { baton: None, base_url: None, results }))
+    req: Request<Incoming>,
+    state: SharedState,
+    db_name: &str,
+) -> Result<Response<Full<Bytes>>, Infallible> {
+    let claims = match extract_claims(&req, &state) {
+        Ok(c)  => c,
+        Err(e) => return Ok(e.into_response()),
+    };
+    let pipeline_req = match parse_json_body::<PipelineRequest>(req).await {
+        Ok(r)  => r,
+        Err(e) => return Ok(e.into_response()),
+    };
+    let db = match state.db_mgr.get(db_name).await {
+        Some(d) => d,
+        None    => return Ok(AppError::DbNotFound(db_name.to_string()).into_response()),
+    };
+    match execute_pipeline(&db, &claims, &pipeline_req.requests, db_name).await {
+        Ok(results) => Ok(json_ok(&PipelineResponse { baton: None, base_url: None, results })),
+        Err(e)      => Ok(e.into_response()),
+    }
 }
 
-// マルチ DB ハンドラ（Phase 6）
+// マルチ DB ハンドラ（Phase 6）— db_name をパスから受け取る
 pub async fn handle_db(
-    State(state): State<SharedState>,
-    Authenticated(claims): Authenticated,
-    axum::extract::Path(db_name): axum::extract::Path<String>,
-    JsonPayload(req): JsonPayload<PipelineRequest>,
-) -> Result<Json<PipelineResponse>, AppError> {
-    let db = state.db_mgr.get(&db_name).await
-        .ok_or_else(|| AppError::DbNotFound(db_name.clone()))?;
-    let results = execute_pipeline(&db, &claims, &req.requests, &db_name).await?;
-    Ok(Json(PipelineResponse { baton: None, base_url: None, results }))
+    req: Request<Incoming>,
+    state: SharedState,
+    db_name: &str,
+) -> Result<Response<Full<Bytes>>, Infallible> {
+    handle(req, state, db_name).await
 }
 
 async fn execute_pipeline(
@@ -3175,77 +3299,37 @@ T-9: `token create` サブコマンド
 
 #### 実装詳細
 
-#### 14.3 axum 認証 Extractor
+#### 14.3 JWT 認証関数
 
 ```rust
 // auth/middleware.rs
 
-/// リクエストごとに JWT を検証し、Claims を抽出する axum Extractor
-pub struct Authenticated(pub Claims);
-// 利用側: Authenticated(claims): Authenticated
+use hyper::{Request, body::Incoming};
 
-impl axum::extract::FromRequestParts<SharedState> for Authenticated {
-    type Rejection = AppError;
-
-    async fn from_request_parts(
-        parts: &mut http::request::Parts,
-        state: &SharedState,
-    ) -> Result<Self, Self::Rejection> {
-        // 認証無効モード（jwt_secret 未設定）はスキップ
-        if !state.auth.is_auth_enabled() {
-            tracing::debug!("auth disabled — passing unauthenticated claims");
-            return Ok(Authenticated(Claims::unauthenticated()));
-        }
-
-        let raw = parts.headers
-            .get(http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "))
-            .ok_or(AppError::AuthRequired)?;
-
-        let claims = state.auth.verify(raw).await?;
-        Ok(Authenticated(claims))
+/// Authorization ヘッダから JWT を検証し Claims を返す
+/// 認証無効モード（jwt_secret 未設定）は Claims::unauthenticated() を返す
+pub fn extract_claims<B>(
+    req: &Request<B>,
+    state: &SharedState,
+) -> Result<Claims, AppError> {
+    if !state.auth.is_auth_enabled() {
+        tracing::debug!("auth disabled — passing unauthenticated claims");
+        return Ok(Claims::unauthenticated());
     }
+
+    let raw = req.headers()
+        .get(http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .ok_or(AppError::AuthRequired)?;
+
+    state.auth.verify(raw)
 }
 ```
 
-#### 14.3b 管理 API 認証ミドルウェア
+#### 14.3b 管理 API 認証
 
-管理 API 用の認証ミドルウェアは `http/admin/mod.rs` に定義する（JWT ではなく固定トークンの文字列完全一致）。
-
-```rust
-// http/admin/mod.rs
-
-/// 管理 API 認証ミドルウェア（Bearer 文字列完全一致）
-/// build_admin_router で layer として適用するため、全ハンドラに自動適用される
-pub async fn admin_auth_middleware(
-    State(state): State<SharedState>,
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    if let Some(expected) = &state.config.admin_auth_token {
-        let provided = req
-            .headers()
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "));
-
-        match provided {
-            Some(token) if token == expected.as_str() => {}
-            _ => {
-                return (
-                    axum::http::StatusCode::UNAUTHORIZED,
-                    axum::Json(serde_json::json!({
-                        "error": "admin authentication required",
-                        "code":  "AUTH_REQUIRED"
-                    })),
-                ).into_response();
-            }
-        }
-    }
-    next.run(req).await
-}
-```
+管理 API の認証は `http/mod.rs` の `admin_route()` 内で行う（§14.4 参照）。固定トークンの Bearer 文字列完全一致。
 
 
 #### 14.16 AuthState 実装（Phase 3 スタブ）
@@ -3661,7 +3745,7 @@ async fn tc3_jwt_auth() {
 
 ```
 T2-1: パスベース DB ルーター
-  [ ] axum Router を /{db-name}/v2/pipeline にマッチするように拡張
+  [ ] route() を /{db-name}/v2/pipeline にマッチするように拡張
   [ ] パスセグメントから db-name を抽出し、DB 名バリデーションを適用
   [ ] 存在しない db-name → 404 DB_NOT_FOUND
   [ ] Phase 1〜5 の単一 DB ルート（/v2/pipeline）との共存（後方互換）
@@ -3844,66 +3928,52 @@ T2-6: 統合テスト TC-2-1〜TC-2-6（TC-2-5b 含む）
 // http/admin/mod.rs
 // Phase 6〜7 で各ハンドラを実装する。現時点はすべて 501 を返す stub。
 
-pub async fn admin_auth_middleware(
-    State(state): State<SharedState>,
-    req: Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    if let Some(expected) = &state.config.admin_auth_token {
-        let provided = req
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "));
-        match provided {
-            Some(token) if token == expected.as_str() => {}
-            _ => {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    axum::Json(serde_json::json!({
-                        "error": "admin authentication required",
-                        "code":  "AUTH_REQUIRED"
-                    })),
-                ).into_response();
-            }
-        }
-    }
-    next.run(req).await
+use hyper::{Request, Response, body::Incoming};
+use http_body_util::Full;
+use bytes::Bytes;
+use std::convert::Infallible;
+use crate::state::SharedState;
+
+fn not_implemented() -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(http::StatusCode::NOT_IMPLEMENTED)
+        .body(Full::default())
+        .unwrap()
 }
 
 pub mod databases {
-    use axum::http::StatusCode;
-    pub async fn list()   -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn create() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn get()    -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn delete() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+    use super::*;
+    pub async fn list(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
+    pub async fn create(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
+    pub async fn get(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
+    pub async fn delete(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
 }
 
 pub mod tokens {
-    use axum::http::StatusCode;
-    pub async fn list()   -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn create() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn get()    -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn revoke() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+    use super::*;
+    pub async fn list(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
+    pub async fn create(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
+    pub async fn get(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
+    pub async fn revoke(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
 }
 
 pub mod metrics {
-    use axum::http::StatusCode;
-    pub async fn get() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+    use super::*;
+    pub async fn get(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
 }
 
 pub mod backup {
-    use axum::http::StatusCode;
-    pub async fn backup()  -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn restore() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn pitr()    -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+    use super::*;
+    pub async fn backup(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
+    pub async fn restore(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
+    pub async fn pitr(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
 }
 
 pub mod branches {
-    use axum::http::StatusCode;
-    pub async fn list()   -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn create() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn delete() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+    use super::*;
+    pub async fn list(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
+    pub async fn create(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
+    pub async fn delete(_req: Request<Incoming>, _state: SharedState) -> Result<Response<Full<Bytes>>, Infallible> { Ok(not_implemented()) }
 }
 ```
 
@@ -4249,7 +4319,7 @@ TC-3-6: メトリクス API
 **Phase 8 実装タスク：**
 
 ```
-T3-1: WebSocket サーバー追加（axum の WebSocket upgrade）
+T3-1: WebSocket サーバー追加（hyper の WebSocket upgrade）
 T3-2: hrana-ws v3 hello ハンドシェイク + JWT 認証
 T3-3: ストリーム多重化レイヤー実装（stream_id ごとの接続状態管理）
 T3-4: execute / batch / sequence / describe リクエスト処理（libsql Connection 経由）
@@ -4628,34 +4698,38 @@ T4-7: 統合テスト TC-4-1〜TC-4-5
 ```rust
 // middleware/replica_redirect.rs
 
+use hyper::{Request, Response, body::Incoming};
+use http_body_util::Full;
+use bytes::Bytes;
+
 /// レプリカモードで書き込みリクエストを受けた際に primary-url へ 307 リダイレクト
-pub async fn maybe_redirect_write(
-    State(state): State<Arc<AppState>>,
-    req: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
+/// route() の先頭で呼び出し、Some(response) が返った場合はそれを返す
+pub fn maybe_redirect_write(
+    req: &Request<Incoming>,
+    state: &SharedState,
+) -> Option<Response<Full<Bytes>>> {
     if let ServerRole::Replica { primary_url } = &state.role {
-        if is_mutating_request(&req) {
+        if is_mutating_request(req) {
             let target = format!(
                 "{}{}",
                 primary_url.as_str().trim_end_matches('/'),
                 req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("")
             );
-            return axum::response::Response::builder()
-                .status(axum::http::StatusCode::TEMPORARY_REDIRECT)
-                .header(axum::http::header::LOCATION, target)
-                .body(axum::body::Body::empty())
-                .unwrap();
+            return Some(Response::builder()
+                .status(http::StatusCode::TEMPORARY_REDIRECT)
+                .header(http::header::LOCATION, target)
+                .body(Full::default())
+                .unwrap());
         }
     }
-    next.run(req).await
+    None
 }
 
 /// POST / PUT / DELETE は書き込みリクエストとみなす
-fn is_mutating_request(req: &axum::extract::Request) -> bool {
+fn is_mutating_request(req: &Request<Incoming>) -> bool {
     matches!(
         req.method(),
-        &axum::http::Method::POST | &axum::http::Method::PUT | &axum::http::Method::DELETE
+        &http::Method::POST | &http::Method::PUT | &http::Method::DELETE
     )
 }
 
