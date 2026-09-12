@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.43  
+**バージョン：** 0.51  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-12  
 
@@ -214,35 +214,43 @@ members = ["adlaire-server"]
 resolver = "2"
 
 [workspace.dependencies]
+# ── Phase 1〜3（常時有効） ──────────────────────────────────────────────────
 anyhow             = "1"
 async-trait        = "0.1"
 base64             = "0.22"
-chrono             = { version = "0.4", features = ["serde"] }
+bytes              = "1"
+chrono             = { version = "0.4",  features = ["serde"] }
+clap               = { version = "4",    features = ["derive"] }
 http-body-util     = "0.1"
-hyper              = { version = "1", features = ["full"] }
-hyper-util         = { version = "0.1", features = ["tokio"] }
-clap               = { version = "4", features = ["derive"] }
+hyper              = { version = "1",    features = ["http1", "server"] }
+hyper-util         = { version = "0.1",  features = ["tokio"] }
 libc               = "0.2"
-libsql             = "0.6"   # embedded SQLite（WAL モード）
-serde              = { version = "1", features = ["derive"] }
+libsql             = "0.6"              # embedded SQLite（WAL モード）
+regex              = "1"
+serde              = { version = "1",    features = ["derive"] }
 serde_json         = "1"
-thiserror          = "1"
-tokio              = { version = "1", features = ["full"] }
+thiserror          = "2"
+tokio              = { version = "1",    features = ["full"] }
 toml               = "0.8"
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
-uuid               = { version = "1", features = ["v4"] }
-regex              = "1"
-# Phase 4〜 で追加予定
-# jsonwebtoken = "9"
-# Phase 8〜 で追加予定
-# tokio-tungstenite = "0.21"
-# Phase 9〜 で追加予定
-# dashmap = "5"
-bytes              = "1"
-# Phase 10〜 で追加予定
-# url   = "2"
-# crc32fast = "1"
+uuid               = { version = "1",   features = ["v4"] }
+
+# ── Phase 4〜（JWT 認証） ──────────────────────────────────────────────────
+jsonwebtoken       = "9"
+
+# ── Phase 8〜（WebSocket） ────────────────────────────────────────────────
+tokio-tungstenite  = "0.24"
+
+# ── Phase 9〜（マルチ DB・ATTACH） ────────────────────────────────────────
+dashmap            = "6"
+
+# ── Phase 10〜（レプリケーション） ────────────────────────────────────────
+url                = { version = "2",   features = ["serde"] }  # ServerRole::Replica の primary_url
+crc32fast          = "1"                                          # WAL フレーム整合性チェック
+
+# ── dev のみ ───────────────────────────────────────────────────────────────
+# [dev-dependencies] は adlaire-server/Cargo.toml で管理（workspace 共有なし）
 ```
 
 **adlaire-server/Cargo.toml：**
@@ -258,16 +266,19 @@ name = "adlaire-db"
 path = "src/main.rs"
 
 [dependencies]
+# Phase 1〜3
 anyhow             = { workspace = true }
 async-trait        = { workspace = true }
 base64             = { workspace = true }
+bytes              = { workspace = true }
 chrono             = { workspace = true }
+clap               = { workspace = true }
 http-body-util     = { workspace = true }
 hyper              = { workspace = true }
 hyper-util         = { workspace = true }
-clap               = { workspace = true }
 libc               = { workspace = true }
 libsql             = { workspace = true }
+regex              = { workspace = true }
 serde              = { workspace = true }
 serde_json         = { workspace = true }
 thiserror          = { workspace = true }
@@ -276,8 +287,15 @@ toml               = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid               = { workspace = true }
-regex              = { workspace = true }
-bytes              = { workspace = true }
+# Phase 4〜
+jsonwebtoken       = { workspace = true }
+# Phase 8〜
+tokio-tungstenite  = { workspace = true }
+# Phase 9〜
+dashmap            = { workspace = true }
+# Phase 10〜
+url                = { workspace = true }
+crc32fast          = { workspace = true }
 
 [dev-dependencies]
 reqwest  = { version = "0.12", features = ["json"] }
@@ -352,21 +370,22 @@ POST /v2/pipeline
 | `hyper-util` | 0.1 | tokio IO アダプタ（`TokioIo`）| 1 |
 | `serde` / `serde_json` | 1 | JSON シリアライズ・デシリアライズ | 1 |
 | `jsonwebtoken` | 9 | JWT HS256 署名・検証 | 4 |
-| `thiserror` | 1 | `AppError` derive | 1 |
+| `thiserror` | 2 | `AppError` derive | 1 |
 | `anyhow` | 1 | 内部エラーラッパー・`main()` 戻り値 | 1 |
 | `clap` | 4 | CLI パース（derive マクロ） | 1 |
 | `tracing` | 0.1 | 構造化ログ計装 | 1 |
 | `tracing-subscriber` | 0.3 | JSON Lines ログ出力 | 1 |
 | `chrono` | 0.4 | `DateTime<Utc>`・タイムスタンプ処理 | 1 |
 | `regex` | 1 | DB 名バリデーション（`LazyLock<Regex>`） | 1 |
-| `tokio-tungstenite` | 0.21 | WebSocket フレーム送受信 | 8 |
+| `tokio-tungstenite` | 0.24 | WebSocket フレーム送受信 | 8 |
 | `toml` | 0.8 | `config.toml` デシリアライズ | 1 |
 | `libc` | 0.2 | `flock` による排他プロセスロック | 1 |
 | `base64` | 0.22 | Blob フィールドの Base64 エンコード | 1 |
 | `uuid` | 1 | DB ID・トークン ID 生成（v4） | 1 |
 | `async-trait` | 0.1 | `SqldAdapter` トレイトの async fn | 1 |
-| `dashmap` | 5 | `Metrics`・`ReplicationState` の並行マップ | 9 |
+| `dashmap` | 6 | `Metrics`・`ReplicationState` の並行マップ | 9 |
 | `url` | 2 | `ServerRole::Replica` の `primary_url` 型 | 10 |
+| `crc32fast` | 1 | WAL フレーム CRC32 チェックサム | 12 |
 | `bytes` | 1 | WAL フレームバッファ（`WalFrame::data`）・hyper レスポンスボディ | 1 |
 | `crc32fast` | 1 | WAL フレーム CRC32 チェックサム | 10 |
 | `cc`（推移的ビルド依存） | 1 | `libsql-sys` → `libsql` の推移的依存。`libsql-sys` が SQLite C ソースをコンパイルするために使用。`Cargo.toml` には書かない | 1 |
@@ -572,13 +591,18 @@ OPTIONS:
   --admin-port <PORT>    管理 API ポート（デフォルト: 8081）
   --config <FILE>        設定ファイルパス（デフォルト: {data}/config.toml）
   --auth-jwt-secret <SECRET>
-                         JWT 署名秘密鍵（HS256）。未指定時は認証無効（開発用）
+                         JWT 署名秘密鍵（HS256）。未指定時は認証無効（開発用）。環境変数 ADLAIRE_JWT_SECRET も使用可
   --auth-jwt-secret-file <FILE>
                          秘密鍵をファイルから読み込む
   --admin-auth-token <TOKEN>
                          管理 API 固定認証トークン（未指定時は認証無効）。環境変数 ADLAIRE_ADMIN_TOKEN も使用可
-  --log-level <LEVEL>    ログレベル: error / warn / info / debug（デフォルト: info）
+  --log-level <LEVEL>    ログレベル: error / warn / info / debug / trace（デフォルト: info）。環境変数 ADLAIRE_LOG_LEVEL も使用可
   --skip-integrity-check 起動時の PRAGMA integrity_check をスキップ（非推奨。WARN ログ出力）
+  --role <ROLE>          サーバーロール: standalone（デフォルト）/ primary / replica
+  --primary-port <PORT>  プライマリが WAL ストリームを公開するポート（デフォルト: 8082）
+  --primary-url <URL>    レプリカが接続するプライマリの URL（--role replica 時に必須）
+  --replication-auth-token <TOKEN>
+                         プライマリ・レプリカ間の認証トークン
   --replication-write-mode <MODE>
                          レプリケーション書き込みモード: async / sync（デフォルト: async）
   --busy-timeout <MS>    WAL ロック待機タイムアウト（ミリ秒、デフォルト: 5000）
@@ -1299,6 +1323,8 @@ GET /admin/v1/metrics     全 DB のメトリクス取得
 ```json
 {
   "uptime_seconds": 3600,
+  "tokens_total": 5,
+  "tokens_revoked": 1,
   "databases": [
     {
       "name": "my-db",
@@ -1344,6 +1370,7 @@ GET /admin/v1/metrics     全 DB のメトリクス取得
 | `AUTH_REQUIRED` | 401 | Authorization ヘッダがない |
 | `AUTH_INVALID` | 401 | JWT 署名検証失敗・失効済みトークン |
 | `AUTH_EXPIRED` | 401 | JWT exp 切れ |
+| `AUTH_DISABLED` | 401 | 認証が無効な状態でのみ有効なエンドポイントへのアクセス（将来拡張用） |
 | `PERMISSION_DENIED` | 403 | ro トークンで書き込み操作 |
 | `DB_NOT_FOUND` | 404 | 指定 DB が存在しない |
 | `TOKEN_NOT_FOUND` | 404 | 指定トークン ID が存在しない |
@@ -1566,6 +1593,12 @@ Step 5: 停止完了
 --admin-port         > config.toml [server] admin_port  (default: 8081)
 --log-level          > ADLAIRE_LOG_LEVEL (env) > config.toml [server] log_level  (default: info)
 --busy-timeout       > config.toml [storage] busy_timeout_ms  (default: 5000)
+
+# Phase 10 レプリケーション設定（CLI のみ・TOML 対応なし）
+--role                      standalone（デフォルト）     CLI のみ（TOML 対応なし）
+--primary-port              8082（デフォルト）           CLI のみ（TOML 対応なし）
+--primary-url               必須（--role replica 時のみ）CLI のみ（TOML 対応なし）
+--replication-auth-token    なし（デフォルト）           CLI のみ（TOML 対応なし）
 ```
 
 ---
@@ -1638,11 +1671,10 @@ adlaire-server/src/
 │   ├── mod.rs           ← WAL レプリケーション共通型（Phase 10）
 │   ├── primary.rs       ← SSE /replication/v1/log・snapshot ハンドラ
 │   └── replica.rs       ← フレーム受信・CRC32 検証・適用ループ
-├── wal/
-│   ├── mod.rs           ← WAL アーカイブ公開 API（Phase 12〜13）
-│   ├── archive.rs       ← フレーム書き込み・fsync・manifest 更新
-│   └── manifest.rs      ← Manifest / FrameMeta struct・アトミック保存
-└── metrics.rs           ← AtomicU64 カウンター・DashMap（Phase 9）
+└── wal/
+    ├── mod.rs           ← WAL アーカイブ公開 API（Phase 12〜13）
+    ├── archive.rs       ← フレーム書き込み・fsync・manifest 更新
+    └── manifest.rs      ← Manifest / FrameMeta struct・アトミック保存
 ```
 
 
@@ -1706,7 +1738,8 @@ pub enum WalCheckpointMode { Passive, Full, Restart }
 #[derive(Debug, Clone)]
 pub struct ReplicationConfig {
     pub write_mode:      ReplicationWriteMode,
-    pub sync_timeout_ms: u64,  // デフォルト 5000
+    pub sync_timeout_ms: u64,           // デフォルト 5000
+    pub auth_token:      Option<String>, // --replication-auth-token（Phase 10）
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2017,7 +2050,7 @@ impl AppError {
             Self::RestoreIntegrityFailed=> (StatusCode::CONFLICT,                "RESTORE_INTEGRITY_FAILED"),
             Self::RestoreFrameCorrupt   => (StatusCode::CONFLICT,                "RESTORE_FRAME_CORRUPT"),
             Self::AuthDisabled          => (StatusCode::UNAUTHORIZED,            "AUTH_DISABLED"),
-            Self::ConfigError(_)        => (StatusCode::INTERNAL_SERVER_ERROR,   "CONFIG_ERROR"),
+            Self::ConfigError(_)        => (StatusCode::INTERNAL_SERVER_ERROR,   "INTERNAL_ERROR"),
             Self::Sqld(_)              => (StatusCode::INTERNAL_SERVER_ERROR,   "INTERNAL_ERROR"),
             Self::Internal(_)           => (StatusCode::INTERNAL_SERVER_ERROR,   "INTERNAL_ERROR"),
         };
@@ -2263,6 +2296,11 @@ pub struct ServeArgs {
     #[arg(long)] pub replication_write_mode:                   Option<String>,
     #[arg(long)] pub busy_timeout:                             Option<u64>,
     #[arg(long)] pub shutdown_timeout:                         Option<u64>,
+    // Phase 10: レプリケーション設定
+    #[arg(long)] pub role:                                     Option<String>,
+    #[arg(long)] pub primary_port:                             Option<u16>,
+    #[arg(long)] pub primary_url:                              Option<String>,
+    #[arg(long)] pub replication_auth_token:                   Option<String>,
 }
 
 #[derive(Parser)]
@@ -2331,12 +2369,13 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
     );
 
     // Step 7: AppState 構築
+    let role = parse_server_role(&args)?;
     let state: SharedState = Arc::new(AppState {
         config:      Arc::clone(&config),
         db_mgr,
         auth,
         metrics:     Arc::new(Metrics::new()),
-        role:        ServerRole::Standalone,
+        role,
         replication: None,
     });
 
@@ -2459,6 +2498,17 @@ async fn shutdown_signal_named() -> &'static str {
         _ = sigterm.recv() => "SIGTERM",
     }
 }
+
+fn init_tracing(log_level: &str) {
+    use tracing_subscriber::{fmt, EnvFilter};
+    let filter = EnvFilter::try_new(log_level)
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+    fmt()
+        .json()
+        .with_env_filter(filter)
+        .with_current_span(false)
+        .init();
+}
 ```
 
 
@@ -2562,8 +2612,8 @@ impl Config {
         let admin_port = args.admin_port.or(srv.admin_port).unwrap_or(8081);
         let log_level_env = std::env::var("ADLAIRE_LOG_LEVEL").ok();
         let log_level  = args.log_level.as_deref()
+            .or(log_level_env.as_deref())    // env（§8.4: CLI > env > TOML）
             .or(srv.log_level.as_deref())
-            .or(log_level_env.as_deref())
             .unwrap_or("info")
             .to_string();
         let busy_timeout_ms: u64  = args.busy_timeout.or(srv.busy_timeout_ms).unwrap_or(5000);
@@ -2602,6 +2652,7 @@ impl Config {
             replication: ReplicationConfig {
                 write_mode,
                 sync_timeout_ms: 5000,
+                auth_token: args.replication_auth_token.clone(),
             },
         }))
     }
@@ -2621,6 +2672,24 @@ fn parse_write_mode(s: &str) -> anyhow::Result<ReplicationWriteMode> {
         "async" => Ok(ReplicationWriteMode::Async),
         "sync"  => Ok(ReplicationWriteMode::Sync),
         other   => anyhow::bail!("unknown replication write_mode: {other}. Use 'async' or 'sync'"),
+    }
+}
+
+pub fn parse_server_role(args: &ServeArgs) -> anyhow::Result<ServerRole> {
+    match args.role.as_deref().unwrap_or("standalone") {
+        "standalone" => Ok(ServerRole::Standalone),
+        "primary"    => Ok(ServerRole::Primary {
+            primary_port: args.primary_port.unwrap_or(8082),
+        }),
+        // Phase 10 で Replica variant 解除後に有効化：
+        // "replica" => {
+        //     let url = args.primary_url.as_deref()
+        //         .ok_or_else(|| anyhow::anyhow!("--primary-url は --role replica 時に必須です"))?;
+        //     Ok(ServerRole::Replica { primary_url: url.parse()? })
+        // }
+        other => anyhow::bail!(
+            "unknown role '{other}'. Use 'standalone', 'primary', or 'replica'"
+        ),
     }
 }
 ```
@@ -2683,6 +2752,12 @@ impl DataDir {
                 );
             }
         }
+        // §8.1 Step 5-1: databases.json が存在しなければ空で初期化する
+        let databases_path = data_dir.join("meta").join("databases.json");
+        if !databases_path.exists() {
+            std::fs::write(&databases_path, r#"{"databases":[]}"#)?;
+        }
+
         // §8.1 Step 5-2: tokens.json が存在しなければ空で初期化する
         let tokens_path = data_dir.join("meta").join("tokens.json");
         if !tokens_path.exists() {
@@ -3201,10 +3276,7 @@ async fn execute_pipeline(
         match req {
             StreamRequest::Execute { stmt } => {
                 if is_write_stmt(&stmt.sql) && claims.resolve_access(db_name) != AccessLevel::Rw {
-                    responses.push(StreamResult::Error {
-                        error: HranaError { message: "write not permitted".into(), code: "PERMISSION_DENIED".into() },
-                    });
-                    continue;
+                    return Err(AppError::PermissionDenied);
                 }
                 let sql_args: Result<Vec<_>, _> = stmt.args.iter().map(hrana_to_sql).collect();
                 let sql_args = match sql_args {
@@ -4477,15 +4549,16 @@ T3-8: 統合テスト TC-3-1〜TC-3-6
 
 /// "ATTACH DATABASE 'foo' AS alias" を検出して解決済みパスに書き換える。
 /// foo が Adlaire 管理外（バリデーション失敗 or 未登録）なら Err を返す。
+static ATTACH_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)ATTACH\s+(?:DATABASE\s+)?'([^']+)'\s+AS\s+(\w+)"#).unwrap()
+});
+
 pub async fn resolve_attach(
     sql: &str,
     db_mgr: &DbManager,
     data_dir: &std::path::Path,
 ) -> Result<String, AppError> {
-    let re = regex::Regex::new(
-        r#"(?i)ATTACH\s+(?:DATABASE\s+)?'([^']+)'\s+AS\s+(\w+)"#
-    ).unwrap();
-    if let Some(caps) = re.captures(sql) {
+    if let Some(caps) = ATTACH_RE.captures(sql) {
         let db_name = &caps[1];
         let alias   = &caps[2];
         validate_db_name(db_name)?;
@@ -4874,9 +4947,11 @@ fn is_mutating_request(req: &Request<Incoming>) -> bool {
 
 #[derive(serde::Serialize)]
 pub struct HealthResponse {
-    pub status:               &'static str,
-    pub role:                 ServerRole,
-    pub replication_lag_frames: Option<u64>,  // replica のみ
+    pub status:                   &'static str,
+    pub role:                     &'static str,   // "standalone" / "primary" / "replica"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_url:              Option<String>,  // replica のみ
+    pub replication_lag_frames:   Option<u64>,     // replica のみ
 }
 
 pub async fn handle(
@@ -4889,9 +4964,16 @@ pub async fn handle(
         Some(lag) if lag > 1000 => "degraded",
         _ => "ok",
     };
+    let (role_str, primary_url) = match &state.role {
+        ServerRole::Standalone        => ("standalone", None),
+        ServerRole::Primary { .. }    => ("primary",    None),
+        // Phase 10 解除後: ServerRole::Replica { primary_url } =>
+        //     ("replica", Some(primary_url.to_string())),
+    };
     Ok(json_ok(&HealthResponse {
         status,
-        role: state.role.clone(),
+        role: role_str,
+        primary_url,
         replication_lag_frames: lag,
     }))
 }
@@ -5000,8 +5082,12 @@ pub async fn archive_frames(
     manifest.save_atomic(&manifest_path).await?;
     Ok(())
 }
+```
 
-/// manifest.json のロード・アトミック保存
+```rust
+// wal/manifest.rs
+use tokio::io::AsyncWriteExt;
+
 impl Manifest {
     /// manifest.json を読み込む。ファイルが存在しない場合は Err を返す（呼び出し側で unwrap_or_default）
     pub async fn load(path: &std::path::Path) -> anyhow::Result<Self> {
@@ -5015,7 +5101,6 @@ impl Manifest {
         let json = serde_json::to_vec_pretty(self)?;
         {
             let mut f = tokio::fs::File::create(&tmp).await?;
-            use tokio::io::AsyncWriteExt;
             f.write_all(&json).await?;
             f.sync_all().await?;
         }
