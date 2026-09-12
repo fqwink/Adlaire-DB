@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.70
+**バージョン：** 0.71
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -2192,6 +2192,62 @@ PR review / CI / release-check は最低限、以下を機械的に確認する�
 
 Phase 完了 PR は、上記 check がすべて成功しなければならない。1 件でも失敗した場合は、その PR 内で修正し、後続のバグ修正 PR に持ち越さない。
 
+#### 9.1.10 Phase 受入 manifest 固定契約
+
+各 Phase 実装 PR は、実装開始前に Phase 受入 manifest を作成し、PR description または `docs/phase-evidence/phase-{phase}.md` に固定する。manifest は「この Phase が何を実装し、何を実装しないか」「どの契約をどの test / artifact で証明するか」を 1 箇所で読める形にする。
+
+manifest がない Phase 実装 PR は、§9.1.9 の Step 2 `Contract mapping` 未完了として扱う。実装者がコードを読まないと完了条件を判断できる状態は不可とする。
+
+**必須 manifest fields：**
+
+| Field | 必須内容 | 欠落時 |
+|-------|----------|--------|
+| `Phase` | 対象 Phase 番号と Phase 名 | 実装開始禁止 |
+| `Scope in` | この PR で成功応答まで実装する機能一覧 | 実装開始禁止 |
+| `Scope out` | 未来 Phase、unsupported、明示対象外の機能一覧と根拠 section | 実装開始禁止 |
+| `Contract map` | §9.1.7 / §9.1.8 の Contract ID、対象仕様 section、test ID、evidence path | Phase 未完了 |
+| `Endpoint map` | method、path、auth、status、body、error code、idempotency | route 公開禁止 |
+| `Persistence map` | file path、schema version、write timing、fsync、corruption、rollback | 書き込み処理実装禁止 |
+| `Config map` | CLI/env/TOML/default/invalid/priority/対象 Phase 前挙動 | config 実装禁止 |
+| `Security map` | auth boundary、scope、secret redaction、denial case、bypass attempt | success response 公開禁止 |
+| `Compatibility map` | Turso/libSQL SDK 互換確認、差分理由、snapshot source | 互換完了不可 |
+| `Regression set` | 対象 Phase 以前の regression command と期待結果 | merge 不可 |
+| `Manual exception` | 自動化できない確認の理由、owner、期限、代替自動化 Phase | 手動確認のみ不可 |
+| `Zero-bug declaration` | 既知不具合、未検証、未生成証跡、TODO/FIXME production path が 0 件である宣言 | merge 不可 |
+
+**manifest の固定フォーマット：**
+
+```markdown
+## Phase {phase} Acceptance Manifest
+
+| Field | Value |
+|-------|-------|
+| Phase | P{phase}: {name} |
+| Scope in | ... |
+| Scope out | ... |
+| Regression set | ... |
+| Manual exception | none / ... |
+| Zero-bug declaration | known bugs: 0 / unverified: 0 / missing evidence: 0 / production TODO-FIXME: 0 |
+
+| Contract ID | Source section | Implementation target | Test ID / command | Evidence path | Status |
+|-------------|----------------|-----------------------|-------------------|---------------|--------|
+| API-Px-name | §9.5 / §6.x | endpoint / behavior | TC-* | artifacts/... | planned/pass |
+```
+
+`Status` は実装開始前は `planned`、PR 完了時は `pass` または仕様本文に根拠がある `N/A` のみ許可する。`todo`、`later`、`manual only`、`unknown`、空欄は Phase 完了不可である。
+
+**manifest 更新ルール：**
+
+| 変更 | 必須対応 |
+|------|----------|
+| 実装中に endpoint / schema / error / config / security 境界が変わった | 先に manifest と仕様本文を更新し、Contract ID と test/evidence を再割当する |
+| 実装中に対象外機能が必要になった | `Scope out` から `Scope in` へ移す前に仕様変更 PR を先行する |
+| artifact path が変わった | manifest、PR description、test output を同時に更新する |
+| 手動確認が増えた | `Manual exception` に理由、owner、期限、代替自動化 Phase を追加する |
+| regression を削った | 削除理由と代替 test を仕様本文に明記するまで merge 不可 |
+
+Phase 完了 review では、manifest、仕様本文、test 名、artifact path、PR description の 5 点が一致していなければならない。1 つでも不一致がある場合は、実装の正しさではなく受入条件の未確定として扱い、Phase 未完了に戻す。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -2817,6 +2873,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | 確認項目 | 必須状態 | 未定義時の扱い |
 |----------|----------|----------------|
 | Phase スコープ | 対象機能と対象外が §9.2 / §9.4 に明記されている | 仕様追記まで実装しない |
+| Phase 受入 manifest | §9.1.10 の必須 fields が実装開始前に固定されている | 実装 PR として扱わない |
 | API 契約 | method/path/auth/request/success/error が §9.5 または各 API 節に明記されている | route を追加しない |
 | Error code | 失敗条件ごとの `code` が §7.3 / §9.7 に存在する | 先に error code を追加する |
 | 永続化 | ファイル名、schema、atomic update、rollback、破損時挙動が §9.6 に明記されている | 書き込み処理を実装しない |
