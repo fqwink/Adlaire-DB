@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.54  
+**バージョン：** 0.55  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-12  
 
@@ -2341,7 +2341,12 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
     // Step 2: ログ初期化（tracing + tracing-subscriber JSON）
     init_tracing(&config.log_level);
 
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "Adlaire DB starting");
+    tracing::info!(
+        version  = env!("CARGO_PKG_VERSION"),
+        data_dir = %config.data_dir.display(),
+        port     = config.port,
+        "Adlaire DB starting"
+    );
 
     if config.storage.skip_integrity_check {
         tracing::warn!("--skip-integrity-check is set; startup integrity check disabled");
@@ -2386,8 +2391,8 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
     let admin_listener = tokio::net::TcpListener::bind(("127.0.0.1", config.admin_port)).await?;
 
     tracing::info!(
-        port       = config.port,
-        admin_port = config.admin_port,
+        addr       = format!("0.0.0.0:{}", config.port),
+        admin_addr = format!("127.0.0.1:{}", config.admin_port),
         "Adlaire DB listening"
     );
 
@@ -4596,7 +4601,7 @@ pub fn record_metrics(metrics: &DbMetrics, results: &[StreamResult]) {
 // http/admin/metrics.rs
 
 /// GET /admin/v1/metrics  → プロセス起動からの累積カウンター
-pub async fn get_metrics(
+pub async fn get(
     req: Request<Incoming>,
     state: SharedState,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
