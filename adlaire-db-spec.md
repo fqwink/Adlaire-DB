@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.48  
+**バージョン：** 0.49  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-12  
 
@@ -2270,6 +2270,11 @@ pub struct ServeArgs {
     #[arg(long)] pub replication_write_mode:                   Option<String>,
     #[arg(long)] pub busy_timeout:                             Option<u64>,
     #[arg(long)] pub shutdown_timeout:                         Option<u64>,
+    // Phase 10: レプリケーション設定
+    #[arg(long)] pub role:                                     Option<String>,
+    #[arg(long)] pub primary_port:                             Option<u16>,
+    #[arg(long)] pub primary_url:                              Option<String>,
+    #[arg(long)] pub replication_auth_token:                   Option<String>,
 }
 
 #[derive(Parser)]
@@ -4879,9 +4884,11 @@ fn is_mutating_request(req: &Request<Incoming>) -> bool {
 
 #[derive(serde::Serialize)]
 pub struct HealthResponse {
-    pub status:               &'static str,
-    pub role:                 ServerRole,
-    pub replication_lag_frames: Option<u64>,  // replica のみ
+    pub status:                   &'static str,
+    pub role:                     &'static str,   // "standalone" / "primary" / "replica"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_url:              Option<String>,  // replica のみ
+    pub replication_lag_frames:   Option<u64>,     // replica のみ
 }
 
 pub async fn handle(
@@ -4894,9 +4901,16 @@ pub async fn handle(
         Some(lag) if lag > 1000 => "degraded",
         _ => "ok",
     };
+    let (role_str, primary_url) = match &state.role {
+        ServerRole::Standalone        => ("standalone", None),
+        ServerRole::Primary { .. }    => ("primary",    None),
+        // Phase 10 解除後: ServerRole::Replica { primary_url } =>
+        //     ("replica", Some(primary_url.to_string())),
+    };
     Ok(json_ok(&HealthResponse {
         status,
-        role: state.role.clone(),
+        role: role_str,
+        primary_url,
         replication_lag_frames: lag,
     }))
 }
