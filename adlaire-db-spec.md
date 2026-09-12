@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.69
+**バージョン：** 0.70
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -2150,6 +2150,47 @@ PR は「変更なし」として分類を省略してはならない。仕様�
 | PR description の一時 ID だけで、仕様本文・test・artifact のどこにも残らない | Phase 未完了 |
 
 Phase 完了時は、対象 Phase の API / persistence / error / config / security / compatibility 契約に未カバー行が 0 件でなければならない。`N/A` は、その契約が対象外である理由が §9.2、§9.4、該当 Phase 節、または unsupported 固定表に明記されている場合だけ許可する。
+
+#### 9.1.9 Phase 実装 PR ライフサイクル固定契約
+
+Phase 実装 PR は下表の順序で進める。順序を飛ばした PR は Phase 完了として扱わない。
+
+| Step | Gate | 必須状態 | 失敗時 |
+|------|------|----------|--------|
+| 1 | Ready | §9.11 の Definition of Ready と §9.17 の実装前チェックリストを満たす | 実装開始禁止。仕様修正 PR に戻す |
+| 2 | Contract mapping | §9.1.7 / §9.1.8 の Contract ID、test ID、evidence path を先に割り当てる | 実装開始禁止 |
+| 3 | Implementation | 対象 Phase のみ実装し、対象外機能に成功応答を返さない | Phase 未完了 |
+| 4 | Evidence generation | snapshot、fixture、log、CI output を生成し secret scan を通す | Phase 未完了 |
+| 5 | Regression | 対象 Phase 以前の regression と該当 SDK/Turso/replication/HA/internal tests を通す | Phase 未完了 |
+| 6 | Review | §9.12、§9.1.7、§9.1.8 の traceability と coverage を確認する | Phase 未完了 |
+| 7 | Merge | 未カバー契約、未検証、既知不具合、未生成証跡が 0 件 | merge 不可 |
+
+**順序違反時の扱い：**
+
+| 違反 | 判定 |
+|------|------|
+| 実装後に Contract ID を後付けし、test/evidence へ反映していない | Phase 未完了 |
+| Contract ID はあるが evidence path が存在しない | Phase 未完了 |
+| regression 未完了のまま review/merge へ進む | merge 不可 |
+| 仕様未確定のまま実装を開始した | 実装 PR ではなく仕様修正 PR として扱う |
+| snapshot 差分を実装都合だけで更新した | review failure |
+| `N/A` 理由が仕様本文に存在しない | review failure |
+
+**レビュー自動判定チェック：**
+
+PR review / CI / release-check は最低限、以下を機械的に確認する。自動化されていない場合は Phase 完了不可であり、手動確認だけで代替してはならない。
+
+| Check | 必須判定 |
+|-------|----------|
+| traceability table | PR description に Contract ID / Test ID / Evidence path が存在する |
+| coverage | 対象 Phase の契約 ID に未カバーが 0 件 |
+| N/A validation | `N/A` の理由が仕様本文の対象外・unsupported・該当なしに対応している |
+| artifact existence | snapshot / fixture / log / CI output の path が存在する |
+| secret scan | artifact に JWT、Bearer token、admin/platform/replication/HA token、生 SQL args、backup body が含まれない |
+| regression result | 対象 Phase 以前の regression が全件成功している |
+| zero-bug gate | 既知不具合、未検証、未生成証跡、TODO/FIXME production path が 0 件 |
+
+Phase 完了 PR は、上記 check がすべて成功しなければならない。1 件でも失敗した場合は、その PR 内で修正し、後続のバグ修正 PR に持ち越さない。
 
 ### 9.2 Phase 別完了ゲート
 
