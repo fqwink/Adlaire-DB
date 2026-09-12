@@ -2,7 +2,7 @@ pub mod admin;
 pub mod health;
 pub mod pipeline;
 
-use std::convert::Infallible;
+use std::{convert::Infallible, time::Instant};
 
 use bytes::Bytes;
 use http_body_util::Full;
@@ -18,8 +18,9 @@ pub async fn route(
 ) -> Result<HttpResponse, Infallible> {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
+    let started = Instant::now();
 
-    match (method.as_str(), path.as_str()) {
+    let response = match (method.as_str(), path.as_str()) {
         ("GET", "/v2/health") => health::handle(req, state).await,
         ("POST", "/v2/pipeline") => pipeline::handle(req, state, "default").await,
         ("POST", p) if p.ends_with("/v2/pipeline") => {
@@ -29,13 +30,20 @@ pub async fn route(
             }
         }
         _ => Ok(not_found()),
-    }
+    };
+
+    log_request(method.as_str(), &path, started, &response);
+    response
 }
 
 pub async fn admin_route(
     req: Request<Incoming>,
     state: SharedState,
 ) -> Result<HttpResponse, Infallible> {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let started = Instant::now();
+
     if let Some(expected) = &state.config.admin_auth_token {
         let provided = req
             .headers()
@@ -45,18 +53,19 @@ pub async fn admin_route(
 
         match provided {
             Some(token) if token == expected.as_str() => {}
-            _ => return Ok(json_error(
-                ::http::StatusCode::UNAUTHORIZED,
-                "AUTH_REQUIRED",
-                "unauthorized",
-            )),
+            _ => {
+                let response = Ok(json_error(
+                    ::http::StatusCode::UNAUTHORIZED,
+                    "AUTH_REQUIRED",
+                    "unauthorized",
+                ));
+                log_request(method.as_str(), &path, started, &response);
+                return response;
+            }
         }
     }
 
-    let method = req.method().clone();
-    let path = req.uri().path().to_string();
-
-    match (method.as_str(), path.as_str()) {
+    let response = match (method.as_str(), path.as_str()) {
         ("GET", "/admin/v1/databases") => admin::databases::list(req, state).await,
         ("POST", "/admin/v1/databases") => admin::databases::create(req, state).await,
         ("GET", p) if is_db_path(p) => admin::databases::get(req, state).await,
@@ -73,7 +82,10 @@ pub async fn admin_route(
         ("POST", p) if p.ends_with("/branches") => admin::branches::create(req, state).await,
         ("DELETE", p) if p.contains("/branches/") => admin::branches::delete(req, state).await,
         _ => Ok(not_found()),
-    }
+    };
+
+    log_request(method.as_str(), &path, started, &response);
+    response
 }
 
 fn extract_db_name(path: &str) -> Option<&str> {
@@ -121,4 +133,24 @@ pub fn not_found() -> HttpResponse {
         .status(::http::StatusCode::NOT_FOUND)
         .body(Full::from(Bytes::new()))
         .unwrap_or_else(|_| Response::new(Full::from(Bytes::new())))
+}
+
+fn log_request(
+    method: &str,
+    path: &str,
+    started: Instant,
+    response: &Result<HttpResponse, Infallible>,
+) {
+    let status = response
+        .as_ref()
+        .map(|r| r.status().as_u16())
+        .unwrap_or(::http::StatusCode::INTERNAL_SERVER_ERROR.as_u16());
+    let duration_ms = started.elapsed().as_millis() as u64;
+    tracing::info!(
+        method,
+        path,
+        status,
+        duration_ms,
+        "http request"
+    );
 }

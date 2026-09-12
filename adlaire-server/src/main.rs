@@ -69,6 +69,8 @@ async fn run_serve(args: crate::cli::ServeArgs) -> anyhow::Result<()> {
     let auth = Arc::new(AuthState::new(&config, revoked));
     if !auth.is_auth_enabled() {
         tracing::warn!("JWT auth is disabled — all requests are unauthenticated");
+    } else {
+        tracing::info!("JWT auth is enabled");
     }
 
     // Step 6: DB 全件オープン
