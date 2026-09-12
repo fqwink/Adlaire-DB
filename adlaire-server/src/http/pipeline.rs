@@ -115,6 +115,9 @@ async fn execute_pipeline(
             }
 
             StreamRequest::Sequence { sql } => {
+                if claims.resolve_access(db_name) != AccessLevel::Rw {
+                    return Err(AppError::PermissionDenied);
+                }
                 match db.execute_batch(sql).await {
                     Ok(()) => results.push(StreamResult::Ok {
                         response: StreamResponse::Sequence,
