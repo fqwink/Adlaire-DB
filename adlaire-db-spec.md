@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.51  
+**バージョン：** 0.54  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-12  
 
@@ -385,7 +385,6 @@ POST /v2/pipeline
 | `async-trait` | 0.1 | `SqldAdapter` トレイトの async fn | 1 |
 | `dashmap` | 6 | `Metrics`・`ReplicationState` の並行マップ | 9 |
 | `url` | 2 | `ServerRole::Replica` の `primary_url` 型 | 10 |
-| `crc32fast` | 1 | WAL フレーム CRC32 チェックサム | 12 |
 | `bytes` | 1 | WAL フレームバッファ（`WalFrame::data`）・hyper レスポンスボディ | 1 |
 | `crc32fast` | 1 | WAL フレーム CRC32 チェックサム | 10 |
 | `cc`（推移的ビルド依存） | 1 | `libsql-sys` → `libsql` の推移的依存。`libsql-sys` が SQLite C ソースをコンパイルするために使用。`Cargo.toml` には書かない | 1 |
@@ -1592,13 +1591,16 @@ Step 5: 停止完了
 --port               > config.toml [server] port        (default: 8080)
 --admin-port         > config.toml [server] admin_port  (default: 8081)
 --log-level          > ADLAIRE_LOG_LEVEL (env) > config.toml [server] log_level  (default: info)
---busy-timeout       > config.toml [storage] busy_timeout_ms  (default: 5000)
+--busy-timeout       > config.toml [server] busy_timeout_ms  (default: 5000)
+--admin-auth-token   > ADLAIRE_ADMIN_TOKEN (env) > config.toml [admin] auth_token
+--shutdown-timeout   > config.toml [server] shutdown_timeout  (default: 30)
 
-# Phase 10 レプリケーション設定（CLI のみ・TOML 対応なし）
+# Phase 10 レプリケーション設定
 --role                      standalone（デフォルト）     CLI のみ（TOML 対応なし）
 --primary-port              8082（デフォルト）           CLI のみ（TOML 対応なし）
 --primary-url               必須（--role replica 時のみ）CLI のみ（TOML 対応なし）
 --replication-auth-token    なし（デフォルト）           CLI のみ（TOML 対応なし）
+--replication-write-mode    async（デフォルト）          CLI + config.toml [replication] write_mode
 ```
 
 ---
@@ -2630,8 +2632,8 @@ impl Config {
         };
 
         let admin_auth_token = args.admin_auth_token.clone()
-            .or(adm.auth_token)
-            .or_else(|| std::env::var("ADLAIRE_ADMIN_TOKEN").ok());
+            .or_else(|| std::env::var("ADLAIRE_ADMIN_TOKEN").ok())
+            .or(adm.auth_token);
 
         Ok(Arc::new(Config {
             data_dir:             args.data.clone(),
@@ -4496,6 +4498,8 @@ GET /admin/v1/metrics
 ```json
 {
   "uptime_seconds": 3600,
+  "tokens_total": 5,
+  "tokens_revoked": 1,
   "databases": [
     {
       "name": "mydb",
@@ -4506,9 +4510,7 @@ GET /admin/v1/metrics
       "rows_read_total": 8000,
       "rows_written_total": 200
     }
-  ],
-  "tokens_total": 5,
-  "tokens_revoked": 1
+  ]
 }
 ```
 
@@ -4622,9 +4624,9 @@ pub async fn get_metrics(
     }).collect();
     Ok(json_ok(&serde_json::json!({
         "uptime_seconds":  uptime,
-        "databases":       databases,
         "tokens_total":    state.metrics.tokens_total.load(Relaxed),
         "tokens_revoked":  state.metrics.tokens_revoked.load(Relaxed),
+        "databases":       databases,
     })))
 }
 ```
@@ -5451,7 +5453,7 @@ DB 名・ファイルパス生成時に以下を必ず適用する：
 ### 12.3 出力先
 
 - デフォルト：stdout（コンテナ・systemd との親和性）
-- `--log-file <PATH>` 指定時：ファイルへ書き出し（ローテーションは外部ツール任せ）
+- `--log-file <PATH>` 指定時：ファイルへ書き出し（ローテーションは外部ツール任せ）（未実装）
 - stdout とファイルの同時出力は非サポート（Phase 1 時点）
 
 ### 12.4 起動・停止ログ例
