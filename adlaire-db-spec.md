@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.56
+**バージョン：** 0.57
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -1135,6 +1135,38 @@ Phase 7 以降の `/admin/v1/*` は、個別 endpoint で明記がない限り�
 | error body | 必ず `{"error": "...", "code": "..."}`。追加 field は返さない |
 | secret | admin token、JWT、replication token、HA token、extension path の実 OS 絶対パスは response/log に出さない |
 
+#### Turso Platform API 互換面（Phase 8）
+
+Phase 8 では、Adlaire 独自の `/admin/v1/*` に加えて Turso Cloud Platform API 互換の `/v1/*` を提供する。既存 `/admin/v1/*` は Adlaire 内部管理 API として維持し、Turso 互換を名乗る SDK/CLI/API クライアント向けには `/v1/*` を正とする。
+
+| 項目 | `/admin/v1/*` | `/v1/*` Turso 互換 |
+|------|---------------|--------------------|
+| 目的 | Adlaire 自己ホスト管理 | Turso Platform API 互換 |
+| 認証 | Admin token | Platform token（実体は Admin token と同じ Bearer 完全一致） |
+| DB 作成成功 | 201 `DbInfo` | 200 `{"database": TursoDatabaseInfo}` |
+| Group 作成成功 | 201 `GroupInfo` | 200 `{"group": TursoGroupInfo}` |
+| Location 一覧 | 200 `{"locations":[LocationInfo]}` | 200 `{"locations": {"<code>":"<display_name>"}}` |
+| DB token 作成 | `/admin/v1/tokens` | `/v1/organizations/{organizationSlug}/databases/{databaseName}/auth/tokens` |
+| unknown field | `INVALID_REQUEST` | Turso 互換 endpoint でも `INVALID_REQUEST`。互換のため黙って無視しない |
+| error body | Adlaire error body | Adlaire error body。HTTP status は Turso 互換を優先し、`code` は §7.3 を使う |
+
+`/v1/*` は Turso Cloud の URL と完全同一 host である必要はないが、path、method、query、主要 response wrapper、field casing は Turso Cloud 互換にする。自己ホストで再現できない field は null や省略にせず、下表の固定値を返す。
+
+| Turso field | Adlaire value |
+|-------------|---------------|
+| database `Hostname` | `{databaseName}-{organizationSlug}.adlaire.local` |
+| database `DbId` | Adlaire DB UUID |
+| database `Name` | DB 名 |
+| database `regions` | group の `locations` |
+| database `primaryRegion` | group の `primary` |
+| database `block_reads` | `false` |
+| database `block_writes` | quota 超過または DB disabled 時のみ `true`。Phase 8 では quota 超過時のみ `true` |
+| group `version` | `adlaire-{spec version}`。例: `adlaire-0.57` |
+| group `uuid` | Adlaire group id |
+| group `locations` | group location の配列。Phase 8 では 1 要素 |
+| group `primary` | group の primary location |
+| group `delete_protection` | `false` |
+
 #### DB 管理（Phase 7）
 
 ```
@@ -1190,9 +1222,12 @@ DELETE /admin/v1/databases/{name}        DB 削除
 
 DB 名バリデーション規則：
 
-- 正規表現: `^[a-zA-Z0-9_-]{1,127}$`
-- パストラバーサル文字（`/` `.` `..`）は不可
-- 予約語：`meta`・`admin` は使用不可
+| Phase | 作成時 validation | 読み取り/接続時 validation |
+|-------|-------------------|----------------------------|
+| Phase 1〜7 | `^[a-zA-Z0-9_-]{1,127}$` | 同左 |
+| Phase 8 以降 | Turso 互換名 `^[a-z0-9-]{1,64}$` | 既存 Phase 1〜7 DB は legacy 名として読み取り・接続・削除を許可する |
+
+Phase 8 以降の新規 DB 作成では、大文字、underscore、64 文字超過を `INVALID_DB_NAME` とする。既存 metadata に含まれる legacy 名は migration 時に rename せず、`legacy_name:true` を付与して後方互換として維持する。パストラバーサル文字（`/` `.` `..`）と予約語 `meta`・`admin` は全 Phase で不可とする。
 
 #### トークン管理（Phase 7）
 
@@ -1707,7 +1742,7 @@ Step 5: 停止完了
 | **Phase 5** | ログ・統合テスト | TC-4, TC-5 (2件) | T-10〜T-11 (2件) |
 | **Phase 6** | マルチ DB ルーター・DB マネージャ | — | T2-1〜T2-2 (2件) |
 | **Phase 7** | 管理 API・トークン CRUD・DB スコープ JWT | TC-2-1〜TC-2-6（TC-2-5b 含む）(7件) | T2-3〜T2-6 (4件) |
-| **Phase 8** | Turso Cloud 互換管理モデル | TC-8-1〜TC-8-8 (8件) | T8-1〜T8-7 (7件) |
+| **Phase 8** | Turso Cloud 互換管理モデル | TC-8-1〜TC-8-9 (9件) | T8-1〜T8-9 (9件) |
 | **Phase 9** | WebSocket（hrana-ws v3） | TC-3-1〜TC-3-4 (4件) | T3-1〜T3-5 (5件) |
 | **Phase 10** | ATTACH DB・メトリクス | TC-3-5, TC-3-6 (2件) | T3-6〜T3-8 (3件) |
 | **Phase 11** | レプリケーション基盤（WAL ストリーム・スナップショット） | — | T4-1〜T4-3 (3件) |
@@ -1796,6 +1831,8 @@ Step 5: 停止完了
 | Concurrency | 同一 resource への同時 create/delete/update で二重作成、lost update、破損 metadata が起きない |
 | Regression | 当該 Phase より前の Phase の TC がすべて通る |
 | Compatibility | Phase 5 以降は TypeScript `@libsql/client` の CRUD regression、Phase 9 以降は WebSocket regression、Phase 12 以降は replication regression が通る |
+| Turso Platform compatibility | Phase 8 以降は `/v1/*` の response wrapper、field casing、status code、query mapping が Turso 互換 snapshot と一致する |
+| Legacy fallback | Phase 8 以降は Phase 1〜7 で作られた legacy DB/token metadata が読み取り・接続・削除でき、新規作成 validation と混同されない |
 
 **失敗時の扱い：**
 
@@ -1817,7 +1854,7 @@ Step 5: 停止完了
 | Phase 5 | 構造化 JSON ログ、HTTP request ログ、Phase 1〜5 の統合テスト、TypeScript SDK 互換テスト、再起動後の永続化テストが通る | マルチ DB、WebSocket、replication、backup |
 | Phase 6 | `/{db-name}/v2/pipeline` が動き、DB 名バリデーション、DbManager の create/list/get/delete 内部機構、databases.json のアトミック更新が動く。`/v2/pipeline` は default fallback のまま維持される | 管理 API route の完全実装、DB スコープ JWT、backup |
 | Phase 7 | 管理 API の DB CRUD、token CRUD、DB スコープ JWT、管理 API 認証、revoke 即時反映が動く。全管理 API は §6.4 の status/body に一致する | WebSocket、ATTACH、replication、backup |
-| Phase 8 | Turso Cloud 互換管理モデルとして location、organization/group、quota/usage の API、metadata、migration、権限、quota 判定、エラーが Phase 8 詳細節の契約通り実装される。既存 Phase 1〜7 の API と metadata migration は後方互換を維持する | WebSocket、ATTACH、replication、backup、branch、SQLite 拡張、内製化 |
+| Phase 8 | Turso Cloud 互換管理モデルとして location、organization/group、quota/usage の API、metadata、migration、権限、quota 判定、エラー、`/v1/*` Platform API 互換 response wrapper が Phase 8 詳細節の契約通り実装される。既存 Phase 1〜7 の API と metadata migration は後方互換を維持する | WebSocket、ATTACH、replication、backup、branch、SQLite 拡張、内製化 |
 | Phase 9 | hrana-ws v3 の hello/open_stream/execute/sequence/close_stream/store_sql/close_sql が動き、同一 stream 内の interactive transaction が同一接続で保持される | ATTACH、metrics、replication、backup |
 | Phase 10 | 管理下 DB のみを対象に ATTACH が動き、任意パス ATTACH を拒否する。metrics API は counters/gauges を返し、HTTP/DB/WebSocket 経路から値が更新される | WAL replication、backup、branch |
 | Phase 11 | primary role で replication API（log/snapshot/heartbeat/status）が起動し、WAL frame 番号、CRC32、snapshot header が仕様通り返る。replica 受信・適用はまだ完了条件に含めない | replica 同期完了、書き込みリダイレクト、WAL archive retention |
@@ -1975,6 +2012,12 @@ API を実装する場合は、各 endpoint について必ず次を仕様本文
 | `GET /admin/v1/quotas` | 8 | Admin token | query `organization?`, `group?`, `database?` | 200 `{quotas:[...]}` | 404 `ORG_NOT_FOUND`/`GROUP_NOT_FOUND`/`DB_NOT_FOUND` | なし | Yes |
 | `PUT /admin/v1/quotas/{scope}` | 8 | Admin token | `{storage_bytes, rows?, write_ops_per_minute?}` | 200 `QuotaInfo` | 400 `INVALID_REQUEST`, 404 `ORG_NOT_FOUND`/`GROUP_NOT_FOUND`/`DB_NOT_FOUND` | `quotas.json` | Yes |
 | `GET /admin/v1/usage` | 8 | Admin token | query `organization?`, `group?`, `database?` | 200 `{usage:[...]}` | 404 `ORG_NOT_FOUND`/`GROUP_NOT_FOUND`/`DB_NOT_FOUND`, 503 `USAGE_UNAVAILABLE` | `usage.json` snapshot | Yes |
+| `GET /v1/locations` | 8 | Platform token | body なし | 200 `{"locations":{code:name}}` | 401 `AUTH_REQUIRED` | なし | Yes |
+| `GET /v1/organizations/{organizationSlug}/groups` | 8 | Platform token | body なし | 200 `{"groups":[TursoGroupInfo]}` | 404 `ORG_NOT_FOUND` | なし | Yes |
+| `POST /v1/organizations/{organizationSlug}/groups` | 8 | Platform token | `{name, location}` | 200 `{"group":TursoGroupInfo}` | 400 `INVALID_REQUEST`, 404 `ORG_NOT_FOUND`/`LOCATION_NOT_FOUND`, 409 `GROUP_ALREADY_EXISTS` | `groups.json` | No |
+| `GET /v1/organizations/{organizationSlug}/databases` | 8 | Platform token | query `group?`, `schema?`, `parent?` | 200 `{"databases":[TursoDatabaseInfo]}` | 404 `ORG_NOT_FOUND` | なし | Yes |
+| `POST /v1/organizations/{organizationSlug}/databases` | 8 | Platform token | `{name, group, size_limit?}` | 200 `{"database":TursoDatabaseInfo}` | 400 `INVALID_DB_NAME`/`INVALID_REQUEST`, 404 `GROUP_NOT_FOUND`, 409 `DB_ALREADY_EXISTS` | `databases.json`, DB directory | No |
+| `POST /v1/organizations/{organizationSlug}/databases/{databaseName}/auth/tokens` | 8 | Platform token | query `expiration?`, `authorization?`; body `{permissions?}` | 200 `{"jwt":string}` | 400 `INVALID_REQUEST`, 404 `DB_NOT_FOUND` | `tokens.json` | No |
 | `GET /admin/v1/metrics` | 10 | Admin token | body なし | 200 metrics JSON | 401 `AUTH_REQUIRED` | なし | Yes |
 | `GET /replication/v1/log?from_frame=N` | 11 | replication token | query `from_frame` | 200 SSE frames | 400 `INVALID_REQUEST`, 401 `AUTH_INVALID`, 404 `FRAME_NOT_FOUND` | なし | 接続単位 |
 | `GET /replication/v1/snapshot` | 11 | replication token | query/body なし | 200 octet-stream + replication headers | auth 系, 500 | なし | Yes |
@@ -2082,7 +2125,7 @@ API を実装する場合は、各 endpoint について必ず次を仕様本文
 | 5 | TS SDK CRUD, logs | n/a | auth cases from Phase 4 | TC-5 restart | graceful shutdown timeout | Phase 1〜4 |
 | 6 | multi DB route isolation | invalid/reserved DB name | global JWT applies | databases.json survives restart | DB create/delete partial failure recovery | Phase 1〜5 |
 | 7 | admin DB/token CRUD | malformed admin body | admin token, DB scoped JWT | tokens/databases survive restart | revoke/write atomicity | Phase 1〜6 |
-| 8 | Turso Cloud 互換 management model | malformed location/org/group/quota body | admin auth, ownership/scope permission | metadata migration survives restart | partial metadata migration rollback | Phase 1〜7 |
+| 8 | Turso Cloud 互換 management model と `/v1/*` snapshot | malformed location/org/group/quota/Turso body | admin/platform auth, ownership/scope permission | metadata migration and legacy fallback survive restart | partial metadata migration rollback | Phase 1〜7 |
 | 9 | ws hello/open/execute/tx | invalid frame/order/stream | hello auth, ro-write | committed tx survives restart | disconnect rolls back open tx | Phase 1〜8 |
 | 10 | ATTACH managed DB, metrics | arbitrary path ATTACH | admin metrics auth | metrics reset acceptable | n/a | Phase 1〜9 |
 | 11 | primary replication APIs | bad from_frame/body | replication token | snapshot consistent | log stream disconnect/reconnect | Phase 1〜10 |
@@ -2132,7 +2175,7 @@ Phase 16〜19 は本節の固定タスクを完了条件とする。追加の仕
 | 5 | ログ field、秘匿対象、統合テスト環境、SDK version が決まっている | Phase 1〜5 TC と SDK 互換、永続化、ログ形式が通る |
 | 6 | DB 名 validation、path routing、databases.json migration 方針が決まっている | multi DB routing、分離、再起動復元、invalid name tests が通る |
 | 7 | admin API schema、admin auth、token CRUD、DB scope claim が決まっている | DB/token CRUD、DB scoped auth、revoke immediate tests が通る |
-| 8 | Turso Cloud 互換の location、organization/group、quota/usage の API、metadata、auth、migration、error が決まっている | 互換管理モデル、metadata migration、quota/usage、権限、Phase 1〜7 regression、SDK 互換 tests が通る |
+| 8 | Turso Cloud 互換の location、organization/group、quota/usage、`/v1/*` Platform API、metadata、auth、migration、error が決まっている | 互換管理モデル、metadata migration、quota/usage、権限、Turso snapshot、legacy fallback、Phase 1〜7 regression、SDK 互換 tests が通る |
 | 9 | hrana-ws message schema、stream lifecycle、transaction lifecycle が決まっている | WebSocket handshake/execute/tx/store_sql tests が通る |
 | 10 | ATTACH rewrite policy、metrics schema、counter 更新点が決まっている | managed ATTACH、path rejection、metrics auth/counter tests が通る |
 | 11 | primary role、replication token、frame format、snapshot headers が決まっている | replication API contract、SSE/snapshot/heartbeat/status tests が通る |
@@ -4839,6 +4882,8 @@ Phase 8 で公開する API は §9.5 の Phase 8 行を正とする。すべて
 
 `PUT /admin/v1/quotas/{scope}` の `{scope}` は URL encode 済みの `organization:{id}`、`group:{id}`、`database:{name}` のいずれかとする。scope type が不明な場合は `INVALID_REQUEST`、scope が存在しない場合は対応する `ORG_NOT_FOUND`、`GROUP_NOT_FOUND`、`DB_NOT_FOUND` を返す。
 
+Phase 8 の `/v1/*` Turso 互換 API は、公式 Turso Platform API の主要 path、status、response wrapper、field casing を優先する。`/admin/v1/*` との差分は互換差分として扱い、片方の実装都合で他方の契約を変えてはならない。
+
 **Phase 8 API schema 固定表：**
 
 | API | Request | Success response | Validation |
@@ -4904,6 +4949,66 @@ Phase 8 で公開する API は §9.5 の Phase 8 行を正とする。すべて
 ```
 
 上記 DTO の field はすべて必須である。`rows` と `write_ops_per_minute` だけ `null` 可とする。`id` は実装内で `org_`、`grp_`、`loc_` prefix を付けた一意文字列にする。既存 Turso Cloud の slug 互換を優先するため、API path では `id` と `slug/name` の両方を解決できるようにする。
+
+**Phase 8 Turso 互換 DTO schema：**
+
+```json
+{
+  "TursoDatabaseInfo": {
+    "DbId": "550e8400-e29b-41d4-a716-446655440000",
+    "Hostname": "my-db-default.adlaire.local",
+    "Name": "my-db",
+    "block_reads": false,
+    "block_writes": false,
+    "regions": ["default"],
+    "primaryRegion": "default",
+    "group": "default",
+    "delete_protection": false,
+    "parent": null
+  },
+  "TursoGroupInfo": {
+    "name": "default",
+    "version": "adlaire-0.57",
+    "uuid": "grp_default",
+    "locations": ["default"],
+    "primary": "default",
+    "delete_protection": false
+  }
+}
+```
+
+| Turso API | Status | Response wrapper | Field casing rule |
+|-----------|--------|------------------|-------------------|
+| `GET /v1/locations` | 200 | `{"locations":{...}}` | location code は object key、display name は string value |
+| `GET /v1/organizations/{org}/groups` | 200 | `{"groups":[...]}` | group fields は Turso casing |
+| `POST /v1/organizations/{org}/groups` | 200 | `{"group":{...}}` | 201 を返さない |
+| `GET /v1/organizations/{org}/databases` | 200 | `{"databases":[...]}` | `DbId`、`Hostname`、`Name` は大文字始まりを維持 |
+| `POST /v1/organizations/{org}/databases` | 200 | `{"database":{...}}` | 201 を返さない |
+| `POST /v1/organizations/{org}/databases/{db}/auth/tokens` | 200 | `{"jwt":"..."}` | `token` ではなく `jwt` |
+
+`/v1/*` では request body の `name` validation を Turso 互換 DB 名規則 `^[a-z0-9-]{1,64}$` に固定する。`size_limit` は bytes 数値文字列または `kb`/`mb`/`gb` suffix を受け付け、quota の `storage_bytes` に変換する。`seed`、`remote_encryption`、database upload、CSV import、dump import は Phase 8 対象外であり、指定された場合は `400 INVALID_REQUEST` を返す。
+
+**Turso database token 互換：**
+
+`POST /v1/organizations/{organizationSlug}/databases/{databaseName}/auth/tokens` は Turso 互換の query を受け付ける。
+
+| Query/body | Allowed | Adlaire mapping |
+|------------|---------|-----------------|
+| `expiration` | `never` または `<number><s|m|h|d|w>` の連結。例: `2w1d30m` | JWT `exp`。`never` は `exp` なし |
+| `authorization` | `full-access` / `read-only` | `full-access` → `a:"rw"`、`read-only` → `a:"ro"` |
+| body `permissions` | object 可。ただし Phase 8 では table/action permission は実装しない | 空 object または省略のみ許可。非空は `INVALID_REQUEST` |
+
+response は必ず `{"jwt":"<token>"}` とし、`id`、`access`、`expires_at` は返さない。発行した token metadata は既存 `tokens.json` に保存し、`source:"turso-platform-api"`、`database:"{databaseName}"`、`organization_scope:"{organizationSlug}"` を付与する。
+
+**Turso 互換差分固定表：**
+
+| Turso Cloud 機能 | Phase 8 Adlaire の扱い | 理由 |
+|------------------|-------------------------|------|
+| database upload / seed | `INVALID_REQUEST` | Phase 14 restore/PITR と衝突するため Phase 8 対象外 |
+| encrypted database | `INVALID_REQUEST` | encryption key/cipher 管理は本仕様の security boundary 外 |
+| branch parent filter | query は受け付けるが Phase 8 では空配列。Phase 15 以降に branch metadata と接続する | branch は Phase 15 |
+| group delete protection | 常に `false` | 自己ホストでは billing/plan lock を持たない |
+| multiple replica regions per group | Phase 8 は 1 primary location のみ | replication/HA は Phase 11〜18 |
 
 **既存 API の Phase 8 拡張：**
 
@@ -5027,6 +5132,15 @@ TC-8-7: metadata migration
 TC-8-8: atomicity / rollback
   （a）organizations/groups/locations/quotas の更新中に失敗を注入
   （b）起動成功扱いにせず、partial metadata を成功応答しない
+
+TC-8-9: Turso Platform API 互換 snapshot
+  （a）GET /v1/locations → 200 {"locations": {"default":"Self Hosted Default"}}
+  （b）POST /v1/organizations/default/groups {name:"app",location:"default"} → 200 {"group":{name,version,uuid,locations,primary,delete_protection}}
+  （c）POST /v1/organizations/default/databases {name:"my-db",group:"app"} → 200 {"database":{DbId,Hostname,Name,...}}
+  （d）GET /v1/organizations/default/databases?group=app → 200、Turso field casing を維持
+  （e）POST /v1/organizations/default/databases/my-db/auth/tokens?expiration=2w&authorization=read-only → 200 {"jwt":"..."}
+  （f）uppercase / underscore DB 名 → 400 INVALID_DB_NAME
+  （g）Phase 7 legacy DB 名は接続・削除可能だが、Phase 8 新規作成では拒否
 ```
 
 **Phase 8 実装タスク：**
@@ -5038,7 +5152,9 @@ T8-3: organization/group/location CRUD API を実装
 T8-4: quota/usage API と scope parser（organization:{id} / group:{id} / database:{name}）を実装
 T8-5: DB/token API に organization/group/location/quota scope を統合
 T8-6: JWT org/grp claim と dbs claim の権限優先順位を実装
-T8-7: quota 判定を write/restore/replication apply/branch create に接続し、TC-8-1〜TC-8-8 を通す
+T8-7: quota 判定を write/restore/replication apply/branch create に接続する
+T8-8: Turso Platform API 互換 `/v1/*` route と response wrapper を実装
+T8-9: TC-8-1〜TC-8-9 を通す
 ```
 
 
