@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.44  
+**バージョン：** 0.45  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-12  
 
@@ -577,7 +577,7 @@ OPTIONS:
                          秘密鍵をファイルから読み込む
   --admin-auth-token <TOKEN>
                          管理 API 固定認証トークン（未指定時は認証無効）。環境変数 ADLAIRE_ADMIN_TOKEN も使用可
-  --log-level <LEVEL>    ログレベル: error / warn / info / debug（デフォルト: info）
+  --log-level <LEVEL>    ログレベル: error / warn / info / debug / trace（デフォルト: info）
   --skip-integrity-check 起動時の PRAGMA integrity_check をスキップ（非推奨。WARN ログ出力）
   --replication-write-mode <MODE>
                          レプリケーション書き込みモード: async / sync（デフォルト: async）
@@ -5016,7 +5016,6 @@ impl Manifest {
         let json = serde_json::to_vec_pretty(self)?;
         {
             let mut f = tokio::fs::File::create(&tmp).await?;
-            use tokio::io::AsyncWriteExt;
             f.write_all(&json).await?;
             f.sync_all().await?;
         }
