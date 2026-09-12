@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.47  
+**バージョン：** 0.48  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-12  
 
@@ -579,6 +579,11 @@ OPTIONS:
                          管理 API 固定認証トークン（未指定時は認証無効）。環境変数 ADLAIRE_ADMIN_TOKEN も使用可
   --log-level <LEVEL>    ログレベル: error / warn / info / debug / trace（デフォルト: info）。環境変数 ADLAIRE_LOG_LEVEL も使用可
   --skip-integrity-check 起動時の PRAGMA integrity_check をスキップ（非推奨。WARN ログ出力）
+  --role <ROLE>          サーバーロール: standalone（デフォルト）/ primary / replica
+  --primary-port <PORT>  プライマリが WAL ストリームを公開するポート（デフォルト: 8082）
+  --primary-url <URL>    レプリカが接続するプライマリの URL（--role replica 時に必須）
+  --replication-auth-token <TOKEN>
+                         プライマリ・レプリカ間の認証トークン
   --replication-write-mode <MODE>
                          レプリケーション書き込みモード: async / sync（デフォルト: async）
   --busy-timeout <MS>    WAL ロック待機タイムアウト（ミリ秒、デフォルト: 5000）
@@ -2019,7 +2024,7 @@ impl AppError {
             Self::RestoreIntegrityFailed=> (StatusCode::CONFLICT,                "RESTORE_INTEGRITY_FAILED"),
             Self::RestoreFrameCorrupt   => (StatusCode::CONFLICT,                "RESTORE_FRAME_CORRUPT"),
             Self::AuthDisabled          => (StatusCode::UNAUTHORIZED,            "AUTH_DISABLED"),
-            Self::ConfigError(_)        => (StatusCode::INTERNAL_SERVER_ERROR,   "CONFIG_ERROR"),
+            Self::ConfigError(_)        => (StatusCode::INTERNAL_SERVER_ERROR,   "INTERNAL_ERROR"),
             Self::Sqld(_)              => (StatusCode::INTERNAL_SERVER_ERROR,   "INTERNAL_ERROR"),
             Self::Internal(_)           => (StatusCode::INTERNAL_SERVER_ERROR,   "INTERNAL_ERROR"),
         };
@@ -5000,8 +5005,12 @@ pub async fn archive_frames(
     manifest.save_atomic(&manifest_path).await?;
     Ok(())
 }
+```
 
-/// manifest.json のロード・アトミック保存
+```rust
+// wal/manifest.rs
+use tokio::io::AsyncWriteExt;
+
 impl Manifest {
     /// manifest.json を読み込む。ファイルが存在しない場合は Err を返す（呼び出し側で unwrap_or_default）
     pub async fn load(path: &std::path::Path) -> anyhow::Result<Self> {
