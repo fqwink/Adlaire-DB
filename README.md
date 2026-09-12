@@ -72,7 +72,7 @@ const result = await db.execute("SELECT 1");
 - JWT 認証は未実装（`--auth-jwt-secret` を指定すると起動拒否）
 - 管理 API（`/admin/v1/...`）はすべて 501 を返す
 - "default" データベースのみ利用可能（マルチ DB は Phase 6 以降）
-- WebSocket（hrana-ws v3）は未対応
+- WebSocket（hrana-ws v3）は未対応（`GET /v3/baton` は Phase 8 で実装、現在 501 を返す）
 
 ## 仕様書
 

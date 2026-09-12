@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.42  
+**バージョン：** 0.43  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-12  
 
@@ -4175,6 +4175,43 @@ TC-3-4: JWT 認証（WebSocket）
 
 
 #### 実装詳細
+
+#### 14.20 ws モジュールスタブ（Phase 3〜7）
+
+Phase 3〜7 の間、`route()` が参照する `ws::handle()` / `ws::handle_db()` はスタブとして実装する。Phase 8 で WebSocket upgrade に差し替える。
+
+```rust
+// ws/mod.rs  — Phase 3〜7 スタブ
+
+use hyper::{Request, Response, body::Incoming};
+use http_body_util::Full;
+use bytes::Bytes;
+use std::convert::Infallible;
+use crate::state::SharedState;
+
+/// hrana-ws v3 WebSocket ハンドラ（シングル DB）。Phase 8 で実装。
+pub async fn handle(
+    _req: Request<Incoming>,
+    _state: SharedState,
+) -> Result<Response<Full<Bytes>>, Infallible> {
+    Ok(Response::builder()
+        .status(http::StatusCode::NOT_IMPLEMENTED)
+        .body(Full::default())
+        .unwrap())
+}
+
+/// hrana-ws v3 WebSocket ハンドラ（マルチ DB）。Phase 8 で実装。
+pub async fn handle_db(
+    _req: Request<Incoming>,
+    _state: SharedState,
+    _db_name: &str,
+) -> Result<Response<Full<Bytes>>, Infallible> {
+    Ok(Response::builder()
+        .status(http::StatusCode::NOT_IMPLEMENTED)
+        .body(Full::default())
+        .unwrap())
+}
+```
 
 #### 14.9 WebSocket セッション管理（Phase 8）
 
