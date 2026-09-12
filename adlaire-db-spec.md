@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.59
+**バージョン：** 0.60
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -1165,7 +1165,7 @@ Phase 8 では、Adlaire 独自の `/admin/v1/*` に加えて Turso Cloud Platfo
 | database `primaryRegion` | group の `primary` |
 | database `block_reads` | `false` |
 | database `block_writes` | quota 超過または DB disabled 時のみ `true`。Phase 8 では quota 超過時のみ `true` |
-| group `version` | `adlaire-{spec version}`。例: `adlaire-0.59` |
+| group `version` | `adlaire-{spec version}`。例: `adlaire-0.60` |
 | group `uuid` | Adlaire group id |
 | group `locations` | group location の配列。Phase 8 では 1 要素 |
 | group `primary` | group の primary location |
@@ -1859,6 +1859,65 @@ Step 5: 停止完了
 - flaky test は `retry` で隠さず、原因を修正してから完了扱いにする
 - 外部環境依存で自動化できない検証は、手順、期待値、実行ログ保存先を仕様書または PR description に固定する
 
+#### 9.1.2 全 Phase 共通実装固定契約
+
+本節は Phase 1〜19 の全実装に適用する。個別 Phase 節がより厳しい条件を定義する場合は個別 Phase 節を優先する。個別 Phase 節が沈黙している場合は下表を正とする。
+
+| 項目 | 固定契約 |
+|------|----------|
+| JSON object | request body が JSON API の場合、body は object 必須。array/scalar/null は `400 INVALID_REQUEST` |
+| unknown field | 管理 API、Turso Platform API、HA、extension、backup/restore/branch API では拒否。hrana protocol body は hrana 仕様に従う |
+| field 省略 | schema で `?` が付いた field だけ省略可。明記なし field は必須 |
+| `null` | schema で `null 可` と明記された field だけ許可。省略可能 field に `null` を送っても省略扱いにしない |
+| 空文字 | token、name、id、path parameter、query value の空文字は禁止。明記された free-form text field だけ許可 |
+| 空配列 | schema で空配列可と明記された field だけ許可。filter 配列、scope 配列、batch 配列は空を `INVALID_REQUEST` とする |
+| query | unknown key、duplicate key、percent decode 不能、型変換不能は `INVALID_REQUEST` |
+| pagination | `limit` は 1〜500。未指定は 100。`cursor` は base64url 文字列とし、decode 不能・期限切れ・対象 resource 不一致は `INVALID_REQUEST` |
+| timestamp | response と metadata は RFC3339 UTC 秒精度。比較用 snapshot では placeholder 正規化。request の未来 timestamp は endpoint が許可しない限り `INVALID_REQUEST` |
+| UUID/id | 外部互換で UUID が必要な field は UUID v4 文字列。内部 prefix id は `^[a-z]+_[a-zA-Z0-9_-]{1,80}$` |
+| Content-Type | JSON body は `application/json` 必須。`charset=utf-8` は許可。octet-stream endpoint は `application/octet-stream` 必須 |
+| Accept | 未指定、`*/*`、`application/json` は許可。その他を厳密拒否する場合は endpoint 節に明記する |
+| response body | 204 は body なし。JSON response は object/array の最上位型を schema に固定し、成功時に error field を混在させない |
+| error body | HTTP API の error は `{"error": "...", "code": "..."}` のみ。追加 debug field は返さない |
+| idempotency | GET は副作用禁止。DELETE は表に明記された挙動に従う。POST は idempotency key を仕様化していない限り非冪等 |
+| concurrency | 同一 resource の create/update/delete は resource 単位 lock を取る。lost update と二重作成は禁止 |
+| atomic write | tmp file 書き込み、file fsync、rename、parent directory fsync の順を必須とする |
+| multi-file commit | 複数 file 更新は prepare、fsync、rename、commit marker の順で行う。途中失敗時は旧状態または明示 rollback 状態だけを起動可能にする |
+| startup corruption | 必須 metadata の JSON parse 失敗、schema 違反、unique constraint 違反は起動失敗。空初期値で上書きしない |
+| cleanup | temp/backup/orphan file の cleanup は起動成功後に WARN を出して行う。cleanup 失敗は元データを破壊しない限り起動失敗にしない |
+| logging | request body、SQL args、JWT、admin/platform/replication/HA token、backup binary、extension 絶対 path は出力禁止 |
+| test artifact | snapshot は動的値を正規化し、status/header subset/body を含める。生成場所は Phase 節で固定する |
+
+**状態遷移固定契約：**
+
+resource の状態を持つ Phase 9 以降の機能は、以下の状態名を使う。未定義状態を追加する場合は、先に本表へ追記する。
+
+| Resource | 状態 | 許可遷移 | 禁止 |
+|----------|------|----------|------|
+| WebSocket session | `new` → `hello_ok` → `closing` → `closed` | `hello_ok` 後だけ request 処理可 | `new` で SQL 実行、`closed` から復帰 |
+| WebSocket stream | `open` → `tx_active` → `open` → `closed` | BEGIN で `tx_active`、COMMIT/ROLLBACK で `open` | close 後 execute、接続 close 後 tx 放置 |
+| replication frame | `generated` → `served` → `acked` → `archived` | frame_no は単調増加 | checksum 未検証 ack、番号巻き戻り |
+| restore job | `prepared` → `verifying` → `committed` または `rolled_back` | committed 前は元 DB を保持 | 元 DB 直接上書き、rollback 不能 |
+| branch | `creating` → `active` → `deleting` → `deleted` | active だけ pipeline 接続可 | metadata 先行 active、削除済み接続 |
+| extension | `registered` → `loaded` → `disabled` または `deleted` | sha256 検証後のみ loaded | 未検証 load、SQL から直接 load |
+| HA node | `standalone` / `replica` / `candidate` / `primary` | candidate から primary は operator promote 必須 | 自動 primary 昇格、古い term 採用 |
+| internal adapter | `disabled` → `shadow` → `active` → `rollback` | shadow で互換 snapshot 通過後だけ active | API/metadata 差分を伴う active |
+
+**ゼロバグ横断テスト：**
+
+各 Phase 実装 PR は既存 TC に加えて、該当する横断テストを実施する。
+
+| ID | 対象 Phase | 検証内容 |
+|----|------------|----------|
+| ZB-1 | all | unknown/null/empty/duplicate query/body validation が固定契約通り |
+| ZB-2 | 2+ | metadata atomic write 失敗注入で旧状態または rollback 状態に戻る |
+| ZB-3 | 3+ | error body が `error` と `code` だけで、secret/debug field を含まない |
+| ZB-4 | 7+ | 同一 resource の concurrent create/delete/update で unique constraint と metadata 整合性が壊れない |
+| ZB-5 | 8+ | Turso snapshot が dynamic placeholder 正規化後に一致する |
+| ZB-6 | 9+ | connection/session/job の途中切断で未完了 write が成功扱いにならない |
+| ZB-7 | 11+ | frame/checksum/manifest の不整合を検出し、silent success しない |
+| ZB-8 | 14+ | restore/branch/adapter rollback が再起動後も整合する |
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -1996,6 +2055,35 @@ API を実装する場合は、各 endpoint について必ず次を仕様本文
 - Phase 18 は HA と failover のみ。multi-primary write は対象外
 - Phase 19 は内部実装差し替えのみ。wire format、admin API、metadata schema、JWT claim を変更してはならない
 
+### 9.4.1 Phase 9〜19 実装精度固定表
+
+Phase 9 以降は状態、再試行、rollback、snapshot の不足がバグ修正 PR を生むため、下表を各 Phase の実装契約に追加する。ここに書かれた項目は設計メモではなく完了条件である。
+
+| Phase | 固定する境界 | 成功条件 | 失敗時の固定挙動 | 必須 snapshot / artifact |
+|-------|--------------|----------|------------------|--------------------------|
+| 9 WebSocket | upgrade、hello、stream、transaction、store_sql | hello 後のみ request を処理し、stream_id ごとに connection と tx 状態を分離する | hello 前 request は protocol error、接続 close 時の open tx は rollback、unknown message は response_error | `tests/snapshots/phase9_ws/messages.json` |
+| 10 ATTACH/metrics | ATTACH SQL 解決、DB alias、counter 更新点 | 管理下 DB だけ attach し、metrics は HTTP/WS/pipeline の実行後に増加する | 任意 path、未登録 DB、不正 alias は成功させない。metrics 取得失敗は `INTERNAL_ERROR` ではなく対象 field を 0 または明示 error | `tests/snapshots/phase10_metrics/metrics.json` |
+| 11 replication primary | frame_no、CRC32、SSE、snapshot headers | `from_frame` 以降を順序通り返し、snapshot は整合した DB byte stream と header を返す | frame 不在は `FRAME_NOT_FOUND`、checksum 計算不能は 500 ではなく起動/stream 失敗として記録 | `tests/snapshots/phase11_replication/api.json` |
+| 12 replica/redirect | replica state、catchup、write redirect、primary down | 最後に適用した frame から再開し、replica write は規定 redirect または規定 error | checksum mismatch は破棄して再取得。primary 不達時は write を成功扱いにしない | `tests/snapshots/phase12_replica/health_redirect.json` |
+| 13 WAL archive | manifest、frame file、retention cleanup | manifest と frame/snapshot file が双方向に一致する | manifest 破損は起動失敗。orphan file は WARN 後 cleanup。missing frame は PITR 対象外ではなく起動失敗 | `tests/snapshots/phase13_archive/manifest.json` |
+| 14 backup/restore/PITR | restore transaction、temp layout、integrity_check | committed 前に元 DB を保持し、成功後は integrity_check が `ok` | 失敗時は必ず rollback。rollback 不能なら起動失敗 marker を残し成功応答しない | `tests/snapshots/phase14_restore/results.json` |
+| 15 branch | source selector、branch name、metadata/file commit | branch DB directory 準備後に metadata active commit する | partial branch は起動時 cleanup。metadata active で DB directory 不在は起動失敗 | `tests/snapshots/phase15_branch/branches.json` |
+| 16 extension | manifest、sha256、load boundary | sha256 一致、allowlist 一致、固定 directory 内だけ load | load 失敗時は metadata 追加なし。delete は metadata のみ削除し binary は残す | `tests/snapshots/phase16_extension/extensions.json` |
+| 17 metrics persistence | counter snapshot、Prometheus text、usage source | snapshot は 30 秒ごとと shutdown 時に書く。usage は Phase 8 `usage.json` と同源 | snapshot 破損は WARN 後 0 から再計測。quota 判定には破損 snapshot を使わない | `tests/snapshots/phase17_metrics/prometheus.txt` |
+| 18 HA | term、leader、candidate、operator promotion | term は単調増加。candidate から primary は operator promote 必須 | split-brain は `HA_SPLIT_BRAIN`。自動 primary 昇格は禁止 | `tests/snapshots/phase18_ha/status.json` |
+| 19 internal adapter | config flag、shadow/active、rollback、baseline | default は libsql。adapter active でも API/metadata/JWT/wire 差分ゼロ | 性能回帰または snapshot 差分があれば未完了。silent fallback 禁止 | `tests/snapshots/phase19_internal/compat.json` |
+
+**実装精度チェックリスト：**
+
+```
+IC-1: §9.1.2 の横断 validation を該当 endpoint 全てで実施
+IC-2: §9.4.1 の snapshot/artifact を生成し、dynamic 値を正規化
+IC-3: state transition の禁止遷移をテストで発火
+IC-4: partial write / interrupted request / process kill 後の再起動結果を固定
+IC-5: 既存 Phase の compatibility snapshot に差分がない
+IC-6: Phase 外 route は success response を返さない
+```
+
 ### 9.5 全 API endpoint 契約表
 
 この表は実装対象 endpoint のインデックスである。詳細 schema は §6 および各 Phase 節を正とするが、認証・status・永続化・冪等性で迷った場合はこの表を優先する。
@@ -2082,10 +2170,12 @@ API を実装する場合は、各 endpoint について必ず次を仕様本文
 | `{data-dir}/meta/branches.json` | 2 / 15 | branch 管理 | `{"branches":[]}` | tmp write + fsync + rename | 必須 | Phase 15 以降は起動失敗。Phase 14 以前は初期化のみ | Yes |
 | `{data-dir}/databases/{name}/data.db` | 2+ | libsql / DbManager | libsql 作成 | libsql commit | libsql に委譲 | integrity_check NG なら起動失敗 | Yes |
 | `{data-dir}/databases/{name}/data.db-wal` | 2+ | SQLite WAL | SQLite 作成 | SQLite WAL | SQLite に委譲 | SQLite recovery に委譲。integrity_check で検出 | Yes |
+| `{data-dir}/meta/replica-state.json` | 12 | replica sync | replica 起動時に作成 | tmp write + fsync + rename | 必須 | 起動失敗。last_applied_frame を推測で進めない | Yes |
 | `{data-dir}/databases/{name}/wal-archive/manifest.json` | 13 | WAL archive | archive 有効時に作成 | tmp write + fsync + rename | 必須 | 起動失敗。PITR/backup API は使わない | Yes |
 | `{data-dir}/databases/{name}/wal-archive/frame-*.bin` | 13 | WAL archive | なし | create + write + fsync | 必須 | manifest と不整合なら ERROR。PITR 対象から除外または起動失敗を Phase 13 で固定 | Yes |
 | `{data-dir}/databases/{name}/wal-archive/snapshot-*.db` | 13 | WAL archive | なし | copy + fsync + rename | 必須 | PITR 不可。manifest 整合性検査で検出 | Yes |
 | restore temp dir | 14 | restore/PITR | API 実行時のみ | temp write + fsync + rename/swap | 必須 | 中断時は元 DB を復元。残骸は次回起動時に cleanup して WARN | No |
+| `{data-dir}/databases/{name}/restore-failed.json` | 14 | restore/PITR | rollback 不能時のみ | tmp write + fsync + rename | 必須 | 存在する場合は起動失敗。operator が手動復旧するまで自動修復しない | Yes |
 | `{data-dir}/databases/{db}___{branch}/data.db` | 15 | branch 管理 | branch 作成時 | libsql commit | libsql に委譲 | branch metadata と不整合なら WARN + branch 無効化、または起動失敗を Phase 15 で固定 | Yes |
 | `{data-dir}/meta/extensions.json` | 16 | extension 管理 | `{"extensions":[]}` | tmp write + fsync + rename | 必須 | 起動失敗。未登録拡張を自動許可しない | Yes |
 | `{data-dir}/extensions/{name}/{version}/` | 16 | extension binary | extension 登録時 | create + write/copy + fsync | 必須 | sha256 不一致ならロード禁止 | Yes |
@@ -5031,7 +5121,7 @@ Path parameter は percent decode 後に validation する。decode 不能、dec
   },
   "TursoGroupInfo": {
     "name": "default",
-    "version": "adlaire-0.59",
+    "version": "adlaire-0.60",
     "uuid": "grp_default",
     "locations": ["default"],
     "primary": "default",
@@ -5481,6 +5571,22 @@ Phase 1〜8 と同様、**Adlaire 独自の hrana-ws プロトコル変換レイ
 
 WebSocket フレームの受受信・送信には `tokio-tungstenite` クレートを使用する。クエリ実行は Phase 1〜8 と同じ `libsql::Connection::execute_batch()` を経由する（§3.3.2）。
 
+**Phase 9 実装固定契約：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| Upgrade path | `/v3/baton` は `default` DB、`/{db-name}/v3/baton` は path DB。unknown DB は upgrade 前に `404 DB_NOT_FOUND` |
+| Upgrade validation | `Connection: upgrade`、`Upgrade: websocket`、`Sec-WebSocket-Key`、`Sec-WebSocket-Version: 13` 必須。不正は HTTP 400 |
+| Auth | WebSocket upgrade 後、最初の message は必ず `hello`。hello 前の `request` は `hello_error` 後 close |
+| Message size | 1 frame 最大 1 MiB。超過は close code 1009 |
+| request_id | connection 内で response と 1:1 対応。重複 request_id は許可するが response は受信順で返す |
+| stream_id | `open_stream` 前の execute/batch/sequence/describe は response_error `INVALID_REQUEST` |
+| transaction | BEGIN 後に connection close した場合は rollback。COMMIT 成功応答前に切断した場合は成功扱いにしない |
+| store_sql | `sql_id` は connection 内だけ有効。未登録 id の参照と二重登録は `INVALID_REQUEST` |
+| ro token | `a:"ro"` で write SQL、BEGIN IMMEDIATE/EXCLUSIVE、DDL、ATTACH write は `PERMISSION_DENIED` |
+| close | 正常 close は 1000。protocol validation 失敗は 1002。server shutdown は 1012 |
+| persistence | WebSocket session/stream/store_sql は永続化しない。SQL commit 済みデータだけ DB に残る |
+
 **完了条件（テストケース）：**
 
 ```
@@ -5509,6 +5615,13 @@ TC-3-3: 複数ストリームの多重化
 TC-3-4: JWT 認証（WebSocket）
   hello メッセージに有効 JWT → hello_ok
   hello メッセージに不正 JWT → hello_error
+
+TC-3-4 補足: WebSocket protocol boundary
+  （a）hello 前 request → hello_error + close
+  （b）open_stream 前 execute → response_error INVALID_REQUEST
+  （c）store_sql 未登録 id 参照 → response_error INVALID_REQUEST
+  （d）1 MiB 超過 frame → close code 1009
+  （e）open transaction 中に切断 → rollback
 ```
 
 ---
@@ -5733,6 +5846,19 @@ Turso Cloud と同様に、Adlaire が管理する DB 間に限り `ATTACH DATAB
 - 任意のファイルパス（`/etc/passwd` 等）は DB 名バリデーション（`^[a-zA-Z0-9_-]{1,127}$`）で事前に拒否する
 - 存在しない DB 名の場合は `404 DB_NOT_FOUND` を返す
 
+**Phase 10 ATTACH 固定契約：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| 対象 SQL | `ATTACH DATABASE '<db-name>' AS <alias>` と `ATTACH '<db-name>' AS <alias>` のみ対象 |
+| DB 名 | Phase 8 以降の新規 DB は Turso 互換名、legacy DB は metadata に存在する場合だけ許可 |
+| alias | `^[a-zA-Z_][a-zA-Z0-9_]{0,63}$`。`main`、`temp`、`sqlite_*` は `INVALID_REQUEST` |
+| quote | DB 名は single quote のみ許可。double quote、identifier quote、パラメータ化 ATTACH は Phase 10 対象外で `INVALID_REQUEST` |
+| path | 実 OS path は response/log に出さない。SQLite へ渡す直前だけ canonical data_dir 配下 path に変換する |
+| auth | 接続先 DB と attach 対象 DB の両方に JWT scope が必要。どちらか scope 外なら `ORG_SCOPE_DENIED` または `PERMISSION_DENIED` |
+| detach | `DETACH DATABASE <alias>` は許可。ただし `main`/`temp` は拒否 |
+| transaction | active transaction 中の ATTACH/DETACH は SQLite の結果に従うが、任意 path validation は必ず先に行う |
+
 **実装方針：**
 - hrana-http v2 の `execute` リクエストで ATTACH SQL を受け取った際、Adlaire 側でインターセプトして DB 名を解決する
 - libsql の Connection に対してパス解決済みの ATTACH を発行する
@@ -5783,6 +5909,17 @@ GET /admin/v1/metrics
 ```
 
 カウンター（`queries_total` 等）はプロセス起動からの累積値。再起動でリセットされる（Phase 10 時点では永続化しない）。
+
+**Phase 10 metrics 固定契約：**
+
+| Field | 更新タイミング |
+|-------|----------------|
+| `queries_total` | execute/batch/sequence の各 SQL step が libSQL に渡された後。SQL error でも 1 加算 |
+| `rows_read_total` | response rows の件数を加算。COUNT など集約結果は返却 row 数を加算 |
+| `rows_written_total` | libSQL の affected rows を加算。DDL は 0 |
+| `connections_active` | HTTP pipeline は処理中だけ、WebSocket は接続中だけ加算 |
+| `size_bytes` / `wal_size_bytes` | metrics API 応答時に filesystem から取得。取得失敗は 0 ではなく WARN + field 0 |
+| `tokens_total` / `tokens_revoked` | `tokens.json` から算出。runtime counter と不一致なら metadata を正とする |
 
 **追加テストケース：**
 
@@ -5921,6 +6058,21 @@ Phase 11 はレプリケーションの**送信側（primary）基盤**を完成
 - プライマリとレプリカは同じバイナリ。起動フラグでロールを決定する
 - Phase 11 では primary role の replication API を実装する
 - Phase 12 では replica role の WAL 取得・適用ループと書き込み redirect を実装する
+
+**Phase 11 replication primary 固定契約：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| frame_no | DB ごとに 1 から単調増加。欠番は許可しない。再起動後は WAL/manifest から最大値を復元 |
+| checksum | frame payload bytes に CRC32 を付与。HTTP response と archive manifest の checksum は同一 |
+| `from_frame` | 1 以上の integer 必須。0、負数、非数値は `INVALID_REQUEST` |
+| log response | SSE は `event: frame`、`id: <frame_no>`、`data: <json>`。heartbeat は `event: heartbeat` |
+| ordering | 1 connection 内では frame_no 昇順のみ。並列接続でも同じ frame_no に異なる bytes を返さない |
+| snapshot | snapshot 取得中は整合した DB byte stream を作る。途中で write があっても snapshot 内は一貫 |
+| headers | snapshot は `Content-Type: application/octet-stream`、`X-Adlaire-Base-Frame`、`X-Adlaire-Checksum` を返す |
+| heartbeat | unknown replica_id は登録し、既存 replica_id は上書き更新。`synced_frame` が primary 最大 frame を超えたら `INVALID_REQUEST` |
+| auth | replication token が設定されている場合は Bearer 完全一致。未設定で role primary の場合、replication API は `AUTH_REQUIRED` |
+| logging | frame bytes、SQL、token はログ禁止。frame_no、db、replica_id、lag_frames だけ可 |
 
 #### 起動フラグ（Phase 11 追加）
 
@@ -6125,6 +6277,20 @@ pub async fn run_replica_loop(
 
 **目標**：レプリカが WAL フレームを受信・適用し書き込みをプライマリへ転送する
 
+**Phase 12 replica 固定契約：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| replica state | `{data-dir}/meta/replica-state.json` に `primary_url`、`last_applied_frame`、`last_seen_primary_frame`、`updated_at` を保存 |
+| resume | 起動時は `last_applied_frame + 1` から取得再開。state 破損は起動失敗 |
+| apply order | frame_no 昇順のみ適用。欠番検出時は後続 frame を適用せず再取得 |
+| checksum mismatch | 対象 frame を破棄し ERROR log、同じ `from_frame` から再取得。3 回連続失敗で health `degraded` |
+| redirect | replica への write SQL、restore、branch create、extension load は 307 で primary URL へ redirect |
+| primary down | primary 到達不能時の write は 503 `REPLICATION_TIMEOUT`。read は local replica で許可 |
+| health | `role`、`primary_url`、`last_applied_frame`、`lag_frames`、`status` を返す。`status` は `ok` / `degraded` |
+| sync write | `sync` mode は primary が replica ACK を待つ場合だけ使用。quorum 未定義なら起動失敗 |
+| auth | primary 取得時は replication token を送る。token 不一致は retry せず `degraded` |
+
 #### 完了条件（テストケース）
 
 ```
@@ -6263,6 +6429,19 @@ pub async fn handle(
 - manifest.json による WAL フレーム管理
 - `wal_retention_days` 設定によるアーカイブ保持期間の管理
 
+**Phase 13 archive 固定契約：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| frame file | `frame-{frame_no:012}.bin`。frame_no は manifest 内で unique、昇順 |
+| snapshot file | `snapshot-{base_frame:012}.db`。最新 1 件を manifest の `snapshot` に記録 |
+| manifest commit | frame file と snapshot file を fsync 後、最後に manifest を atomic rename |
+| consistency check | 起動時に manifest の全 file 存在、size、checksum を検証。欠損・不一致は起動失敗 |
+| retention | 削除対象 frame を manifest から外す前に削除 plan を作り、削除成功後に manifest commit |
+| cleanup failure | file 削除失敗時は manifest を更新しない。WARN log 後、次回 cleanup で再試行 |
+| disabled mode | `wal_retention_days = 0` では archive file を新規作成しない。既存 archive は削除しない |
+| clock | retention 判定は manifest の `created_at` を使う。file mtime は使わない |
+
 **完了条件（テストケース）：**
 
 ```
@@ -6392,6 +6571,21 @@ impl Manifest {
 - リストア API：`POST /admin/v1/databases/{name}/restore`
 - PITR API：`POST /admin/v1/databases/{name}/restore/point-in-time`
 
+**Phase 14 restore 固定契約：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| backup response | `Content-Type: application/octet-stream`、`Content-Disposition: attachment; filename="{db}.db"` |
+| backup consistency | SQLite online backup 相当で整合 snapshot を返す。backup 中 write はブロックしない |
+| upload limit | restore body は設定値 `restore_max_bytes` が未定義の間、DB 既存 size の 2 倍または 1 GiB の小さい方を上限 |
+| temp layout | `{data-dir}/databases/{name}/restore-{request_id}/` に upload、verified、old を分けて置く |
+| restore lock | 対象 DB 単位で exclusive lock。restore 中の write は 503 `STORAGE_BUSY`、read は既存 DB で継続可 |
+| verification | restore/PITR は `PRAGMA integrity_check` が `ok` の場合だけ commit |
+| commit | runtime DB close、old へ退避、new を `data.db` へ rename、directory fsync、DB reopen の順 |
+| rollback | commit 前後のどの失敗でも old を戻す。戻せない場合は `restore-failed.json` marker を残し起動失敗 |
+| PITR selector | request は `{timestamp}` または `{frame_no}` のどちらか 1 つだけ。両方・どちらもなしは `INVALID_REQUEST` |
+| PITR replay | snapshot の `base_frame` から target frame まで checksum 検証しながら適用。欠損は `FRAME_NOT_FOUND` |
+
 **完了条件（テストケース）：**
 
 ```
@@ -6483,6 +6677,20 @@ T5-9: 統合テスト
 - ブランチ一覧・削除 API
 - ブランチ DB 命名規則と予約名バリデーション（`___`）
 - 再起動後のブランチ DB 自動復元
+
+**Phase 15 branch 固定契約：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| branch name | `^[a-z0-9-]{1,64}$`。source DB と同じ名前、`___`、`admin`、`meta` は拒否 |
+| internal DB name | `{source_db}___{branch_name}`。通常 DB create API から `___` を含む名前は常に拒否 |
+| source selector | `"current"`、`{"timestamp":"..."}`、`{"frame_no":N}` のいずれか 1 つだけ |
+| create order | branch directory 作成、DB file 構築、integrity_check、DbManager 登録、最後に `branches.json` commit |
+| delete order | runtime map から外し、connection close、directory rename to trash、`branches.json` commit、trash 削除 |
+| partial create | `branches.json` にない branch directory は起動時 WARN + cleanup。cleanup 失敗でも active 扱いしない |
+| partial delete | `branches.json` にない branch directory は接続不可。cleanup 対象 |
+| source delete | active branch がある source DB の削除は `403 ORG_SCOPE_DENIED`。cascade delete は Phase 15 対象外 |
+| isolation | branch write は source DB に反映しない。source write は既存 branch に反映しない |
 
 **完了条件（テストケース）：**
 
@@ -6589,6 +6797,19 @@ Phase 16 では `.so` 拡張のみを対象とする。Wasm 拡張、任意パ�
 - 永続化: `meta/extensions.json` と `{data-dir}/extensions/{name}/{version}/`（§9.6）
 - 完了条件: TC-16-1〜TC-16-6 と T16-1〜T16-6 をすべて満たす
 
+**Phase 16 extension 固定契約：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| binary source | HTTP upload は受け付けない。事前配置済み file のみ登録対象 |
+| path | `{data-dir}/extensions/{name}/{version}/{name}.so` 以外は拒否。symlink は拒否 |
+| sha256 | 登録前、load 前、起動時復元前に毎回検証 |
+| load scope | load は新規 DB connection 作成時に適用。既存 connection への retroactive load は保証しない |
+| failure | load 失敗時は metadata を追加しない。起動時 load 失敗は該当 extension を `loaded:false` にし ERROR log |
+| delete | metadata から削除し、binary directory は残す。削除済み extension は新規 connection に load しない |
+| SQL direct load | `load_extension()` SQL は常に `EXTENSION_NOT_ALLOWED` |
+| logging | extension name/version/sha256 は可。絶対 path と load error の環境変数展開値は秘匿 |
+
 **Phase 16 extension manifest schema：**
 
 ```json
@@ -6630,6 +6851,18 @@ Phase 17 では alerting、remote write、外部 SaaS 連携は対象外とす�
 - 永続化: `meta/metrics-snapshot.json`
 - quota 判定用 usage: Phase 8 の `usage.json` を正とする
 - 完了条件: TC-17-1〜TC-17-5 と T17-1〜T17-5 をすべて満たす
+
+**Phase 17 metrics 固定契約：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| counter source | runtime atomic counter を正とし、30 秒ごとに snapshot へ保存 |
+| startup | snapshot が正常なら counter 初期値へ反映。破損なら WARN 後 0 初期化 |
+| quota usage | quota 判定は `usage.json` を正とし、metrics snapshot から推測しない |
+| Prometheus escaping | label value は `\`、`"`、newline を Prometheus 仕様通り escape |
+| route label | raw path ではなく route pattern を使う。DB 名や token id を label に入れない |
+| content type | `text/plain; version=0.0.4; charset=utf-8` 固定 |
+| shutdown | graceful shutdown 時に同期 snapshot を 1 回書く。失敗時は ERROR log |
 
 **Phase 17 metrics snapshot schema：**
 
@@ -6679,6 +6912,19 @@ Phase 18 は single-leader 構成のみを対象にする。multi-primary write�
 - term: 単調増加のみ許可。古い term による昇格は `HA_SPLIT_BRAIN`
 - 完了条件: TC-18-1〜TC-18-7 と T18-1〜T18-7 をすべて満たす
 
+**Phase 18 HA 固定契約：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| auth | HA API は Admin token と HA token の両方必須。片方欠落は `AUTH_REQUIRED`、不一致は `AUTH_INVALID` |
+| term update | promote/demote は request term が保存済み term 以上の場合だけ許可。小さい term は `HA_SPLIT_BRAIN` |
+| candidate | heartbeat timeout で candidate になっても write は受けない。operator promote まで primary にならない |
+| redirect | leader が分かる replica/candidate は write を leader へ 307。leader 不明なら `HA_NO_LEADER` |
+| demote | primary demote 後は role `replica` または `standalone` に遷移し、write を即時停止 |
+| split-brain | 自 node と異なる leader_id を同一 term で検出したら write 停止、`HA_SPLIT_BRAIN` |
+| persistence | role/term/leader 更新は write 停止または開始より前に `ha-state.json` commit |
+| recovery | 起動時に `role=primary` でも HA peer 確認前は write を受けず `candidate` として検証する |
+
 **Phase 18 HA state schema：**
 
 ```json
@@ -6714,6 +6960,19 @@ Phase 19 は wire format、admin API、metadata schema、JWT claim を変更し�
 - 既定値: 直前 Phase と同じ挙動
 - rollback: flag を戻すだけで完了できること
 - 完了条件: TC-19-1〜TC-19-6 と T19-1〜T19-6 をすべて満たす
+
+**Phase 19 internal adapter 固定契約：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| default | 全 flag の default は `libsql`。既存利用者の挙動は変えない |
+| shadow mode | adapter は libsql 結果と比較する shadow 実行から開始し、差分は ERROR + test failure |
+| active mode | active 化は該当 snapshot と Phase 1〜18 regression が通る場合だけ |
+| rollback | flag を戻すだけで metadata migration なしに旧経路へ戻る |
+| write path | Phase 19 の storage adapter は readonly まで。write path 差し替えは Phase 20 以降 |
+| error mapping | adapter 内部 error は既存 §7.3 code へ写像。新 code が必要なら先に仕様改訂 |
+| performance | p95 latency、RSS、DB size、WAL size を baseline artifact に保存 |
+| compatibility | API response、wire bytes、metadata JSON、JWT claim の snapshot 差分ゼロ |
 
 **Phase 19 config flags：**
 
