@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.63
+**バージョン：** 0.64
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -1165,7 +1165,7 @@ Phase 8 では、Adlaire 独自の `/admin/v1/*` に加えて Turso Cloud Platfo
 | database `primaryRegion` | group の `primary` |
 | database `block_reads` | database configuration の `block_reads`。既定 `false` |
 | database `block_writes` | database configuration の `block_writes`。既定 `false`。quota 超過状態は DTO ではなく `QUOTA_EXCEEDED` error と usage/quota API で表す |
-| group `version` | `adlaire-{spec version}`。例: `adlaire-0.63` |
+| group `version` | `adlaire-{spec version}`。例: `adlaire-0.64` |
 | group `uuid` | Adlaire group id |
 | group `locations` | group location の配列。Phase 8 では 1 要素 |
 | group `primary` | group の primary location |
@@ -2161,7 +2161,7 @@ restore/PITR は `delete_protection=true` の DB では `403 ORG_SCOPE_DENIED` �
 | `disabled` | manifest に残すが新規 connection に load しない | `loading`、`deleted` |
 | `deleted` | manifest から削除済み。binary は残ってよい | 復帰禁止。再登録は新 record として扱う |
 
-`extensions.json` の `loaded` boolean だけで状態を表現してはならない。Phase 16 実装時は `state` field を追加し、migration で既存 `loaded:true` は `loaded`、`loaded:false` は `registered` に変換する。
+`extensions.json` の `loaded` boolean だけで状態を表現してはならない。Phase 16 実装時は `state` field を追加し、migration で既存 `loaded:true` は `state:"loaded"`、`loaded:false` は `state:"registered"` に変換する。
 
 **Phase 17 Prometheus 固定表：**
 
@@ -2261,15 +2261,15 @@ Phase 19 では storage write path の active 化は禁止する。`active` に�
 | `POST /replication/v1/heartbeat` | 11 | replication token | `{replica_id, synced_frame}` | 200 `{primary_frame, lag_frames}` | 400 `INVALID_REQUEST`, auth 系 | primary in-memory replica status | Yes |
 | `GET /replication/v1/status` | 11 | replication token | body なし | 200 primary replication status | auth 系 | なし | Yes |
 | `GET /admin/v1/databases/{name}/backup` | 14 | Admin token | body なし | 200 octet-stream SQLite backup | 404 `DB_NOT_FOUND`, auth 系 | なし | Yes |
-| `POST /admin/v1/databases/{name}/restore` | 14 | Admin token | octet-stream SQLite file | 200 restore result JSON | 409 `RESTORE_INTEGRITY_FAILED`, 404 `DB_NOT_FOUND` | target DB replace + rollback temp | No |
-| `POST /admin/v1/databases/{name}/restore/point-in-time` | 14 | Admin token | `{timestamp}` または `{frame_no}` | 200 restore result JSON | 503 `PITR_NOT_ENABLED`, 404 `FRAME_NOT_FOUND`, 409 `RESTORE_FRAME_CORRUPT` | target DB replace + rollback temp | No |
+| `POST /admin/v1/databases/{name}/restore` | 14 | Admin token | octet-stream SQLite file | 204 empty body | 413 `PAYLOAD_TOO_LARGE`, 409 `RESTORE_INTEGRITY_FAILED`, 404 `DB_NOT_FOUND`, 403 `ORG_SCOPE_DENIED`/`PERMISSION_DENIED`/`QUOTA_EXCEEDED` | target DB replace + rollback temp | No |
+| `POST /admin/v1/databases/{name}/restore/point-in-time` | 14 | Admin token | `{timestamp}` または `{frame_no}` | 204 empty body | 503 `PITR_NOT_ENABLED`, 404 `FRAME_NOT_FOUND`, 409 `RESTORE_FRAME_CORRUPT`, 403 `ORG_SCOPE_DENIED`/`PERMISSION_DENIED`/`QUOTA_EXCEEDED` | target DB replace + rollback temp | No |
 | `GET /admin/v1/databases/{name}/branches` | 15 | Admin token | body なし | 200 `{branches:[...]}` | 404 `DB_NOT_FOUND` | なし | Yes |
 | `POST /admin/v1/databases/{name}/branches` | 15 | Admin token | `{branch_name, from}` | 201 branch metadata | invalid/reserved name, `FRAME_NOT_FOUND` | `branches.json`, branch DB directory | No |
 | `DELETE /admin/v1/databases/{name}/branches/{branch}` | 15 | Admin token | body なし | 204 empty body | 404 `DB_NOT_FOUND` | `branches.json`, branch DB directory deletion | Yes: missing branch remains 404 |
 | `GET /admin/v1/extensions` | 16 | Admin token | body なし | 200 `{extensions:[...]}` | 401 `AUTH_REQUIRED` | なし | Yes |
 | `POST /admin/v1/extensions` | 16 | Admin token | `{name, version, sha256, enabled?}` | 201 `ExtensionInfo` | 400 `INVALID_REQUEST`, 403 `EXTENSION_NOT_ALLOWED`, 409 `EXTENSION_ALREADY_EXISTS` | `extensions.json` | No |
 | `DELETE /admin/v1/extensions/{name}` | 16 | Admin token | body なし | 204 empty body | 404 `EXTENSION_NOT_FOUND` | `extensions.json` | Yes: missing extension remains 404 |
-| `GET /admin/v1/metrics/prometheus` | 17 | Admin token | body なし | 200 text/plain Prometheus exposition | 401 `AUTH_REQUIRED`, 500 `INTERNAL_ERROR` | なし | Yes |
+| `GET /admin/v1/metrics/prometheus` | 17 | Admin token | body なし | 200 text/plain Prometheus exposition | 401 `AUTH_REQUIRED`, 406 `NOT_ACCEPTABLE`, 500 `INTERNAL_ERROR` | なし | Yes |
 | `GET /ha/v1/status` | 18 | Admin token + HA token | body なし | 200 `HaStatus` | 401 auth 系, 503 `HA_NO_LEADER` | なし | Yes |
 | `POST /ha/v1/promote` | 18 | Admin token + HA token | `{node_id, term}` | 200 `HaStatus` | 409 `HA_PROMOTION_FAILED`/`HA_SPLIT_BRAIN` | `ha-state.json` | No |
 | `POST /ha/v1/demote` | 18 | Admin token + HA token | `{node_id, term}` | 200 `HaStatus` | 409 `HA_PROMOTION_FAILED` | `ha-state.json` | No |
@@ -5258,7 +5258,7 @@ Path parameter は percent decode 後に validation する。decode 不能、dec
   },
   "TursoGroupInfo": {
     "name": "default",
-    "version": "adlaire-0.63",
+    "version": "adlaire-0.64",
     "uuid": "grp_default",
     "locations": ["default"],
     "primary": "default",
@@ -5872,10 +5872,13 @@ WebSocket フレームの受受信・送信には `tokio-tungstenite` クレー�
 |------|----------|
 | Upgrade path | `/v3/baton` は `default` DB、`/{db-name}/v3/baton` は path DB。unknown DB は upgrade 前に `404 DB_NOT_FOUND` |
 | Upgrade validation | `Connection: upgrade`、`Upgrade: websocket`、`Sec-WebSocket-Key`、`Sec-WebSocket-Version: 13` 必須。不正は HTTP 400 |
-| Auth | WebSocket upgrade 後、最初の message は必ず `hello`。hello 前の `request` は `hello_error` 後 close |
+| Subprotocol | `Sec-WebSocket-Protocol` は client 提示順を保持して解釈し、server が対応する `hrana3`、`hrana2`、`hrana1` のうち最初に一致したものを選択する。`hrana3-protobuf` は Phase 9 では未対応のため選択しない |
+| Auth | WebSocket upgrade 後、`hello` で認証する。client は hello 応答前に request を送ってよいが、server は hello 認証完了後に受信順で処理する。hello 失敗時は未処理 request へ response を返さず close |
 | Message size | 1 frame 最大 1 MiB。超過は close code 1009 |
 | request_id | connection 内で response と 1:1 対応。重複 request_id は許可するが response は受信順で返す |
 | stream_id | `open_stream` 前の execute/batch/sequence/describe は response_error `INVALID_REQUEST` |
+| unknown field | Hrana wire protocol の JSON object に含まれる unknown field は互換のため無視する。管理 API の unknown field 拒否方針を適用しない |
+| cursor API | `open_cursor` / `fetch_cursor` / `close_cursor` は Phase 9 では response_error `NOT_IMPLEMENTED` とし、connection は維持する |
 | transaction | BEGIN 後に connection close した場合は rollback。COMMIT 成功応答前に切断した場合は成功扱いにしない |
 | store_sql | `sql_id` は connection 内だけ有効。未登録 id の参照と二重登録は `INVALID_REQUEST` |
 | ro token | `a:"ro"` で write SQL、BEGIN IMMEDIATE/EXCLUSIVE、DDL、ATTACH write は `PERMISSION_DENIED` |
@@ -6155,9 +6158,11 @@ Turso Cloud と同様に、Adlaire が管理する DB 間に限り `ATTACH DATAB
 | transaction | active transaction 中の ATTACH/DETACH は SQLite の結果に従うが、任意 path validation は必ず先に行う |
 
 **実装方針：**
-- hrana-http v2 の `execute` リクエストで ATTACH SQL を受け取った際、Adlaire 側でインターセプトして DB 名を解決する
+- hrana-http v2 / hrana-ws v3 の `execute` / `sequence` / `batch` で ATTACH SQL を受け取った際、Adlaire 側でインターセプトして DB 名を解決する
+- ATTACH 判定に正規表現だけを使ってはならない。SQL tokenizer または SQLite prepare 前の限定 parser で、文字列リテラル、コメント、quoted identifier 内の `ATTACH` を無視する
 - libsql の Connection に対してパス解決済みの ATTACH を発行する
 - 対象 DB の接続が未オープンの場合はその場でオープンする
+- `allow_attach=false`、JWT/org/group/db scope、`block_reads`、`block_writes`、ro token の優先順位は §9.4.2 の Phase 10 ATTACH / metrics 優先順位固定表に従う
 
 **追加テストケース：**
 
@@ -6247,7 +6252,8 @@ T3-8: 統合テスト TC-3-1〜TC-3-6
 
 ```rust
 // ATTACH DATABASE インターセプト
-// execute_pipeline で呼び出す前に SQL を検査し、ATTACH 文なら DB 名を解決して書き換える
+// 注意: 下記の正規表現方式は Phase 10 では実装禁止例である。
+// 実装では SQL tokenizer または限定 parser を使い、文字列リテラル・コメント内の ATTACH を誤検出しないこと。
 
 /// "ATTACH DATABASE 'foo' AS alias" を検出して解決済みパスに書き換える。
 /// foo が Adlaire 管理外（バリデーション失敗 or 未登録）なら Err を返す。
@@ -6875,11 +6881,13 @@ impl Manifest {
 | upload limit | restore body は設定値 `restore_max_bytes` が未定義の間、DB 既存 size の 2 倍または 1 GiB の小さい方を上限 |
 | temp layout | `{data-dir}/databases/{name}/restore-{request_id}/` に upload、verified、old を分けて置く |
 | restore lock | 対象 DB 単位で exclusive lock。restore 中の write は 503 `STORAGE_BUSY`、read は既存 DB で継続可 |
+| protection | `delete_protection=true` は `403 ORG_SCOPE_DENIED`、`block_writes=true` は `403 PERMISSION_DENIED`。restore 後 size が quota 超過なら commit 前に `QUOTA_EXCEEDED` |
 | verification | restore/PITR は `PRAGMA integrity_check` が `ok` の場合だけ commit |
 | commit | runtime DB close、old へ退避、new を `data.db` へ rename、directory fsync、DB reopen の順 |
 | rollback | commit 前後のどの失敗でも old を戻す。戻せない場合は `restore-failed.json` marker を残し起動失敗 |
 | PITR selector | request は `{timestamp}` または `{frame_no}` のどちらか 1 つだけ。両方・どちらもなしは `INVALID_REQUEST` |
 | PITR replay | snapshot の `base_frame` から target frame まで checksum 検証しながら適用。欠損は `FRAME_NOT_FOUND` |
+| success response | restore / PITR 成功は `204 No Content`。成功時に JSON body は返さない |
 
 **完了条件（テストケース）：**
 
@@ -6891,7 +6899,7 @@ TC-5-1: バックアップと同時書き込み
 
 TC-5-2: バックアップからリストア
   （a）GET /admin/v1/databases/{name}/backup でバックアップファイルを取得
-  （b）POST /admin/v1/databases/{name}/restore でリストア
+  （b）POST /admin/v1/databases/{name}/restore でリストア → 204 body なし
   （c）リストア後 SELECT → 元のデータが参照できる
 
 TC-5-3: 不正ファイルでリストア
@@ -6986,6 +6994,10 @@ T5-9: 統合テスト
 | partial delete | `branches.json` にない branch directory は接続不可。cleanup 対象 |
 | source delete | active branch がある source DB の削除は `403 ORG_SCOPE_DENIED`。cascade delete は Phase 15 対象外 |
 | isolation | branch write は source DB に反映しない。source write は既存 branch に反映しない |
+| Turso seed | `/v1/organizations/{org}/databases` の `seed.type:"database"` は Phase 15 で branch create に昇格してよい。ただし branch 名に相当する field がない request は `INVALID_REQUEST` |
+| protection | source DB `delete_protection=true` でも branch create は許可する。source DB `block_reads=true` の branch create は `403 PERMISSION_DENIED` |
+| quota | branch DB は source の database quota を継承する。branch 作成で organization/group quota を超える場合は `QUOTA_EXCEEDED` |
+| token scope | source DB token は branch DB へ自動拡張しない。branch 用 token は別途発行する |
 
 **完了条件（テストケース）：**
 
@@ -7100,7 +7112,7 @@ Phase 16 では `.so` 拡張のみを対象とする。Wasm 拡張、任意パ�
 | path | `{data-dir}/extensions/{name}/{version}/{name}.so` 以外は拒否。symlink は拒否 |
 | sha256 | 登録前、load 前、起動時復元前に毎回検証 |
 | load scope | load は新規 DB connection 作成時に適用。既存 connection への retroactive load は保証しない |
-| failure | load 失敗時は metadata を追加しない。起動時 load 失敗は該当 extension を `loaded:false` にし ERROR log |
+| failure | 登録時 load 失敗は metadata を追加しない。起動時 load 失敗は該当 extension を `state:"load_failed"` にし ERROR log |
 | delete | metadata から削除し、binary directory は残す。削除済み extension は新規 connection に load しない |
 | SQL direct load | `load_extension()` SQL は常に `EXTENSION_NOT_ALLOWED` |
 | logging | extension name/version/sha256 は可。絶対 path と load error の環境変数展開値は秘匿 |
@@ -7116,7 +7128,7 @@ Phase 16 では `.so` 拡張のみを対象とする。Wasm 拡張、任意パ�
       "filename": "vector.so",
       "sha256": "64 lowercase hex chars",
       "enabled": true,
-      "loaded": false,
+      "state": "registered",
       "loaded_at": null,
       "created_at": "2026-09-13T00:00:00Z"
     }
@@ -7131,10 +7143,10 @@ Phase 16 では `.so` 拡張のみを対象とする。Wasm 拡張、任意パ�
 | `filename` | `{name}.so` のみ。slash、dot-dot、絶対 path は `INVALID_REQUEST` |
 | `sha256` | lowercase hex 64 文字のみ |
 | `enabled` | boolean 必須 |
-| `loaded` | runtime 状態。起動時は全 extension で `false` から再評価する |
-| `loaded_at` | `loaded=true` の時だけ RFC3339 UTC 秒精度。未ロードは `null` |
+| `state` | `registered` / `loading` / `loaded` / `load_failed` / `disabled` / `deleted` のみ |
+| `loaded_at` | `state="loaded"` の時だけ RFC3339 UTC 秒精度。未ロードは `null` |
 
-登録時は binary を `{data-dir}/extensions/{name}/{version}/{filename}` に配置済みであることを確認し、sha256 が一致した場合だけ `extensions.json` に追加する。HTTP API から binary upload は受け付けない。load は server 起動時と `POST /admin/v1/extensions` 後に行い、失敗時は metadata を追加せず `EXTENSION_LOAD_FAILED` を返す。`DELETE` は metadata から削除し、binary directory は削除しない。
+登録時は binary を `{data-dir}/extensions/{name}/{version}/{filename}` に配置済みであることを確認し、sha256 が一致した場合だけ `extensions.json` に追加する。HTTP API から binary upload は受け付けない。load は server 起動時と `POST /admin/v1/extensions` 後に行い、失敗時は metadata を追加せず `EXTENSION_LOAD_FAILED` を返す。`DELETE` は metadata から削除し、binary directory は削除しない。既存 metadata に `loaded` boolean がある場合は migration で `loaded:true` を `state:"loaded"`、`loaded:false` を `state:"registered"` に変換し、以後 `loaded` boolean を正として参照してはならない。
 
 ### Phase 17：メトリクス永続化・外部監視連携
 
@@ -7157,6 +7169,9 @@ Phase 17 では alerting、remote write、外部 SaaS 連携は対象外とす�
 | Prometheus escaping | label value は `\`、`"`、newline を Prometheus 仕様通り escape |
 | route label | raw path ではなく route pattern を使う。DB 名や token id を label に入れない |
 | content type | `text/plain; version=0.0.4; charset=utf-8` 固定 |
+| accept | `Accept` 未指定、`*/*`、`text/plain` は 200。その他は 406 `NOT_ACCEPTABLE` |
+| line format | UTF-8、LF 改行、末尾 LF 必須。各 metric は `HELP`、`TYPE`、samples の順で出す |
+| invalid value | 取得不能値を `NaN` として出さない。該当 sample を省略し WARN log を出す |
 | shutdown | graceful shutdown 時に同期 snapshot を 1 回書く。失敗時は ERROR log |
 
 **Phase 17 metrics snapshot schema：**
