@@ -5,7 +5,7 @@ use hyper::{body::Incoming, Request};
 
 use crate::{
     auth::{middleware::extract_claims, AccessLevel, Claims},
-    db::sqld_adapter::SqldAdapter,
+    db::{sqld_adapter::SqldAdapter, validate_db_name},
     error::AppError,
     hrana::{
         convert::{hrana_to_sql, sql_to_stmt_result},
@@ -20,6 +20,10 @@ pub async fn handle(
     state: SharedState,
     db_name: &str,
 ) -> Result<HttpResponse, Infallible> {
+    if let Err(e) = validate_db_name(db_name) {
+        return Ok(e.into_response());
+    }
+
     let claims = match extract_claims(&req, &state).await {
         Ok(c) => c,
         Err(e) => return Ok(e.into_response()),
