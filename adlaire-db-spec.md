@@ -14,7 +14,7 @@ Adlaire DB は **libSQL ワイヤプロトコル（hrana-http v2 / hrana-ws v3�
 
 libSQL クライアント SDK（TypeScript・Rust・Go 等）から接続 URL を差し替えるだけで動作する。クライアント側の埋め込みレプリカ機能は対象外とし、サーバー側の HTTP/WebSocket API・マルチDB管理・レプリケーション・バックアップに特化する。
 
-将来的には libSQL フォークの内部コンポーネント（WAL・ページストレージ・SQL エンジン等）を段階的に内製実装へ置き換えることを計画しているが、具体的な詳細・スケジュールはフェーズの進行とともに検討する。
+libSQL フォークの内部コンポーネント（WAL・ページストレージ・SQL エンジン等）の内製化は Phase 19 から開始する。Phase 18 以前は Turso Cloud 互換レイヤー、管理 API、レプリケーション、バックアップ、ブランチ、HA の完成を優先し、production path の内部差し替えは行わない。
 
 ### 1.2 ポジション
 
@@ -32,7 +32,7 @@ libSQL クライアント SDK（TypeScript・Rust・Go 等）から接続 URL �
 | ストレージ・SQL 基盤 | libsql crate 0.6（embedded SQLite / WAL モード）|
 | 外部フレームワーク | 使用禁止。外部クレートは使用可能だが、Web フレームワーク（axum・actix-web・rocket 等）は採用しない |
 | 目標機能 | Turso Cloud 互換・hrana プロトコル互換・サーバー特化機能 |
-| 将来方針 | Turso Cloud 追従を継続し、互換レイヤーを維持したまま libSQL 内部を段階的に内製化する |
+| Phase 19 方針 | Turso Cloud 追従を継続し、互換レイヤーを維持したまま libSQL 内部を段階的に内製化する |
 | デプロイ形態 | シングルバイナリ起動 |
 | 対象 OS | Linux |
 
@@ -404,11 +404,11 @@ POST /v2/pipeline
 | クレート名（予定） | 状態 | 置き換え対象の外部クレート | 内製化フェーズ |
 |------------------|------|--------------------------|-------------|
 | `adlaire-server` | 実装中（Phase 1〜） | —（新規実装。置き換えでなく追加） | Phase 1〜 |
-| `adlaire-wal` | 計画 | libSQL WAL チェックポイント制御（`sqld`） | Phase 12 完了後 |
-| `adlaire-storage` | 計画 | libSQL SQLite ページャー（`sqld` / `libsql-sys`） | `adlaire-wal` 内製後 |
-| `adlaire-sql-parser` | 計画 | libSQL SQLite パーサ（`libsql-sys`） | 最後（最難関） |
+| `adlaire-wal` | 計画 | libSQL WAL チェックポイント制御（`sqld`） | Phase 19 |
+| `adlaire-storage` | 計画 | libSQL SQLite ページャー（`sqld` / `libsql-sys`） | Phase 19 後続の仕様改訂で確定 |
+| `adlaire-sql-parser` | 計画 | libSQL SQLite パーサ（`libsql-sys`） | Phase 19 後続の仕様改訂で確定。Phase 19 では実装しない |
 
-内製クレートへの移行は §3.5.4 のロードマップ・§将来の内製化方針に従い段階的に行う。
+内製クレートへの移行は §3.5.4 のロードマップ・§Phase 19 内製化方針に従い段階的に行う。
 
 ### 3.4 マルチDB のデータ分離（Phase 6）
 
@@ -423,7 +423,7 @@ POST /v2/pipeline
 | DB ごとの接続数 | 接続 1 本（シンプルな実装から始める）|
 | 同一 DB への並行アクセス | SQLite の WAL モードで複数リーダー・シングルライターを実現 |
 | 異なる DB への並行アクセス | DB ごとに独立した接続のため干渉なし |
-| 接続プール | Phase 6 は単一接続。Phase 9 以降でプール化を検討 |
+| 接続プール | Phase 6〜18 は単一接続。プール化は Phase 19 以降に専用仕様を追加するまで実装禁止 |
 
 **DB 作成フロー：**
 
@@ -486,17 +486,17 @@ Turso Cloud は Adlaire DB の互換参照実装である。Turso Cloud の挙�
 - DB、location、organization、group、quota の metadata が既存データと共存できること
 - エラーの HTTP status、`code`、message 粒度が §7.3 と矛盾しないこと
 
-#### 3.5.4 内製化ロードマップ（Phase 16 以降）
+#### 3.5.4 内製化ロードマップ（Phase 19 以降）
 
 内製化の優先順位は「Adlaire の差別化に直結するか」と「libsql crate への依存切り離し効果が大きいか」で決める。
 
-| 優先 | 対象コンポーネント | 理由 |
-|------|-------------------|----|
-| 1 | HTTP / 認証 / 管理 API | Phase 1〜7 で Adlaire が独自実装済みのため内製化不要 |
-| 2 | WAL チェックポイント制御 | レプリケーション（Phase 11）に直結 |
-| 3 | hrana-http/ws プロトコル変換 | 変換レイヤーは既に Adlaire 独自実装。libsql 型依存を段階的に排除可 |
-| 4 | クエリエグゼキューター | SQLite との境界。libsql-sys（C バインディング）を直接呼ぶ形に移行 |
-| 5 | SQL パーサ | 最もリスクが高い。Phase 16 後半以降に検討 |
+| Phase | 対象コンポーネント | 実装可否 | 理由 |
+|-------|-------------------|----------|----|
+| Phase 1〜18 | HTTP / 認証 / 管理 API / hrana 変換 | 実装可 | Turso Cloud 互換レイヤーとして Adlaire が直接実装する |
+| Phase 19 | WAL チェックポイント制御 | 実装可 | レプリケーション、PITR、HA の内部安定性に直結する |
+| Phase 19 | libSQL adapter 境界整理 | 実装可 | 外部 API を変えずに内部差し替え可能な境界を固定する |
+| Phase 19 | ストレージ層差し替え | 設計・互換テスト追加のみ可 | production path への切り替えは後続仕様改訂で確定する |
+| Phase 19 | SQL パーサ | 実装禁止 | Turso Cloud / SQLite 互換リスクが高いため、後続仕様改訂なしに着手しない |
 
 内製化は I-5（段階的・計画的）に従い、**各フェーズで動作するテストスイートと Turso Cloud / libSQL SDK 互換テストが通ることを確認してから**次のコンポーネントに進む。内製化 PR は API、認証、metadata、エラー形式、SDK 互換挙動を変更してはならない。変更が必要な場合は、先に Turso Cloud 追従差分として仕様書を改訂する。
 
@@ -1417,7 +1417,7 @@ GET /admin/v1/metrics     全 DB のメトリクス取得
 | `AUTH_REQUIRED` | 401 | Authorization ヘッダがない |
 | `AUTH_INVALID` | 401 | JWT 署名検証失敗・失効済みトークン |
 | `AUTH_EXPIRED` | 401 | JWT exp 切れ |
-| `AUTH_DISABLED` | 401 | 認証が無効な状態でのみ有効なエンドポイントへのアクセス（将来拡張用） |
+| `AUTH_DISABLED` | 401 | 認証無効モードで実行禁止の管理・HA・extension 操作へのアクセス |
 | `PERMISSION_DENIED` | 403 | ro トークンで書き込み操作 |
 | `DB_NOT_FOUND` | 404 | 指定 DB が存在しない |
 | `TOKEN_NOT_FOUND` | 404 | 指定トークン ID が存在しない |
@@ -1441,6 +1441,14 @@ GET /admin/v1/metrics     全 DB のメトリクス取得
 | `FRAME_NOT_FOUND` | 404 | PITR/ブランチ作成で指定フレームが存在しない |
 | `RESTORE_INTEGRITY_FAILED` | 409 | リストア後の `integrity_check` 失敗 |
 | `RESTORE_FRAME_CORRUPT` | 409 | WAL フレームの CRC32 検証失敗 |
+| `EXTENSION_NOT_ALLOWED` | 403 | allowlist にない SQLite 拡張ロード |
+| `EXTENSION_NOT_FOUND` | 404 | 指定 extension が存在しない |
+| `EXTENSION_ALREADY_EXISTS` | 409 | 同名 extension が既に登録済み |
+| `EXTENSION_SIGNATURE_INVALID` | 403 | extension sha256 / 署名検証失敗 |
+| `EXTENSION_LOAD_FAILED` | 500 | SQLite extension load 失敗 |
+| `HA_NO_LEADER` | 503 | HA leader が存在しない |
+| `HA_SPLIT_BRAIN` | 409 | 複数 leader または term 不整合を検出 |
+| `HA_PROMOTION_FAILED` | 409 | node 昇格または降格に失敗 |
 | `DB_RESERVED_NAME` | 400 | `___` を含む DB 名の直接作成試行 |
 | `INTERNAL_ERROR` | 500 | サーバー内部エラー |
 
@@ -1582,7 +1590,7 @@ Step 5: メタデータ読み込み（Phase 1〜5 はシングル DB のため�
   5-3. {data-dir}/meta/branches.json が存在すれば読み込みメモリに展開（Phase 15〜）
        なければ空のリスト `{"branches":[]}` として初期化し書き出す
   ※ Phase 3 では tokens.json / branches.json の内容は利用しないが、
-     将来フェーズとの互換性のためファイル自体は初期化する
+     Phase 7 以降の管理 API および Phase 15 の branch metadata と同じ配置にするためファイル自体は初期化する
 
 Step 6: DB オープン
   【Phase 1〜5 — シングル DB 固定】
@@ -1666,7 +1674,7 @@ Step 5: 停止完了
 
 ## 9. 実装フェーズ
 
-フェーズ単位で機能を積み上げる。各フェーズの内製化計画はフェーズ完了後に検討する（§3.5.4）。
+フェーズ単位で機能を積み上げる。内製化は Phase 19 から開始し、Phase 18 以前は production path の内部差し替えを行わない（§3.5.4）。
 
 | フェーズ | 内容 | テストケース | 実装タスク |
 |----------|------|------------|----------|
@@ -1685,7 +1693,10 @@ Step 5: 停止完了
 | **Phase 13** | WAL アーカイブ・manifest 管理 | TC-5-8 (1件) | T5-1〜T5-4 (4件) |
 | **Phase 14** | バックアップ・リストア・PITR API | TC-5-1〜TC-5-7 (7件) | T5-5〜T5-9 (5件) |
 | **Phase 15** | ブランチ作成・一覧・削除 | TC-6-1〜TC-6-7 (7件) | T6-1〜T6-7 (7件) |
-| **Phase 16** | SQLite 拡張・内製化・HA | — | — |
+| **Phase 16** | SQLite 拡張ロード | TC-16-1〜TC-16-6 (6件) | T16-1〜T16-6 (6件) |
+| **Phase 17** | メトリクス永続化・外部監視連携 | TC-17-1〜TC-17-5 (5件) | T17-1〜T17-5 (5件) |
+| **Phase 18** | HA・自動フェイルオーバー | TC-18-1〜TC-18-7 (7件) | T18-1〜T18-7 (7件) |
+| **Phase 19** | libSQL 内部コンポーネント段階的内製化 | TC-19-1〜TC-19-6 (6件) | T19-1〜T19-6 (6件) |
 
 
 ### 9.0 実装判断ルール
@@ -1768,7 +1779,10 @@ Step 5: 停止完了
 | Phase 13 | WAL archive と manifest.json がアトミックに更新され、retention cleanup が動く。CRC32 と manifest/files の整合性検査がある | backup/restore API、PITR restore、branch |
 | Phase 14 | backup、restore、PITR API が動き、restore 失敗時は元 DB が復元される。PITR 無効、範囲外、CRC 不一致のエラーが §7.3 と一致する | branch、外部ストレージ転送、HA |
 | Phase 15 | branch 作成、一覧、削除、再起動後復元が動く。branch DB は `{db}___{branch}` として通常 DB と同じ pipeline でアクセスでき、元 DB と独立して書き込める | branch merge、copy-on-write 最適化、SQLite 拡張 |
-| Phase 16 | SQLite 拡張ロード、内製化対象、HA 方針を実装可能な仕様として再確定し、採用範囲ごとの API・永続化・権限・エラー・テストゲートを追加する。Phase 16 は本表のまま実装開始してはならない | 未承認の外部依存、仕様未確定の HA 自動 failover |
+| Phase 16 | SQLite 拡張ロードが動き、許可ディレクトリ、拡張 manifest、署名検証、ロード/アンロード API、sandbox 方針が固定される。未承認拡張と任意パスロードは拒否する | HA、自動 failover、libSQL 内製化、未署名拡張 |
+| Phase 17 | metrics snapshot を永続化し、Prometheus text endpoint と usage/quota の整合が動く。再起動後も累積 counter が復元される | HA、自動 failover、libSQL 内製化 |
+| Phase 18 | primary/replica 構成で leader election、failover、split-brain 防止、昇格/降格、health/redirect が仕様通り動く | libSQL 内製化、multi-primary write |
+| Phase 19 | WAL checkpoint 制御、storage 境界、query executor 境界のうち採用対象を内製 crate へ段階移行し、Turso Cloud / libSQL SDK 互換テストが通る | SQL parser 完全内製、互換性を壊す wire/API 変更 |
 
 ### 9.3 API 実装決定表
 
@@ -1865,19 +1879,21 @@ API を実装する場合は、各 endpoint について必ず次を仕様本文
 - branch merge、copy-on-write 最適化、外部 storage 連携は Phase 15 対象外
 - branch 名と DB 名は同じ validation を使い、`___` を含む名前は禁止する
 
-#### Phase 16：実装開始前に再確定する項目
+#### Phase 16〜19：拡張・監視・HA・内製化
 
-Phase 16 は「候補フェーズ」であり、以下を追記してからでなければ実装開始してはならない。
+| Phase | 変更対象 | API/CLI 契約 | 永続化 | エラー/ログ | テスト契約 |
+|-------|----------|--------------|--------|-------------|------------|
+| Phase 16 | `extension/*`, `http/admin/extensions.rs`, `config.rs` | `GET/POST/DELETE /admin/v1/extensions` を追加し、許可済み SQLite 拡張だけをロードする。任意パス指定は禁止し、拡張名は manifest 登録名のみ許可する | `meta/extensions.json` に拡張名、version、sha256、enabled、loaded_at を atomic update。拡張 binary は `{data-dir}/extensions/{name}/{version}/` 配下のみ | 未登録拡張は `EXTENSION_NOT_ALLOWED`、署名不一致は `EXTENSION_SIGNATURE_INVALID`、ロード失敗は `EXTENSION_LOAD_FAILED`。拡張 path と secret はログに出さない | TC-16-1〜TC-16-6。allowlist、署名、load/unload、restart、任意パス拒否、SDK regression |
+| Phase 17 | `metrics.rs`, `http/admin/metrics.rs`, `http/admin/prometheus.rs`, `usage/*` | `GET /admin/v1/metrics` に永続 counter を追加し、`GET /admin/v1/metrics/prometheus` を追加する。Prometheus endpoint は Admin token 必須 | `meta/metrics-snapshot.json` を定期 atomic update。`usage.json` と quota 判定に使う storage usage を同じ計測源に統一する | snapshot 破損は WARN 後に再計測。Prometheus 出力失敗は `INTERNAL_ERROR`。metric label に secret/token/SQL args を含めない | TC-17-1〜TC-17-5。再起動後 counter 復元、Prometheus schema、quota usage 整合、破損復旧、秘匿 |
+| Phase 18 | `ha/*`, `replication/*`, `http/health.rs`, `config.rs` | `GET /ha/v1/status`、`POST /ha/v1/promote`、`POST /ha/v1/demote` を追加する。HA 管理 API は Admin token + HA token 必須 | `meta/ha-state.json` に node_id、term、leader_id、last_applied_frame、role を atomic update。split-brain 防止のため term は単調増加のみ | leader 不明は `HA_NO_LEADER`、split-brain 検出は `HA_SPLIT_BRAIN`、昇格不能は `HA_PROMOTION_FAILED`。term/leader 変更は INFO、矛盾は ERROR | TC-18-1〜TC-18-7。leader election、promotion/demotion、primary down、network partition、restart、redirect、split-brain rejection |
+| Phase 19 | `adlaire-wal`, `adlaire-storage`, `db/sqld_adapter.rs`, `hrana/*` | 外部 API は変更しない。内製 crate への切り替えは config flag で段階的に行い、既定は直前 Phase と同じ挙動にする | 新規 metadata 追加は禁止。必要な場合は別 Phase として仕様追加する。rollback は config flag を戻すことで可能にする | 互換性差分は `INTERNAL_ERROR` で隠さず、既存 §7.3 code に写像する。性能回帰が閾値を超えた場合は完了不可 | TC-19-1〜TC-19-6。Turso Cloud / libSQL SDK 互換、WAL consistency、crash recovery、rollback flag、performance baseline、Phase 1〜18 regression |
 
-| 項目 | 実装前に必ず決めること |
-|------|------------------------|
-| SQLite 拡張 | 対象拡張名、ロード方式（`.so` / Wasm / static link）、許可ディレクトリ、署名検証、sandbox 方針 |
-| 内製化 | libSQL から置き換える対象、互換性テスト、rollback 方針、性能目標 |
-| HA | leader election 方式、failover 条件、split-brain 防止、書き込み一貫性、運用手順 |
-| API | 新規 endpoint、既存 endpoint の変更有無、後方互換性 |
-| テスト | failure injection、crash recovery、性能回帰、長時間 soak test |
+**Phase 16〜19 の境界決定：**
 
-Phase 16 の実装 PR は、上表を具体化する仕様変更 PR と分ける。仕様変更 PR が承認されるまで、コード実装を開始しない。
+- Phase 16 は SQLite 拡張ロードのみ。HA、内製化、任意 SQL parser 変更は含めない
+- Phase 17 は監視と usage 永続化のみ。quota policy 自体の変更は Phase 8 契約を変更しない限り禁止
+- Phase 18 は HA と failover のみ。multi-primary write は対象外
+- Phase 19 は内部実装差し替えのみ。wire format、admin API、metadata schema、JWT claim を変更してはならない
 
 ### 9.5 全 API endpoint 契約表
 
@@ -1924,6 +1940,13 @@ Phase 16 の実装 PR は、上表を具体化する仕様変更 PR と分ける
 | `GET /admin/v1/databases/{name}/branches` | 15 | Admin token | body なし | 200 `{branches:[...]}` | 404 `DB_NOT_FOUND` | なし | Yes |
 | `POST /admin/v1/databases/{name}/branches` | 15 | Admin token | `{branch_name, from}` | 201 branch metadata | invalid/reserved name, `FRAME_NOT_FOUND` | `branches.json`, branch DB directory | No |
 | `DELETE /admin/v1/databases/{name}/branches/{branch}` | 15 | Admin token | body なし | 204 empty body | 404 `DB_NOT_FOUND` | `branches.json`, branch DB directory deletion | Yes: missing branch remains 404 |
+| `GET /admin/v1/extensions` | 16 | Admin token | body なし | 200 `{extensions:[...]}` | 401 `AUTH_REQUIRED` | なし | Yes |
+| `POST /admin/v1/extensions` | 16 | Admin token | `{name, version, sha256, enabled?}` | 201 `ExtensionInfo` | 400 `INVALID_REQUEST`, 403 `EXTENSION_NOT_ALLOWED`, 409 `EXTENSION_ALREADY_EXISTS` | `extensions.json` | No |
+| `DELETE /admin/v1/extensions/{name}` | 16 | Admin token | body なし | 204 empty body | 404 `EXTENSION_NOT_FOUND` | `extensions.json` | Yes: missing extension remains 404 |
+| `GET /admin/v1/metrics/prometheus` | 17 | Admin token | body なし | 200 text/plain Prometheus exposition | 401 `AUTH_REQUIRED`, 500 `INTERNAL_ERROR` | なし | Yes |
+| `GET /ha/v1/status` | 18 | Admin token + HA token | body なし | 200 `HaStatus` | 401 auth 系, 503 `HA_NO_LEADER` | なし | Yes |
+| `POST /ha/v1/promote` | 18 | Admin token + HA token | `{node_id, term}` | 200 `HaStatus` | 409 `HA_PROMOTION_FAILED`/`HA_SPLIT_BRAIN` | `ha-state.json` | No |
+| `POST /ha/v1/demote` | 18 | Admin token + HA token | `{node_id, term}` | 200 `HaStatus` | 409 `HA_PROMOTION_FAILED` | `ha-state.json` | No |
 
 ### 9.6 永続化ファイル契約表
 
@@ -1945,6 +1968,10 @@ Phase 16 の実装 PR は、上表を具体化する仕様変更 PR と分ける
 | `{data-dir}/databases/{name}/wal-archive/snapshot-*.db` | 13 | WAL archive | なし | copy + fsync + rename | 必須 | PITR 不可。manifest 整合性検査で検出 | Yes |
 | restore temp dir | 14 | restore/PITR | API 実行時のみ | temp write + fsync + rename/swap | 必須 | 中断時は元 DB を復元。残骸は次回起動時に cleanup して WARN | No |
 | `{data-dir}/databases/{db}___{branch}/data.db` | 15 | branch 管理 | branch 作成時 | libsql commit | libsql に委譲 | branch metadata と不整合なら WARN + branch 無効化、または起動失敗を Phase 15 で固定 | Yes |
+| `{data-dir}/meta/extensions.json` | 16 | extension 管理 | `{"extensions":[]}` | tmp write + fsync + rename | 必須 | 起動失敗。未登録拡張を自動許可しない | Yes |
+| `{data-dir}/extensions/{name}/{version}/` | 16 | extension binary | extension 登録時 | create + write/copy + fsync | 必須 | sha256 不一致ならロード禁止 | Yes |
+| `{data-dir}/meta/metrics-snapshot.json` | 17 | metrics 永続化 | `{"counters":{},"gauges":{},"updated_at":null}` | tmp write + fsync + rename | 任意。失敗時 WARN | 破損時 WARN 後に 0 から再計測。quota usage は `usage.json` を正とする | No |
+| `{data-dir}/meta/ha-state.json` | 18 | HA state | `{"node_id":null,"term":0,"leader_id":null,"role":"standalone","last_applied_frame":0}` | tmp write + fsync + rename | 必須 | 起動失敗。split-brain 防止のため自動初期化しない | Yes |
 
 **永続化の禁止事項：**
 
@@ -1960,7 +1987,7 @@ Phase 16 の実装 PR は、上表を具体化する仕様変更 PR と分ける
 | `AUTH_REQUIRED` | 4+ / admin 7+ | JWT/API/Admin/replication 認証必須 endpoint | No | Authorization header を付ける |
 | `AUTH_INVALID` | 4+ | JWT/Admin/replication token 検証 | No | token を再発行または設定修正 |
 | `AUTH_EXPIRED` | 4+ | JWT | No | token を再発行 |
-| `AUTH_DISABLED` | 将来 | 認証無効時に許可されない管理操作 | No | サーバー設定を変更 |
+| `AUTH_DISABLED` | 8+ | 認証無効時に許可されない管理・HA・extension 操作 | No | サーバー設定を変更 |
 | `PERMISSION_DENIED` | 4+ / 10 | ro 書き込み、任意パス ATTACH 等 | No | 権限または request を変更 |
 | `DB_NOT_FOUND` | 6+ | DB path, 管理 API, branch/backup | No | DB 名を確認または作成 |
 | `TOKEN_NOT_FOUND` | 7+ | token get/delete | No | token id を確認 |
@@ -1985,6 +2012,14 @@ Phase 16 の実装 PR は、上表を具体化する仕様変更 PR と分ける
 | `FRAME_NOT_FOUND` | 11+ / 14+ / 15 | replication log, PITR, branch | Depends | frame range/retention を確認 |
 | `RESTORE_INTEGRITY_FAILED` | 14+ | restore | No | backup file を確認 |
 | `RESTORE_FRAME_CORRUPT` | 14+ | PITR | No | archive corruption を復旧 |
+| `EXTENSION_NOT_ALLOWED` | 16+ | extension create/load | No | allowlist と manifest を確認 |
+| `EXTENSION_NOT_FOUND` | 16+ | extension get/delete/load | No | extension 名を確認 |
+| `EXTENSION_ALREADY_EXISTS` | 16+ | extension create | No | version または name を変更 |
+| `EXTENSION_SIGNATURE_INVALID` | 16+ | extension create/load | No | sha256/署名を確認 |
+| `EXTENSION_LOAD_FAILED` | 16+ | extension load | Depends | extension binary と SQLite ABI を確認 |
+| `HA_NO_LEADER` | 18+ | HA status/write redirect | Yes | leader election 状態を確認 |
+| `HA_SPLIT_BRAIN` | 18+ | HA promote/status | No | partition を解消し、operator 判断 |
+| `HA_PROMOTION_FAILED` | 18+ | HA promote/demote | Depends | node health と term を確認 |
 | `INTERNAL_ERROR` | all | 未分類内部エラー | Depends | server log を確認 |
 
 ### 9.8 Phase 別テストマトリクス
@@ -2006,7 +2041,10 @@ Phase 16 の実装 PR は、上表を具体化する仕様変更 PR と分ける
 | 13 | archive manifest/frame cleanup | bad retention config | n/a | manifest survives restart | partial archive write recovery | Phase 1〜12 |
 | 14 | backup/restore/PITR | bad restore file/body | admin auth | restored DB survives restart | restore failure rollback | Phase 1〜13 |
 | 15 | branch create/list/delete | invalid branch name | admin/JWT on branch DB | branch survives restart | branch create/delete partial failure | Phase 1〜14 |
-| 16 | Phase 16.x spec PR scope | TBD | TBD | TBD | failure injection 必須 | Phase 1〜15 |
+| 16 | extension register/list/delete/load | arbitrary path, bad sha256 | admin auth | extensions.json survives restart | failed load rollback | Phase 1〜15 |
+| 17 | persistent metrics, Prometheus output | invalid metric request | admin metrics auth | metrics snapshot survives restart | corrupt snapshot recovery | Phase 1〜16 |
+| 18 | leader election, promote/demote, redirect | stale term, bad node | admin + HA token | ha-state survives restart | partition / split-brain rejection | Phase 1〜17 |
+| 19 | internal crate switch via config flag | invalid flag combination | n/a | no metadata migration | rollback flag restores previous path | Phase 1〜18 |
 
 ### 9.9 実装禁止事項
 
@@ -2021,47 +2059,16 @@ Phase 16 の実装 PR は、上表を具体化する仕様変更 PR と分ける
 - Web フレームワークを導入しない。HTTP ルーティングは hyper ベースの自前実装を維持する
 - `INTERNAL_ERROR` で仕様済みエラーを隠さない。対応する code がある場合は必ずそれを使う
 
-### 9.10 Phase 16 事前決定テンプレート
+### 9.10 Phase 16〜19 固定タスク
 
-Phase 16 の仕様変更 PR では、実装対象ごとに以下を埋める。
+Phase 16〜19 は本節の固定タスクを完了条件とする。追加の仕様変更 PR なしに、ここへ未記載の API、metadata、error code、外部依存を追加してはならない。
 
-```md
-#### Phase 16.x: <機能名>
-
-目的:
-対象外:
-
-API:
-- Method/path:
-- Auth:
-- Request:
-- Success:
-- Errors:
-
-永続化:
-- Files:
-- Atomic update:
-- Recovery:
-
-セキュリティ:
-- Trust boundary:
-- Secret handling:
-- Sandbox/signature:
-
-運用:
-- Config:
-- Logs:
-- Metrics:
-- Rollback:
-
-テスト:
-- Normal:
-- Invalid:
-- Auth/permission:
-- Persistence:
-- Crash/failover:
-- Performance:
-```
+| Phase | 実装タスク |
+|-------|------------|
+| Phase 16 | T16-1 extension manifest schema、T16-2 allowlist/sha256 検証、T16-3 load/unload API、T16-4 任意パス拒否、T16-5 restart 復元、T16-6 TC-16-1〜TC-16-6 |
+| Phase 17 | T17-1 metrics snapshot writer、T17-2 Prometheus endpoint、T17-3 usage/quota 計測統合、T17-4 snapshot 破損復旧、T17-5 TC-17-1〜TC-17-5 |
+| Phase 18 | T18-1 HA state、T18-2 leader election、T18-3 promote/demote API、T18-4 write redirect、T18-5 split-brain rejection、T18-6 restart recovery、T18-7 TC-18-1〜TC-18-7 |
+| Phase 19 | T19-1 config flag、T19-2 adlaire-wal adapter、T19-3 storage boundary adapter、T19-4 executor boundary adapter、T19-5 rollback flag、T19-6 TC-19-1〜TC-19-6 |
 
 ### 9.11 Definition of Ready / Definition of Done
 
@@ -2084,7 +2091,10 @@ API:
 | 13 | manifest schema、frame naming、retention cleanup、consistency check が決まっている | archive write, cleanup, corruption detection, restart tests が通る |
 | 14 | restore transaction model、rollback temp layout、PITR selector schema が決まっている | backup/restore/PITR/rollback/corrupt archive tests が通る |
 | 15 | branch metadata schema、branch naming、source selector、delete semantics が決まっている | branch create/list/delete/isolation/restart tests が通る |
-| 16 | Phase 16.x 仕様 PR が承認され、API/永続化/HA/テストが具体化されている | Phase 16.x ごとの Done を仕様 PR 内で定義する |
+| 16 | extension allowlist、manifest、署名/sha256、API schema、任意パス拒否が決まっている | extension CRUD/load/unload、署名検証、restart、任意パス拒否、Phase 1〜15 regression が通る |
+| 17 | metrics snapshot schema、Prometheus schema、usage 計測源、破損時復旧方針が決まっている | metrics 永続化、Prometheus endpoint、usage/quota 整合、破損復旧、Phase 1〜16 regression が通る |
+| 18 | HA token、node_id、term、leader election、promote/demote、split-brain policy が決まっている | leader election、failover、redirect、restart、partition、split-brain rejection、Phase 1〜17 regression が通る |
+| 19 | 切り替える内製 crate、config flag、rollback flag、性能基準、互換テスト範囲が決まっている | Turso Cloud / libSQL SDK 互換、crash recovery、rollback、performance baseline、Phase 1〜18 regression が通る |
 
 ### 9.12 PR レビュー観点
 
@@ -4832,7 +4842,7 @@ quota 判定で拒否する操作:
 - backup restore / PITR restore
 - replication apply
 - branch create
-- 将来の import API
+- import API は本仕様書では未定義のため実装禁止
 
 backup download、read-only SELECT、DB/token/location/org/group/quota の一覧取得は quota 超過時でも許可する。
 
@@ -5499,7 +5509,7 @@ X-Replication-Db: mydb
 {"primary_frame": 42, "lag_frames": 0}
 ```
 
-プライマリは `synced_frame` 以前の WAL フレームを将来的に GC できる（Phase 11 では GC は未実装・受付のみ）。
+プライマリは Phase 11 では `synced_frame` を受付・記録するだけで WAL フレーム GC を行わない。WAL フレーム削除は Phase 13 の retention cleanup 契約に従う。
 
 **GET /replication/v1/status**
 
@@ -6087,16 +6097,48 @@ T6-7: 統合テスト
 ---
 
 
-### Phase 16：SQLite 拡張・内製化・HA
+### Phase 16：SQLite 拡張ロード
 
-Phase 15 完了後に計画する。候補（優先度未確定）：
+**目標**：許可済み SQLite 拡張だけを安全に登録・ロード・無効化できるようにする。
 
-- SQLite 拡張機能ロード（`.so` / Wasm）
-- libSQL 内部コンポーネントの段階的内製化（§3.5.4 のロードマップに従う）
-- 高可用性・自動フェイルオーバー
-- メトリクス永続化・外部監視連携（Prometheus 等）
+Phase 16 では `.so` 拡張のみを対象とする。Wasm 拡張、任意パスロード、SQL からの `load_extension()` 直接実行は対象外とする。
 
-Phase 16 は候補機能の集合であり、この節だけを根拠に実装してはならない。実装開始前に §9.4 の Phase 16 表に従い、対象機能、API、永続化形式、障害時挙動、テストゲートを具体化する仕様変更を先に行うこと。
+- API: `GET/POST/DELETE /admin/v1/extensions`（§9.5）
+- 永続化: `meta/extensions.json` と `{data-dir}/extensions/{name}/{version}/`（§9.6）
+- 完了条件: TC-16-1〜TC-16-6 と T16-1〜T16-6 をすべて満たす
+
+### Phase 17：メトリクス永続化・外部監視連携
+
+**目標**：Phase 10 のインメモリ metrics を永続 counter に拡張し、Prometheus 互換出力を提供する。
+
+Phase 17 では alerting、remote write、外部 SaaS 連携は対象外とする。Prometheus text exposition のみを対象にする。
+
+- API: `GET /admin/v1/metrics/prometheus`（§9.5）
+- 永続化: `meta/metrics-snapshot.json`
+- quota 判定用 usage: Phase 8 の `usage.json` を正とする
+- 完了条件: TC-17-1〜TC-17-5 と T17-1〜T17-5 をすべて満たす
+
+### Phase 18：HA・自動フェイルオーバー
+
+**目標**：primary/replica 構成で leader election、failover、split-brain 防止、write redirect を完成させる。
+
+Phase 18 は single-leader 構成のみを対象にする。multi-primary write、distributed transaction、外部 consensus service 依存は対象外とする。
+
+- API: `GET /ha/v1/status`、`POST /ha/v1/promote`、`POST /ha/v1/demote`（§9.5）
+- 永続化: `meta/ha-state.json`
+- term: 単調増加のみ許可。古い term による昇格は `HA_SPLIT_BRAIN`
+- 完了条件: TC-18-1〜TC-18-7 と T18-1〜T18-7 をすべて満たす
+
+### Phase 19：libSQL 内部コンポーネント段階的内製化
+
+**目標**：Turso Cloud / libSQL SDK 互換を維持したまま、内部コンポーネントを `adlaire-*` crate へ段階的に差し替える。
+
+Phase 19 は wire format、admin API、metadata schema、JWT claim を変更してはならない。SQL parser 完全内製は対象外とし、Phase 19 では WAL checkpoint 制御、storage 境界、executor 境界の adapter 化までを対象にする。
+
+- 切り替え方式: config flag で既存 libSQL 経路と内製 crate 経路を切り替える
+- 既定値: 直前 Phase と同じ挙動
+- rollback: flag を戻すだけで完了できること
+- 完了条件: TC-19-1〜TC-19-6 と T19-1〜T19-6 をすべて満たす
 
 ---
 
@@ -6168,7 +6210,7 @@ Phase 1〜7 では TLS をネイティブ実装しない。リバースプロキ
 Client → [TLS] → Nginx/Caddy → [plain HTTP] → adlaire-db :8080
 ```
 
-TLS ネイティブ対応は Phase 14 以降の検討事項とする。
+TLS ネイティブ対応は Phase 1〜19 では対象外とする。Phase 19 完了後に専用フェーズとして仕様化されるまで、server binary 内に TLS termination を実装してはならない。
 
 ### 10.5 トークン情報の漏洩防止
 
@@ -6190,7 +6232,7 @@ DB 名・ファイルパス生成時に以下を必ず適用する：
 
 - シングルバイナリ（`adlaire-db`）として配布
 - ターゲット：Linux x86_64 / aarch64
-- 静的リンク（musl）によるランタイム依存ゼロを目標（Phase 1 完了後に検討）
+- 静的リンク（musl）によるランタイム依存ゼロは必須条件にしない。配布物は release-check で glibc 依存、動的ライブラリ依存、対象アーキテクチャを明示し、musl 対応は専用リリース仕様が追加されるまで実装対象外とする
 - 配布チャネル：GitHub Releases
 - リリース成果物には SHA-256 チェックサムを添付する
 
@@ -6305,7 +6347,7 @@ HTTP ステータス：503
 
 ---
 
-## 将来の内製化方針
+## Phase 19 内製化方針
 
 ### 基本方針
 - 内製化の単位はクレートとする
@@ -6334,7 +6376,7 @@ HTTP ステータス：503
 
 ### 実施時期
 
-Phase 1〜7 と並行して着手可能なものから開始する。
+内製化の実装開始は Phase 19 とする。Phase 18 以前は、内製 crate の設計メモ、ベンチマーク、互換テスト追加のみ許可し、production path の切り替えは行わない。
 
 ---
 
