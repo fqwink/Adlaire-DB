@@ -82,13 +82,7 @@ async fn execute_pipeline(
                 if is_write_stmt(&stmt.sql)
                     && claims.resolve_access(db_name) != AccessLevel::Rw
                 {
-                    results.push(StreamResult::Error {
-                        error: HranaError {
-                            message: "write not permitted".into(),
-                            code:    "PERMISSION_DENIED".into(),
-                        },
-                    });
-                    continue;
+                    return Err(AppError::PermissionDenied);
                 }
 
                 let sql_args: Result<Vec<_>, _> = stmt.args.iter().map(hrana_to_sql).collect();

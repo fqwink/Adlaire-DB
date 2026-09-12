@@ -57,6 +57,13 @@ fn path_param(req: &Request<Incoming>, prefix: &[&str]) -> Option<String> {
     Some(segs[prefix.len()].to_string())
 }
 
+fn reject_internal_default_db(name: &str) -> Result<(), AppError> {
+    if name == "default" {
+        return Err(AppError::DbNotFound(name.to_string()));
+    }
+    Ok(())
+}
+
 #[derive(serde::Deserialize)]
 struct CreateDatabaseRequest {
     name: String,
@@ -123,6 +130,9 @@ pub mod databases {
         if let Err(e) = validate_db_name(&name) {
             return Ok(e.into_response());
         }
+        if let Err(e) = reject_internal_default_db(&name) {
+            return Ok(e.into_response());
+        }
         match state.db_mgr.get_info(&name).await {
             Ok(info) => Ok(crate::http::json_ok(&info)),
             Err(e) => Ok(e.into_response()),
@@ -134,6 +144,9 @@ pub mod databases {
             return Ok(crate::http::not_found());
         };
         if let Err(e) = validate_db_name(&name) {
+            return Ok(e.into_response());
+        }
+        if let Err(e) = reject_internal_default_db(&name) {
             return Ok(e.into_response());
         }
         match state.db_mgr.delete(&name).await {
