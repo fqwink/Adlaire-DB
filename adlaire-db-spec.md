@@ -1,8 +1,8 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.37  
+**バージョン：** 0.38  
 **ステータス：** 設計中  
-**最終更新：** 2026-09-11  
+**最終更新：** 2026-09-12  
 
 ---
 
@@ -586,15 +586,16 @@ Phase 6 移行後も `/v2/pipeline`（DB 名なし）は `default` DB にフォ�
 
 ```toml
 [server]
-port            = 8080     # HTTP API ポート
-admin_port      = 8081     # 管理 API ポート（Phase 1〜5 は 127.0.0.1 固定。--admin-bind は Phase 6 以降）
-log_level       = "info"   # trace / debug / info / warn / error
-log_file        = ""       # 空 = stdout。パス指定でファイル出力
-shutdown_timeout = 30      # グレースフルシャットダウン最大待機秒数
+port             = 8080      # HTTP API ポート
+admin_port       = 8081      # 管理 API ポート（Phase 1〜5 は 127.0.0.1 固定。--admin-bind は Phase 6 以降）
+log_level        = "info"    # trace / debug / info / warn / error
+# log_file       = ""        # 空 = stdout。パス指定でファイル出力（未実装）
+shutdown_timeout = 30        # グレースフルシャットダウン最大待機秒数
+busy_timeout_ms  = 5000      # WAL ロック待機タイムアウト（ミリ秒）
 
 [auth]
 jwt_secret      = ""       # 空文字列 = 認証無効（開発用）
-jwt_secret_file = ""       # ファイルから読む場合はこちら（jwt_secret より優先）
+jwt_secret_file = ""       # ファイルから読む場合はこちら（jwt_secret が指定されている場合は jwt_secret が優先）
 
 [admin]
 auth_token = ""            # 管理 API 認証トークン（空 = 認証無効）
@@ -602,12 +603,11 @@ auth_token = ""            # 管理 API 認証トークン（空 = 認証無効�
 
 [storage]
 # data-dir は CLI フラグで指定（config.toml に書かない）
-busy_timeout_ms               = 5000     # WAL ロック待機タイムアウト（ミリ秒）
-wal_checkpoint_pages          = 1000     # 自動チェックポイントのページ閾値
-wal_checkpoint_mode           = "PASSIVE"  # PASSIVE / FULL / RESTART
-synchronous                   = "NORMAL"   # OFF は非サポート（I-4 違反）
-wal_retention_days            = 0        # PITR 用 WAL アーカイブ保持日数（0 = 無効）
-integrity_check_interval_hours = 0       # 定期整合性チェック間隔（0 = 無効）
+wal_mode                           = "passive"  # passive / full / restart
+# wal_checkpoint_pages             = 1000       # 自動チェックポイントのページ閾値（未実装・Phase 10 以降）
+# synchronous                      = "NORMAL"   # OFF は非サポート（I-4 違反）（未実装・Phase 10 以降）
+# wal_retention_days               = 0          # PITR 用 WAL アーカイブ保持日数（未実装・Phase 12 以降）
+# integrity_check_interval_hours   = 0          # 定期整合性チェック間隔（未実装・Phase 12 以降）
 
 [replication]
 write_mode      = "async"  # async / sync
@@ -616,7 +616,7 @@ sync_timeout_ms = 5000     # sync モード時のタイムアウト（ミリ秒�
 
 優先順位：CLI フラグ > 設定ファイル > デフォルト値。
 
-`jwt_secret` と `jwt_secret_file` を両方指定した場合は `jwt_secret_file` を優先する。
+`jwt_secret` と `jwt_secret_file` を両方指定した場合は `jwt_secret` を優先する。
 
 ---
 
@@ -798,8 +798,10 @@ adlaire-db token create --secret "my-secret" \
 4. sub クレーム（token_id）を tokens.json と照合
    → revoked=true → 401 AUTH_INVALID
 
-5. a クレームと要求権限を照合
-   → ro トークンで書き込み → 403 PERMISSION_DENIED
+5. resolve_access(db_name) でアクセスレベルを解決
+     dbs[db_name] が存在する → その値を使用（Phase 7〜）
+     存在しない / dbs なし → a クレームを使用
+   → Ro かつ書き込み操作 → 403 PERMISSION_DENIED
 
 6. 検証通過 → リクエスト処理へ
 ```
@@ -1593,6 +1595,8 @@ adlaire-server/src/
 ├── auth/
 │   ├── mod.rs           ← JWT 検証ロジック・Claims / AuthState struct
 │   └── middleware.rs    ← axum extractor: Authenticated
+├── token/
+│   └── util.rs          ← parse_expiry() / generate_token_id()（Phase 4）
 ├── http/
 │   ├── mod.rs           ← axum Router 組み立て（build_router / build_admin_router）
 │   ├── pipeline.rs      ← POST /v2/pipeline ハンドラ
@@ -3298,7 +3302,8 @@ pub fn generate_token_id() -> String {
     let mut f = std::fs::File::open("/dev/urandom").expect("cannot open /dev/urandom");
     use std::io::Read;
     f.read_exact(&mut buf).expect("cannot read /dev/urandom");
-    format!("tok_{}", hex::encode(buf))
+    let n = u64::from_le_bytes(buf);
+    format!("tok_{:016x}", n)
 }
 
 #[cfg(test)]
@@ -5174,10 +5179,10 @@ PRAGMA journal_mode = WAL;
 
 | パラメータ | デフォルト | CLI フラグ | config.toml キー | 説明 |
 |---|---|---|---|---|
-| busy timeout | 5000 ms | `--busy-timeout` | `[storage] busy_timeout_ms` | ロック待機タイムアウト。超過時 503 BUSY |
-| WAL checkpoint interval | 1000 pages | — | `[storage] wal_checkpoint_pages` | 自動チェックポイントのページ閾値 |
-| WAL checkpoint mode | `PASSIVE` | — | `[storage] wal_checkpoint_mode` | `PASSIVE` / `FULL` / `RESTART` |
-| synchronous | `NORMAL` | — | `[storage] synchronous` | `OFF` は非サポート（I-4 違反） |
+| busy timeout | 5000 ms | `--busy-timeout` | `[server] busy_timeout_ms` | ロック待機タイムアウト。超過時 503 BUSY |
+| WAL checkpoint interval | 1000 pages | — | `[storage] wal_checkpoint_pages`（未実装・Phase 10） | 自動チェックポイントのページ閾値 |
+| WAL checkpoint mode | `passive` | — | `[storage] wal_mode` | `passive` / `full` / `restart` |
+| synchronous | `NORMAL` | — | `[storage] synchronous`（未実装・Phase 10） | `OFF` は非サポート（I-4 違反） |
 
 ### 13.3 チェックポイント挙動
 
