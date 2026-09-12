@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ring::hmac;
+use tokio::sync::RwLock;
 
 use crate::{config::Config, error::AppError};
 
@@ -59,14 +60,14 @@ impl Claims {
 
 pub struct AuthState {
     pub(crate) secret_bytes: Option<Vec<u8>>,
-    revoked: HashSet<String>,
+    revoked: RwLock<HashSet<String>>,
 }
 
 impl AuthState {
     pub fn new(config: &Config, revoked: HashSet<String>) -> Self {
         Self {
             secret_bytes: config.jwt_secret_bytes.clone(),
-            revoked,
+            revoked: RwLock::new(revoked),
         }
     }
 
@@ -102,10 +103,14 @@ impl AuthState {
                 return Err(AppError::AuthExpired);
             }
         }
-        if self.revoked.contains(&claims.sub) {
+        if self.revoked.read().await.contains(&claims.sub) {
             return Err(AppError::AuthInvalid);
         }
         Ok(claims)
+    }
+
+    pub async fn revoke(&self, token_id: String) {
+        self.revoked.write().await.insert(token_id);
     }
 }
 
