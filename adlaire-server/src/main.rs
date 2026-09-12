@@ -12,6 +12,9 @@ mod state;
 use std::sync::Arc;
 
 use clap::Parser;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper_util::rt::TokioIo;
 
 use crate::{
     auth::{AuthState, AccessLevel},
@@ -19,7 +22,7 @@ use crate::{
     config::Config,
     data_dir::{DataDir, ProcessLock},
     db::DbManager,
-    http::{build_admin_router, build_router},
+    http::{admin_route, route},
     metrics::Metrics,
     state::{AppState, ServerRole},
 };
@@ -42,8 +45,12 @@ async fn run_serve(args: crate::cli::ServeArgs) -> anyhow::Result<()> {
 
     init_tracing(&config.log_level);
 
-    // F + J: 起動ログ（バージョン付き）
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "Adlaire DB starting");
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        data_dir = %config.data_dir.display(),
+        port = config.port,
+        "Adlaire DB starting"
+    );
 
     // G: integrity check スキップ時の警告
     if config.skip_integrity_check {
@@ -88,30 +95,91 @@ async fn run_serve(args: crate::cli::ServeArgs) -> anyhow::Result<()> {
     let admin_listener = tokio::net::TcpListener::bind(("127.0.0.1", config.admin_port)).await?;
 
     tracing::info!(
-        port       = config.port,
-        admin_port = config.admin_port,
+        addr = format!("0.0.0.0:{}", config.port),
+        admin_addr = format!("127.0.0.1:{}", config.admin_port),
         "Adlaire DB listening"
     );
 
     // Step 9: グレースフルシャットダウン付きでサーバー起動（I）
-    let api_router   = build_router(Arc::clone(&state));
-    let admin_router = build_admin_router(Arc::clone(&state));
     let shutdown_timeout = config.shutdown_timeout;
 
     let (sd_tx, mut sd_rx) = tokio::sync::watch::channel(false);
     let mut sd_rx2 = sd_rx.clone();
 
+    let api_state = Arc::clone(&state);
     let api_task = tokio::spawn(async move {
-        axum::serve(api_listener, api_router)
-            .with_graceful_shutdown(async move { sd_rx.changed().await.ok(); })
-            .await
-            .ok();
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = api_listener.accept() => {
+                    let (stream, _) = match accepted {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!(err = %e, "API listener accept failed");
+                            continue;
+                        }
+                    };
+                    let state = Arc::clone(&api_state);
+                    connections.spawn(async move {
+                        let io = TokioIo::new(stream);
+                        let service = service_fn(move |req| {
+                            let state = Arc::clone(&state);
+                            route(req, state)
+                        });
+                        if let Err(e) = http1::Builder::new()
+                            .serve_connection(io, service)
+                            .await
+                        {
+                            tracing::debug!(err = %e, "API connection closed with error");
+                        }
+                    });
+                }
+                _ = sd_rx.changed() => break,
+            }
+        }
+        while let Some(result) = connections.join_next().await {
+            if let Err(e) = result {
+                tracing::debug!(err = %e, "API connection task failed");
+            }
+        }
     });
+
+    let admin_state = Arc::clone(&state);
     let admin_task = tokio::spawn(async move {
-        axum::serve(admin_listener, admin_router)
-            .with_graceful_shutdown(async move { sd_rx2.changed().await.ok(); })
-            .await
-            .ok();
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = admin_listener.accept() => {
+                    let (stream, _) = match accepted {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!(err = %e, "admin listener accept failed");
+                            continue;
+                        }
+                    };
+                    let state = Arc::clone(&admin_state);
+                    connections.spawn(async move {
+                        let io = TokioIo::new(stream);
+                        let service = service_fn(move |req| {
+                            let state = Arc::clone(&state);
+                            admin_route(req, state)
+                        });
+                        if let Err(e) = http1::Builder::new()
+                            .serve_connection(io, service)
+                            .await
+                        {
+                            tracing::debug!(err = %e, "admin connection closed with error");
+                        }
+                    });
+                }
+                _ = sd_rx2.changed() => break,
+            }
+        }
+        while let Some(result) = connections.join_next().await {
+            if let Err(e) = result {
+                tracing::debug!(err = %e, "admin connection task failed");
+            }
+        }
     });
 
     // K: シグナル名付きシャットダウンログ
@@ -119,11 +187,19 @@ async fn run_serve(args: crate::cli::ServeArgs) -> anyhow::Result<()> {
     tracing::info!(signal = sig_name, "shutdown signal received");
     let _ = sd_tx.send(true);
 
-    tokio::select! {
-        _ = async { let _ = tokio::join!(api_task, admin_task); } => {},
-        _ = tokio::time::sleep(std::time::Duration::from_secs(shutdown_timeout)) => {
-            tracing::warn!(timeout_secs = shutdown_timeout, "graceful shutdown timed out, forcing exit");
-        }
+    let api_abort = api_task.abort_handle();
+    let admin_abort = admin_task.abort_handle();
+    if tokio::time::timeout(
+        std::time::Duration::from_secs(shutdown_timeout),
+        async { let _ = tokio::join!(api_task, admin_task); },
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!(timeout_secs = shutdown_timeout, "graceful shutdown timed out, forcing exit");
+        api_abort.abort();
+        admin_abort.abort();
+        tokio::task::yield_now().await;
     }
 
     // Step 10: DB クローズ

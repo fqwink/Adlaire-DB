@@ -1,82 +1,62 @@
-use std::sync::Arc;
+use std::{convert::Infallible, sync::Arc};
 
-use axum::{Json, extract::State};
+use http_body_util::BodyExt;
+use hyper::{body::Incoming, Request};
 
 use crate::{
-    auth::{AccessLevel, middleware::Authenticated},
+    auth::{middleware::extract_claims, AccessLevel, Claims},
     db::sqld_adapter::SqldAdapter,
     error::AppError,
     hrana::{
         convert::{hrana_to_sql, sql_to_stmt_result},
         types::{HranaError, PipelineRequest, PipelineResponse, StreamRequest, StreamResponse, StreamResult},
     },
+    http::HttpResponse,
     state::SharedState,
 };
 
-// ── カスタム JSON エクストラクター ────────────────────────────────────────────
-// axum::Json は JSON パースエラーを 422 で返すが、仕様は 400 INVALID_REQUEST を要求する
-
-pub struct JsonPayload<T>(pub T);
-
-#[async_trait::async_trait]
-impl<T, S> axum::extract::FromRequest<S> for JsonPayload<T>
-where
-    T: serde::de::DeserializeOwned,
-    S: Send + Sync,
-{
-    type Rejection = AppError;
-
-    async fn from_request(
-        req:   axum::extract::Request,
-        state: &S,
-    ) -> Result<Self, Self::Rejection> {
-        let bytes = axum::body::Bytes::from_request(req, state)
-            .await
-            .map_err(|_| AppError::InvalidRequest)?;
-        serde_json::from_slice::<T>(&bytes)
-            .map(JsonPayload)
-            .map_err(|_| AppError::InvalidRequest)
+pub async fn handle(
+    req: Request<Incoming>,
+    state: SharedState,
+    db_name: &str,
+) -> Result<HttpResponse, Infallible> {
+    let claims = match extract_claims(&req, &state).await {
+        Ok(c) => c,
+        Err(e) => return Ok(e.into_response()),
+    };
+    let req = match parse_json_body::<PipelineRequest>(req).await {
+        Ok(r) => r,
+        Err(e) => return Ok(e.into_response()),
+    };
+    let db = match state.db_mgr.get(db_name).await {
+        Some(db) => db,
+        None => return Ok(AppError::DbNotFound(db_name.to_string()).into_response()),
+    };
+    match execute_pipeline(&db, &claims, &req.requests, db_name).await {
+        Ok(results) => Ok(crate::http::json_ok(&PipelineResponse {
+            baton: None,
+            base_url: None,
+            results,
+        })),
+        Err(e) => Ok(e.into_response()),
     }
 }
 
-// ── シングル DB ハンドラ（Phase 3） ───────────────────────────────────────────
-
-pub async fn handle(
-    State(state):          State<SharedState>,
-    Authenticated(claims): Authenticated,
-    JsonPayload(req):      JsonPayload<PipelineRequest>,
-) -> Result<Json<PipelineResponse>, AppError> {
-    let db = state
-        .db_mgr
-        .get("default")
+async fn parse_json_body<T: serde::de::DeserializeOwned>(
+    req: Request<Incoming>,
+) -> Result<T, AppError> {
+    let bytes = req
+        .into_body()
+        .collect()
         .await
-        .ok_or_else(|| AppError::DbNotFound("default".to_string()))?;
-    let results = execute_pipeline(&db, &claims, &req.requests, "default").await?;
-    Ok(Json(PipelineResponse { baton: None, base_url: None, results }))
+        .map_err(|_| AppError::InvalidRequest)?
+        .to_bytes();
+    serde_json::from_slice::<T>(&bytes).map_err(|_| AppError::InvalidRequest)
 }
-
-// ── マルチ DB ハンドラ（Phase 6 用スタブ） ────────────────────────────────────
-
-pub async fn handle_db(
-    State(state):          State<SharedState>,
-    Authenticated(claims): Authenticated,
-    axum::extract::Path(db_name): axum::extract::Path<String>,
-    JsonPayload(req):      JsonPayload<PipelineRequest>,
-) -> Result<Json<PipelineResponse>, AppError> {
-    let db = state
-        .db_mgr
-        .get(&db_name)
-        .await
-        .ok_or_else(|| AppError::DbNotFound(db_name.clone()))?;
-    let results = execute_pipeline(&db, &claims, &req.requests, &db_name).await?;
-    Ok(Json(PipelineResponse { baton: None, base_url: None, results }))
-}
-
-// ── パイプライン実行コア ──────────────────────────────────────────────────────
 
 async fn execute_pipeline(
     db:       &Arc<dyn SqldAdapter>,
-    claims:   &crate::auth::Claims,
+    claims:   &Claims,
     requests: &[StreamRequest],
     db_name:  &str,
 ) -> Result<Vec<StreamResult>, AppError> {
@@ -85,6 +65,16 @@ async fn execute_pipeline(
     for req in requests {
         match req {
             StreamRequest::Execute { stmt } => {
+                if !stmt.named_args.is_empty() {
+                    results.push(StreamResult::Error {
+                        error: HranaError {
+                            message: "named arguments are not supported yet".into(),
+                            code:    "SQLITE_ERROR".into(),
+                        },
+                    });
+                    continue;
+                }
+
                 if is_write_stmt(&stmt.sql)
                     && claims.resolve_access(db_name) != AccessLevel::Rw
                 {
@@ -127,8 +117,6 @@ async fn execute_pipeline(
             }
 
             StreamRequest::Sequence { sql } => {
-                // execute_batch に丸ごと渡すことで文字列リテラル内のセミコロンを
-                // 誤分割しない。結果は hrana プロトコル上 1 件のみ返す。
                 match db.execute_batch(sql).await {
                     Ok(()) => results.push(StreamResult::Ok {
                         response: StreamResponse::Sequence,
@@ -154,8 +142,6 @@ async fn execute_pipeline(
 
     Ok(results)
 }
-
-// ── ヘルパー ──────────────────────────────────────────────────────────────────
 
 fn is_write_stmt(sql: &str) -> bool {
     let upper = sql.trim_start().to_ascii_uppercase();

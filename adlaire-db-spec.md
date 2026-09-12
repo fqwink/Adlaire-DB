@@ -912,6 +912,15 @@ Content-Type: application/json
 `baton`：セッション継続識別子。`null` で新規セッション、前回レスポンスの `baton` で継続。  
 `type`：`"execute"`（SQL 実行）/ `"close"`（セッション終了）/ `"sequence"`（スクリプト実行）。
 
+**Phase 3 の制約：**
+
+- `baton` は互換性のために受理するが、サーバー側セッションは保持しない。レスポンスでは常に `baton: null` を返す
+- `stmt.args` は positional 引数として処理する
+- `stmt.named_args` は Phase 3 では未対応。空配列または省略のみ有効とし、非空の場合は当該 request を `results[].type="error"` として返す
+- `want_rows=true` の場合は `query()`、`want_rows=false` の場合は `execute()` を使用する
+- `sequence` は `execute_batch()` に SQL 文字列全体を渡し、セミコロンによる自前分割は行わない
+- `close` は ok response を返し、その後の request は処理しない
+
 **引数の型：**
 
 | `type` | 説明 |
@@ -971,6 +980,16 @@ Content-Type: application/json
   ]
 }
 ```
+
+**HTTP ステータスの扱い：**
+
+| 条件 | HTTP | body |
+|------|------|------|
+| JSON が壊れている / 必須フィールド欠落 / request type 不明 | 400 | `{"error":"...","code":"INVALID_REQUEST"}` |
+| DB が存在しない | 404 | `{"error":"database not found: ...","code":"DB_NOT_FOUND"}` |
+| SQL エラー | 200 | `results[i].type="error"` |
+| 引数変換エラー | 200 | `results[i].type="error"` |
+| 権限不足による書き込み拒否 | 200 | `results[i].type="error","code":"PERMISSION_DENIED"` |
 
 #### GET /v2/health
 
@@ -1524,6 +1543,8 @@ Step 5: メタデータ読み込み（Phase 1〜5 はシングル DB のため�
        なければ空のリスト `{"tokens":[]}` として初期化し書き出す
   5-3. {data-dir}/meta/branches.json が存在すれば読み込みメモリに展開（Phase 14〜）
        なければ空のリスト `{"branches":[]}` として初期化し書き出す
+  ※ Phase 3 では tokens.json / branches.json の内容は利用しないが、
+     将来フェーズとの互換性のためファイル自体は初期化する
 
 Step 6: DB オープン
   【Phase 1〜5 — シングル DB 固定】
@@ -1559,7 +1580,7 @@ Step 1: シャットダウン開始
 
 Step 2: 新規リクエスト受付を停止
   HTTP リスナーを閉じる。処理中のリクエストは最大 --shutdown-timeout（デフォルト 30s）待機する。
-  タイムアウト超過の場合は強制終了する（WARN ログを出力）。
+  タイムアウト超過の場合は接続タスクを中断し、WARN ログを出力する。
 
 Step 3: DB クローズ
   Arc<libsql::Database> の最後の参照が drop される（WAL チェックポイント + ファイルクローズ）
@@ -1628,7 +1649,434 @@ Step 5: 停止完了
 | **Phase 15** | SQLite 拡張・内製化・HA | — | — |
 
 
-### 9.0 共通実装詳細
+### 9.0 実装判断ルール
+
+実装中に仕様の解釈で迷った場合は、以下の順で判断する。
+
+1. 本仕様書の「固定制約」「設計不変条件」「API 仕様」「エラー定義」を優先する
+2. 同じ Phase 内の「スコープ」「対象外」「完了ゲート」を優先する
+3. 既存実装と仕様が違う場合は仕様を優先する。ただし仕様変更が必要な場合は作業ルールの変更承認フローに従う
+4. Phase に明記されていない機能は、その Phase では実装しない。必要なら次 Phase の対象として仕様に追記してから実装する
+5. 互換性判断で迷う場合は libSQL/Turso の hrana ワイヤ互換を優先する。ただしセルフホスト運用・データ永続性・セキュリティ制約を破ってはならない
+6. エラー形式で迷う場合は §7.3 の `code` を使う。新しいエラーが必要な場合は先に §7.3 へ追加する
+7. JSON schema で迷う場合は「省略可能」「null 可」「空配列可」を本文に明記する。明記がないフィールドは必須とする
+8. 永続化を伴う処理は、成功応答前にファイル内容とメタデータの両方が整合していることを必須とする
+
+**曖昧語の扱い：**
+
+| 表現 | 実装上の扱い |
+|------|--------------|
+| 「必須」 | Phase 完了条件に含める。未実装なら Phase 未完了 |
+| 「任意」 | 実装してよいが、完了条件には含めない。未実装でも API 契約を壊してはならない |
+| 「対象外」 | その Phase では実装しない。route を生やす場合は 501 または仕様で定めた stub 応答に限定する |
+| 「将来」「検討」 | 実装禁止。対象 Phase が明記されるまでコードに入れない |
+| 「スタブ」 | レスポンス形式・ステータス・ログ有無を本仕様に従って固定する |
+
+### 9.1 全 Phase 共通の完了条件
+
+各 Phase は、個別ゲートに加えて以下をすべて満たすこと。
+
+1. `cargo build` と `cargo test` が成功する
+2. その Phase で追加・変更した API の正常系、異常系、権限系、永続化系テストが追加されている
+3. 既存 Phase のテストケースがリグレッションしない
+4. API レスポンスの HTTP status、JSON body、`code` が §6・§7 と一致している
+5. 永続化ファイルは tmp 書き込み、fsync、rename の順でアトミックに更新する。ただし対象 FS で fsync が利用できない場合は起動時に WARN ではなくエラーとする
+6. メタデータ破損、DB 破損、設定不正は起動成功扱いにしない
+7. ログには秘密情報、JWT、生 SQL 引数の値、管理トークンを出さない
+8. 新しい設定値を追加した場合は、CLI/config/env の優先順位、デフォルト値、不正値エラーを §4 と §8.4 に追記する
+9. 新しい永続化ファイルを追加した場合は、ディレクトリ構成、初期値、破損時挙動、バックアップ対象かどうかを §3.2 または該当 Phase に追記する
+10. 新しい外部 crate を追加する場合は、採用理由、代替案、対象 Phase、セキュリティ影響を仕様書に明記する
+
+### 9.2 Phase 別完了ゲート
+
+以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
+
+| Phase | 完了ゲート | 明示的な対象外 |
+|-------|------------|----------------|
+| Phase 1 | Cargo workspace が成立し、`adlaire-db serve` / `adlaire-db token create` の CLI skeleton が起動する。`--data` 未指定は clap のエラーになる。config.toml は CLI > TOML > default で解決される | DB オープン、HTTP サーバー、JWT 発行 |
+| Phase 2 | `--data` 配下に `databases/`、`meta/`、`.lock` が準備され、`default/data.db` を libsql local で開ける。WAL、busy_timeout、synchronous=NORMAL、integrity_check が起動時に適用される | HTTP API、認証、マルチ DB CRUD |
+| Phase 3 | `GET /v2/health` と `POST /v2/pipeline` が hrana-http v2 互換で動く。JSON 不正は HTTP 400、SQL エラーは HTTP 200 + hrana error。Web フレームワーク依存がない | JWT 認証、WebSocket、管理 API 実装、マルチ DB 完了判定 |
+| Phase 4 | HS256 JWT 検証、`token create`、tokens.json 追記、revoke 照合、ro/rw 権限チェックが動く。認証なし・不正・期限切れ・失効済みの各エラーが §7.3 と一致する | DB スコープ JWT、管理 API token CRUD、自動化された全 revoke フロー |
+| Phase 5 | 構造化 JSON ログ、HTTP request ログ、Phase 1〜5 の統合テスト、TypeScript SDK 互換テスト、再起動後の永続化テストが通る | マルチ DB、WebSocket、replication、backup |
+| Phase 6 | `/{db-name}/v2/pipeline` が動き、DB 名バリデーション、DbManager の create/list/get/delete 内部機構、databases.json のアトミック更新が動く。`/v2/pipeline` は default fallback のまま維持される | 管理 API route の完全実装、DB スコープ JWT、backup |
+| Phase 7 | 管理 API の DB CRUD、token CRUD、DB スコープ JWT、管理 API 認証、revoke 即時反映が動く。全管理 API は §6.4 の status/body に一致する | WebSocket、ATTACH、replication、backup |
+| Phase 8 | hrana-ws v3 の hello/open_stream/execute/sequence/close_stream/store_sql/close_sql が動き、同一 stream 内の interactive transaction が同一接続で保持される | ATTACH、metrics、replication、backup |
+| Phase 9 | 管理下 DB のみを対象に ATTACH が動き、任意パス ATTACH を拒否する。metrics API は counters/gauges を返し、HTTP/DB/WebSocket 経路から値が更新される | WAL replication、backup、branch |
+| Phase 10 | primary role で replication API（log/snapshot/heartbeat/status）が起動し、WAL frame 番号、CRC32、snapshot header が仕様通り返る。replica 受信・適用はまだ完了条件に含めない | replica 同期完了、書き込みリダイレクト、WAL archive retention |
+| Phase 11 | replica が primary から snapshot/WAL を取得して追いつき、replica 書き込みは 307 redirect または primary 到達不能時の規定エラーになる。health に role/lag が出る | WAL archive、PITR、branch |
+| Phase 12 | WAL archive と manifest.json がアトミックに更新され、retention cleanup が動く。CRC32 と manifest/files の整合性検査がある | backup/restore API、PITR restore、branch |
+| Phase 13 | backup、restore、PITR API が動き、restore 失敗時は元 DB が復元される。PITR 無効、範囲外、CRC 不一致のエラーが §7.3 と一致する | branch、外部ストレージ転送、HA |
+| Phase 14 | branch 作成、一覧、削除、再起動後復元が動く。branch DB は `{db}___{branch}` として通常 DB と同じ pipeline でアクセスでき、元 DB と独立して書き込める | branch merge、copy-on-write 最適化、SQLite 拡張 |
+| Phase 15 | SQLite 拡張ロード、内製化対象、HA 方針を実装可能な仕様として再確定し、採用する拡張/内製化範囲ごとのテストゲートを追加する。Phase 15 は本表のまま実装開始してはならない | 未承認の外部依存、仕様未確定の HA 自動 failover |
+
+### 9.3 API 実装決定表
+
+API を実装する場合は、各 endpoint について必ず次を仕様本文または該当 Phase に明記する。
+
+| 項目 | 必須記述 |
+|------|----------|
+| 認証 | 不要 / JWT 必須 / Admin token 必須 / replication token 必須 |
+| HTTP method/path | method、path parameter、query parameter、末尾 slash の扱い |
+| request body | JSON schema、必須/任意/null 可、unknown field の扱い |
+| success response | status、headers、body schema、空 body かどうか |
+| error response | status、`code`、message の粒度、部分成功があるか |
+| 永続化 | 変更するファイル、アトミック更新要否、失敗時 rollback |
+| ログ | INFO/WARN/ERROR の発火条件、秘匿する値 |
+| テスト | 正常系、異常系、権限系、再起動後確認 |
+
+**デフォルト決定：**
+
+- unknown JSON field は原則無視する。ただしセキュリティ・永続化・復元系 API では `INVALID_REQUEST` としてよい。その場合は endpoint ごとに明記する
+- request body が空であるべき API に body がある場合は、body を無視せず `INVALID_REQUEST` とする
+- path parameter は URL decode 後にバリデーションする
+- 管理 API の成功レスポンスは作成 `201`、削除 `204`、取得/一覧 `200` を原則とする
+- 非同期ジョブを導入する場合は、job id、status endpoint、再起動後の扱いを先に仕様化する
+
+### 9.4 Phase 別実装契約
+
+各 Phase の実装者は、この表の契約を満たすこと。既存の詳細節と矛盾がある場合は、この表を優先し、矛盾箇所を同時に修正する。
+
+#### Phase 1〜5：単一 DB・HTTP・認証基盤
+
+| Phase | 変更対象 | API/CLI 契約 | 永続化 | エラー/ログ | テスト契約 |
+|-------|----------|--------------|--------|-------------|------------|
+| Phase 1 | `Cargo.toml`, `adlaire-server/Cargo.toml`, `cli.rs`, `config.rs`, `main.rs` | `serve` と `token create` を clap subcommand として定義する。`serve --data` は必須。`token create` は Phase 4 までは stub でよいが、引数 validation は行う | なし | CLI parse error は clap の標準エラー。config parse error は起動失敗 | `cargo build`, `cargo test`, `adlaire-db --help`, `adlaire-db serve --help` |
+| Phase 2 | `data_dir.rs`, `db/sqld_adapter.rs`, `db/manager.rs`, `db/meta.rs` | 外部 HTTP API はまだ提供しない。`run_serve` 内で `default/data.db` を開けること | `meta/databases.json`, `meta/tokens.json`, `meta/branches.json`, `.lock`, `databases/default/data.db` を初期化する | lock 取得失敗、metadata parse 失敗、integrity_check 失敗は起動失敗。skip_integrity_check は WARN | 初回起動、再起動、二重起動拒否、DB ファイル作成、WAL 設定確認 |
+| Phase 3 | `http/mod.rs`, `http/pipeline.rs`, `http/health.rs`, `hrana/*`, `error.rs`, `main.rs` | `GET /v2/health`, `POST /v2/pipeline` のみ Phase 完了対象。`/v2/pipeline` は `default` DB 固定 | Phase 2 の永続化を継続。SQL 成功応答前に SQLite/libsql の commit が完了していること | malformed JSON は HTTP 400。SQL エラーは HTTP 200 + hrana error。HTTP request log は Phase 5 まで必須ではない | TC-1, TC-2, TC-6。`named_args` 非空、invalid JSON、SQL error、close 後無視を含める |
+| Phase 4 | `auth/*`, `token/*`, `config.rs`, `main.rs`, `http/pipeline.rs` | `Authorization: Bearer <JWT>` を検証する。`token create` は JWT を stdout に出す。認証無効モードは secret 未指定時のみ | `meta/tokens.json` に token record を追記する。追記は atomic update | `AUTH_REQUIRED`, `AUTH_INVALID`, `AUTH_EXPIRED`, `PERMISSION_DENIED` を §7.3 通り返す。JWT/token secret はログ出力禁止 | TC-3。valid/none/bad/expired/revoked/ro-write を含める |
+| Phase 5 | `tests/*`, logging middleware, `metrics.rs` stub | API 追加は禁止。既存 API の互換性と運用ログを固める | 新規永続化なし。既存 DB の再起動後永続性を検証する | JSON Lines logs。method/path/status/duration_ms を記録し、Authorization と SQL args は出さない | TC-1〜TC-6、TypeScript SDK 互換、再起動後 SELECT、ログ形式検証 |
+
+**Phase 1〜5 の境界決定：**
+
+- Phase 5 完了まで、外部公開 API は `/v2/health` と `/v2/pipeline` のみとする
+- 管理 API route を早期に生やす場合は 501 stub に限定し、Phase 5 完了条件には含めない
+- JWT secret が設定されている場合、Phase 4 完了前は起動拒否、Phase 4 完了後は認証有効として扱う
+
+#### Phase 6〜9：マルチ DB・管理 API・WebSocket・ATTACH
+
+| Phase | 変更対象 | API 契約 | 永続化 | エラー/ログ | テスト契約 |
+|-------|----------|----------|--------|-------------|------------|
+| Phase 6 | `db/manager.rs`, `db/meta.rs`, `http/mod.rs`, `http/pipeline.rs` | `POST /{db-name}/v2/pipeline` を追加する。`/v2/pipeline` は `default` のまま。管理 API はまだ完了対象外 | `meta/databases.json` に DB 追加/削除を atomic update。各 DB は `databases/{name}/data.db` | invalid DB name は `INVALID_DB_NAME`、予約名は `DB_RESERVED_NAME`、未存在は `DB_NOT_FOUND` | DB 名 validation、複数 DB 分離、default fallback、再起動後 DB 復元 |
+| Phase 7 | `http/admin/*`, `auth/*`, `token/*`, `db/manager.rs` | `/admin/v1/databases`, `/admin/v1/tokens` を §6.4 通り実装する。Admin token は Bearer 完全一致。DB scope JWT を有効化 | `databases.json` と `tokens.json` を API 経由で更新する。削除はファイル/ディレクトリと metadata を整合させる | 管理 API 認証失敗は `401 AUTH_REQUIRED`。重複 DB は `409 DB_ALREADY_EXISTS`。revoke は即時反映 | TC-2-1〜TC-2-6。admin auth、DB CRUD、token CRUD、DB scope ro/rw |
+| Phase 8 | `ws/*`, `hrana/*`, `db/sqld_adapter.rs`, `http/mod.rs` | `GET /v3/baton` と `GET /{db-name}/v3/baton` で WebSocket upgrade。hrana-ws v3 messages を実装 | SQL 実行による DB 永続化のみ。WebSocket session state はプロセス内メモリでよく、再起動復元しない | hello 前 request は protocol error。stream 未存在は hrana error。接続 close 時に未完了 transaction は rollback | TC-3-1〜TC-3-4。interactive transaction、store_sql/close_sql、auth failure、multi stream |
+| Phase 9 | `attach/*`, `metrics.rs`, `http/admin/metrics`, `db/sqld_adapter.rs` | 管理下 DB の ATTACH のみ許可。`GET /admin/v1/metrics` を実装する | 新規ファイルなし。metrics はプロセス内 counters/gauges でよく再起動リセット | 任意パス ATTACH は `PERMISSION_DENIED` または `INVALID_REQUEST`。metrics 取得は admin auth 対象 | TC-3-5, TC-3-6。ATTACH 成功/拒否、metrics counters 更新 |
+
+**Phase 6/7 の境界決定：**
+
+- Phase 6 は path-based routing と DbManager 内部機構まで。HTTP 管理 API の完成は Phase 7
+- Phase 6 で DB 作成用の内部関数を実装してよいが、外部 API として成功応答を返すのは Phase 7
+- DB scope JWT は Phase 7。Phase 6 では global `a` claim のみ有効
+
+**Phase 8/9 の境界決定：**
+
+- WebSocket の transaction/session 維持は Phase 8
+- クロス DB クエリ、ATTACH policy、metrics は Phase 9
+- Phase 8 の WebSocket 実装中に metrics hook を入れてよいが、metrics API 完了条件には含めない
+
+#### Phase 10〜14：レプリケーション・WAL アーカイブ・バックアップ・ブランチ
+
+| Phase | 変更対象 | API 契約 | 永続化 | エラー/ログ | テスト契約 |
+|-------|----------|----------|--------|-------------|------------|
+| Phase 10 | `replication/primary.rs`, `http/replication.rs`, `state.rs`, `config.rs` | primary role で `/replication/v1/log`, `/snapshot`, `/heartbeat`, `/status` を提供する。replica loop は未完了でよい | replication state はプロセス内。snapshot response は DB の整合した byte stream を返す | replication token 不正は `AUTH_INVALID`。from_frame 不正は `INVALID_REQUEST`。checksum を必ず出す | API contract tests、snapshot header、heartbeat status、SSE/long-poll 挙動 |
+| Phase 11 | `replication/replica.rs`, redirect middleware, `http/health.rs` | replica role で primary から snapshot/WAL を取得する。replica 書き込みは 307 redirect。primary 到達不能時の挙動を固定する | replica 側 DB に WAL 適用済み状態を保存する。再起動後は最後の frame から再開する | checksum mismatch は frame skip + ERROR log + 再取得対象。health は `ok`/`degraded` を返す | TC-4-1〜TC-4-5。停止/復帰、primary down、multi replica |
+| Phase 12 | `wal/archive.rs`, `wal/manifest.rs`, cleanup task, `config.rs` | 外部 API 追加は不要。archive/cleanup は内部機能 | `wal-archive/manifest.json`, frame files, snapshot file を atomic update。retention cleanup は manifest と file を同時整合 | manifest 破損は起動失敗。frame missing は ERROR。cleanup の削除件数を INFO log | TC-5-8。retention、manifest/files consistency、CRC mismatch detection |
+| Phase 13 | `http/admin/backup.rs`, restore service, PITR service | backup/restore/PITR API を §6.4 通り実装する。restore/PITR は admin auth 必須 | restore 前に元 DB を退避し、失敗時は必ず rollback。PITR は snapshot + WAL replay | `PITR_NOT_ENABLED`, `FRAME_NOT_FOUND`, `RESTORE_INTEGRITY_FAILED`, `RESTORE_FRAME_CORRUPT` を使用 | TC-5-1〜TC-5-7。同時書き込み、不正 file、範囲外、CRC 破壊、rollback |
+| Phase 14 | `http/admin/branches.rs`, branch metadata, `db/manager.rs`, PITR helper | branch CRUD API を実装し、branch DB は `{db}___{branch}` として通常 pipeline でアクセスする | `meta/branches.json` と branch DB directory を atomic に整合。削除時は metadata と directory の両方を消す | branch 名不正は `INVALID_DB_NAME`、`___` 衝突は `DB_RESERVED_NAME`。削除済み branch pipeline は `DB_NOT_FOUND` | TC-6-1〜TC-6-7。current/timestamp/frame branch、独立書き込み、再起動復元 |
+
+**Phase 10/11 の境界決定：**
+
+- Phase 10 は primary が WAL/snapshot を提供するところまで
+- Phase 11 は replica がそれを消費し、health/redirect を完成させるところまで
+- write-mode `sync` の完全な quorum/ack semantics は Phase 11 で定義されている範囲のみ実装する。未定義なら async と同じ挙動にしてはならず、起動時に設定エラーとする
+
+**Phase 12/13 の境界決定：**
+
+- Phase 12 は WAL archive を作るだけで、restore API は実装しない
+- Phase 13 は archive を使って backup/restore/PITR を公開 API として完成させる
+- restore/PITR は破壊的操作なので、途中失敗時の rollback 成功までが API 成功条件である
+
+**Phase 14 の境界決定：**
+
+- branch は通常 DB と同じ routing/auth/backup policy に従う
+- branch merge、copy-on-write 最適化、外部 storage 連携は Phase 14 対象外
+- branch 名と DB 名は同じ validation を使い、`___` を含む名前は禁止する
+
+#### Phase 15：実装開始前に再確定する項目
+
+Phase 15 は「候補フェーズ」であり、以下を追記してからでなければ実装開始してはならない。
+
+| 項目 | 実装前に必ず決めること |
+|------|------------------------|
+| SQLite 拡張 | 対象拡張名、ロード方式（`.so` / Wasm / static link）、許可ディレクトリ、署名検証、sandbox 方針 |
+| 内製化 | libSQL から置き換える対象、互換性テスト、rollback 方針、性能目標 |
+| HA | leader election 方式、failover 条件、split-brain 防止、書き込み一貫性、運用手順 |
+| API | 新規 endpoint、既存 endpoint の変更有無、後方互換性 |
+| テスト | failure injection、crash recovery、性能回帰、長時間 soak test |
+
+Phase 15 の実装 PR は、上表を具体化する仕様変更 PR と分ける。仕様変更 PR が承認されるまで、コード実装を開始しない。
+
+### 9.5 全 API endpoint 契約表
+
+この表は実装対象 endpoint のインデックスである。詳細 schema は §6 および各 Phase 節を正とするが、認証・status・永続化・冪等性で迷った場合はこの表を優先する。
+
+| Method / Path | Phase | 認証 | Request | Success | 主な Error | 永続化 | 冪等性 |
+|---------------|-------|------|---------|---------|------------|--------|--------|
+| `GET /v2/health` | 3 / 11 拡張 | 不要 | body なし | 200 JSON。Phase 3 は `{status:"ok"}`、Phase 11 以降は role/lag を追加 | 500 `INTERNAL_ERROR` | なし | Yes |
+| `POST /v2/pipeline` | 3 | Phase 4 以降 JWT。Phase 3 は認証無効のみ | hrana-http v2 `PipelineRequest` | 200 `PipelineResponse`。SQL error は results 内 error | 400 `INVALID_REQUEST`, 401 auth 系, 404 `DB_NOT_FOUND`, 503 `STORAGE_BUSY` | SQL 書き込み時のみ DB | No |
+| `POST /{db-name}/v2/pipeline` | 6 | JWT | path DB + hrana-http v2 | 200 `PipelineResponse` | 400 `INVALID_DB_NAME`, 404 `DB_NOT_FOUND`, auth 系, storage 系 | SQL 書き込み時のみ対象 DB | No |
+| `GET /v3/baton` | 8 | WebSocket hello JWT | WebSocket upgrade | 101 Switching Protocols | 400 upgrade 不正, hello error `AUTH_*` | session 内 SQL 書き込み時のみ DB | 接続単位 |
+| `GET /{db-name}/v3/baton` | 8 | WebSocket hello JWT | path DB + WebSocket upgrade | 101 Switching Protocols | 400/404/auth 系 | session 内 SQL 書き込み時のみ対象 DB | 接続単位 |
+| `GET /admin/v1/databases` | 7 | Admin token | body なし | 200 `{databases:[...]}` | 401 `AUTH_REQUIRED` | なし | Yes |
+| `POST /admin/v1/databases` | 7 | Admin token | `{name}` | 201 `DbInfo` | 400 `INVALID_DB_NAME`/`DB_RESERVED_NAME`, 409 `DB_ALREADY_EXISTS` | `databases.json`, DB directory | No |
+| `GET /admin/v1/databases/{name}` | 7 | Admin token | body なし | 200 `DbInfo` | 400 invalid name, 404 `DB_NOT_FOUND` | なし | Yes |
+| `DELETE /admin/v1/databases/{name}` | 7 | Admin token | body なし | 204 empty body | 400 invalid/reserved, 404 `DB_NOT_FOUND` | `databases.json`, DB directory deletion | Yes: missing DB remains 404 |
+| `GET /admin/v1/tokens` | 7 | Admin token | body なし | 200 `{tokens:[...]}` token value は返さない | 401 `AUTH_REQUIRED` | なし | Yes |
+| `POST /admin/v1/tokens` | 7 | Admin token | `{access, expiry?, dbs?}` | 201 `{id, token, ...}`。token は作成時のみ返す | 400 `INVALID_REQUEST` | `tokens.json` | No |
+| `GET /admin/v1/tokens/{id}` | 7 | Admin token | body なし | 200 token metadata。JWT 文字列は返さない | 404 `TOKEN_NOT_FOUND` | なし | Yes |
+| `DELETE /admin/v1/tokens/{id}` | 7 | Admin token | body なし | 204 empty body | 404 `TOKEN_NOT_FOUND` | `tokens.json`, in-memory revoke set | Yes: 既に revoked は 204 |
+| `GET /admin/v1/metrics` | 9 | Admin token | body なし | 200 metrics JSON | 401 `AUTH_REQUIRED` | なし | Yes |
+| `GET /replication/v1/log?from_frame=N` | 10 | replication token | query `from_frame` | 200 SSE frames | 400 `INVALID_REQUEST`, 401 `AUTH_INVALID`, 404 `FRAME_NOT_FOUND` | なし | 接続単位 |
+| `GET /replication/v1/snapshot` | 10 | replication token | query/body なし | 200 octet-stream + replication headers | auth 系, 500 | なし | Yes |
+| `POST /replication/v1/heartbeat` | 10 | replication token | `{replica_id, synced_frame}` | 200 `{primary_frame, lag_frames}` | 400 `INVALID_REQUEST`, auth 系 | primary in-memory replica status | Yes |
+| `GET /replication/v1/status` | 10 | replication token | body なし | 200 primary replication status | auth 系 | なし | Yes |
+| `GET /admin/v1/databases/{name}/backup` | 13 | Admin token | body なし | 200 octet-stream SQLite backup | 404 `DB_NOT_FOUND`, auth 系 | なし | Yes |
+| `POST /admin/v1/databases/{name}/restore` | 13 | Admin token | octet-stream SQLite file | 200 restore result JSON | 409 `RESTORE_INTEGRITY_FAILED`, 404 `DB_NOT_FOUND` | target DB replace + rollback temp | No |
+| `POST /admin/v1/databases/{name}/restore/point-in-time` | 13 | Admin token | `{timestamp}` または `{frame_no}` | 200 restore result JSON | 503 `PITR_NOT_ENABLED`, 404 `FRAME_NOT_FOUND`, 409 `RESTORE_FRAME_CORRUPT` | target DB replace + rollback temp | No |
+| `GET /admin/v1/databases/{name}/branches` | 14 | Admin token | body なし | 200 `{branches:[...]}` | 404 `DB_NOT_FOUND` | なし | Yes |
+| `POST /admin/v1/databases/{name}/branches` | 14 | Admin token | `{branch_name, from}` | 201 branch metadata | invalid/reserved name, `FRAME_NOT_FOUND` | `branches.json`, branch DB directory | No |
+| `DELETE /admin/v1/databases/{name}/branches/{branch}` | 14 | Admin token | body なし | 204 empty body | 404 `DB_NOT_FOUND` | `branches.json`, branch DB directory deletion | Yes: missing branch remains 404 |
+
+### 9.6 永続化ファイル契約表
+
+| Path | Phase | Owner | 初期値 | 更新方式 | fsync | 破損時挙動 | Backup 対象 |
+|------|-------|-------|--------|----------|-------|------------|-------------|
+| `{data-dir}/.lock` | 2 | `ProcessLock` | 空ファイル可 | open + flock。内容は意味を持たない | 不要 | flock が取れれば続行。削除不要 | No |
+| `{data-dir}/meta/databases.json` | 2 / 6 / 7 | `DbManager` | `{"databases":[]}` | tmp write + fsync + rename | 必須 | 起動失敗。自動修復しない | Yes |
+| `{data-dir}/meta/tokens.json` | 2 / 4 / 7 | `AuthState` / token 管理 | `{"tokens":[]}` | tmp write + fsync + rename | 必須 | 起動失敗。空で上書きしない | Yes |
+| `{data-dir}/meta/branches.json` | 2 / 14 | branch 管理 | `{"branches":[]}` | tmp write + fsync + rename | 必須 | Phase 14 以降は起動失敗。Phase 13 以前は初期化のみ | Yes |
+| `{data-dir}/databases/{name}/data.db` | 2+ | libsql / DbManager | libsql 作成 | libsql commit | libsql に委譲 | integrity_check NG なら起動失敗 | Yes |
+| `{data-dir}/databases/{name}/data.db-wal` | 2+ | SQLite WAL | SQLite 作成 | SQLite WAL | SQLite に委譲 | SQLite recovery に委譲。integrity_check で検出 | Yes |
+| `{data-dir}/databases/{name}/wal-archive/manifest.json` | 12 | WAL archive | archive 有効時に作成 | tmp write + fsync + rename | 必須 | 起動失敗。PITR/backup API は使わない | Yes |
+| `{data-dir}/databases/{name}/wal-archive/frame-*.bin` | 12 | WAL archive | なし | create + write + fsync | 必須 | manifest と不整合なら ERROR。PITR 対象から除外または起動失敗を Phase 12 で固定 | Yes |
+| `{data-dir}/databases/{name}/wal-archive/snapshot-*.db` | 12 | WAL archive | なし | copy + fsync + rename | 必須 | PITR 不可。manifest 整合性検査で検出 | Yes |
+| restore temp dir | 13 | restore/PITR | API 実行時のみ | temp write + fsync + rename/swap | 必須 | 中断時は元 DB を復元。残骸は次回起動時に cleanup して WARN | No |
+| `{data-dir}/databases/{db}___{branch}/data.db` | 14 | branch 管理 | branch 作成時 | libsql commit | libsql に委譲 | branch metadata と不整合なら WARN + branch 無効化、または起動失敗を Phase 14 で固定 | Yes |
+
+**永続化の禁止事項：**
+
+- metadata 更新後に file 更新する順序は禁止。作成時は file を先に準備し、metadata を最後に commit する
+- 削除時は runtime map から外し、DB close を確認し、directory 削除し、metadata 更新する。途中失敗時は再起動後に一貫した状態へ復旧できること
+- JSON metadata を partial write してはならない。必ず tmp file を使う
+- 破損 metadata を空初期値で上書きしてはならない
+
+### 9.7 エラーコード使用契約表
+
+| Code | 使用 Phase | 使用 API | Retry | Client action |
+|------|------------|----------|-------|---------------|
+| `AUTH_REQUIRED` | 4+ / admin 7+ | JWT/API/Admin/replication 認証必須 endpoint | No | Authorization header を付ける |
+| `AUTH_INVALID` | 4+ | JWT/Admin/replication token 検証 | No | token を再発行または設定修正 |
+| `AUTH_EXPIRED` | 4+ | JWT | No | token を再発行 |
+| `AUTH_DISABLED` | 将来 | 認証無効時に許可されない管理操作 | No | サーバー設定を変更 |
+| `PERMISSION_DENIED` | 4+ / 9 | ro 書き込み、任意パス ATTACH 等 | No | 権限または request を変更 |
+| `DB_NOT_FOUND` | 6+ | DB path, 管理 API, branch/backup | No | DB 名を確認または作成 |
+| `TOKEN_NOT_FOUND` | 7+ | token get/delete | No | token id を確認 |
+| `DB_ALREADY_EXISTS` | 7+ | DB create | No | 別名を使う |
+| `INVALID_DB_NAME` | 6+ | DB/branch create/path validation | No | name を修正 |
+| `DB_RESERVED_NAME` | 6+ / 14 | `meta`, `admin`, `___` 含有名 | No | name を修正 |
+| `INVALID_REQUEST` | 3+ | JSON/schema/query/body 不正 | No | request を修正 |
+| `SQLITE_ERROR` | 3+ | hrana results 内 | Depends | SQL を修正。busy は `STORAGE_BUSY` を使う |
+| `SQLITE_CONSTRAINT` | 3+ | hrana results 内 | No | data/constraint を修正 |
+| `STORAGE_BUSY` | 3+ | DB write/read lock timeout | Yes | backoff retry |
+| `REPLICATION_TIMEOUT` | 10+ | sync write / replication ACK | Yes | retry または replication 状態確認 |
+| `PITR_NOT_ENABLED` | 13+ | PITR/branch from timestamp/frame when archive disabled | No | `wal_retention_days` を有効化 |
+| `FRAME_NOT_FOUND` | 10+ / 13+ / 14 | replication log, PITR, branch | Depends | frame range/retention を確認 |
+| `RESTORE_INTEGRITY_FAILED` | 13+ | restore | No | backup file を確認 |
+| `RESTORE_FRAME_CORRUPT` | 13+ | PITR | No | archive corruption を復旧 |
+| `INTERNAL_ERROR` | all | 未分類内部エラー | Depends | server log を確認 |
+
+### 9.8 Phase 別テストマトリクス
+
+| Phase | 正常系 | Invalid request | Auth/permission | Persistence/restart | Crash/rollback | Regression |
+|-------|--------|-----------------|-----------------|---------------------|----------------|------------|
+| 1 | CLI help, config merge | unknown flag, missing `--data` | n/a | n/a | n/a | build/test |
+| 2 | data dir init, DB open | invalid config, short secret | n/a | restart opens same DB | double lock / crash leaves flock releasable | Phase 1 |
+| 3 | health, CREATE/INSERT/SELECT | malformed JSON, unknown type, bad value | auth disabled only | inserted data survives restart | SIGINT releases lock | Phase 1〜2 |
+| 4 | valid JWT, token create | malformed JWT, bad expiry | missing/bad/expired/revoked/ro-write | tokens survive restart | token write atomicity | Phase 1〜3 |
+| 5 | TS SDK CRUD, logs | n/a | auth cases from Phase 4 | TC-5 restart | graceful shutdown timeout | Phase 1〜4 |
+| 6 | multi DB route isolation | invalid/reserved DB name | global JWT applies | databases.json survives restart | DB create/delete partial failure recovery | Phase 1〜5 |
+| 7 | admin DB/token CRUD | malformed admin body | admin token, DB scoped JWT | tokens/databases survive restart | revoke/write atomicity | Phase 1〜6 |
+| 8 | ws hello/open/execute/tx | invalid frame/order/stream | hello auth, ro-write | committed tx survives restart | disconnect rolls back open tx | Phase 1〜7 |
+| 9 | ATTACH managed DB, metrics | arbitrary path ATTACH | admin metrics auth | metrics reset acceptable | n/a | Phase 1〜8 |
+| 10 | primary replication APIs | bad from_frame/body | replication token | snapshot consistent | log stream disconnect/reconnect | Phase 1〜9 |
+| 11 | replica catchup/redirect | bad primary URL | replication token | replica resumes from last frame | primary down / replica restart | Phase 1〜10 |
+| 12 | archive manifest/frame cleanup | bad retention config | n/a | manifest survives restart | partial archive write recovery | Phase 1〜11 |
+| 13 | backup/restore/PITR | bad restore file/body | admin auth | restored DB survives restart | restore failure rollback | Phase 1〜12 |
+| 14 | branch create/list/delete | invalid branch name | admin/JWT on branch DB | branch survives restart | branch create/delete partial failure | Phase 1〜13 |
+| 15 | TBD by Phase 15 spec PR | TBD | TBD | TBD | failure injection 必須 | Phase 1〜14 |
+
+### 9.9 実装禁止事項
+
+- 仕様にない endpoint を成功応答付きで公開しない
+- Phase 外機能を「ついで」に実装しない。前倒しする場合は仕様の Phase 境界を先に変更する
+- `unwrap()` / `expect()` で request 由来・disk 由来・network 由来の失敗を panic にしない
+- invalid config を黙って default に fallback しない。空文字を無効扱いにする場合は仕様に明記する
+- DB/branch/token metadata と実ファイルを不整合なまま成功応答しない
+- 認証 secret、JWT、admin token、replication token、生 SQL 引数値、backup contents をログに出さない
+- SQL 文字列を ad hoc split して複数 statement として処理しない。`sequence` は `execute_batch()` に渡す
+- 任意ファイルパスを SQL/API から開かない。DB 名は必ず validation と管理 metadata 照合を通す
+- Web フレームワークを導入しない。HTTP ルーティングは hyper ベースの自前実装を維持する
+- `INTERNAL_ERROR` で仕様済みエラーを隠さない。対応する code がある場合は必ずそれを使う
+
+### 9.10 Phase 15 事前決定テンプレート
+
+Phase 15 の仕様変更 PR では、実装対象ごとに以下を埋める。
+
+```md
+#### Phase 15.x: <機能名>
+
+目的:
+対象外:
+
+API:
+- Method/path:
+- Auth:
+- Request:
+- Success:
+- Errors:
+
+永続化:
+- Files:
+- Atomic update:
+- Recovery:
+
+セキュリティ:
+- Trust boundary:
+- Secret handling:
+- Sandbox/signature:
+
+運用:
+- Config:
+- Logs:
+- Metrics:
+- Rollback:
+
+テスト:
+- Normal:
+- Invalid:
+- Auth/permission:
+- Persistence:
+- Crash/failover:
+- Performance:
+```
+
+### 9.11 Definition of Ready / Definition of Done
+
+各 Phase の実装を始める前に Ready を満たし、merge 前に Done を満たすこと。
+
+| Phase | Definition of Ready | Definition of Done |
+|-------|---------------------|--------------------|
+| 1 | workspace 名、binary 名、CLI subcommand 名、必須 flag が決まっている | help 出力、config merge skeleton、build/test が通る |
+| 2 | data-dir 構成、metadata 初期値、lock 方式、libsql open 設定が決まっている | 初回起動/再起動/二重起動拒否/integrity_check が通る |
+| 3 | hrana-http request/response、HTTP status 境界、auth disabled 条件が決まっている | `/v2/health` と `/v2/pipeline` の正常/異常/永続化テストが通る |
+| 4 | JWT claims、token record schema、expiry/revoke/access 仕様が決まっている | token create、JWT verify、revoke、ro/rw permission tests が通る |
+| 5 | ログ field、秘匿対象、統合テスト環境、SDK version が決まっている | Phase 1〜5 TC と SDK 互換、永続化、ログ形式が通る |
+| 6 | DB 名 validation、path routing、databases.json migration 方針が決まっている | multi DB routing、分離、再起動復元、invalid name tests が通る |
+| 7 | admin API schema、admin auth、token CRUD、DB scope claim が決まっている | DB/token CRUD、DB scoped auth、revoke immediate tests が通る |
+| 8 | hrana-ws message schema、stream lifecycle、transaction lifecycle が決まっている | WebSocket handshake/execute/tx/store_sql tests が通る |
+| 9 | ATTACH rewrite policy、metrics schema、counter 更新点が決まっている | managed ATTACH、path rejection、metrics auth/counter tests が通る |
+| 10 | primary role、replication token、frame format、snapshot headers が決まっている | replication API contract、SSE/snapshot/heartbeat/status tests が通る |
+| 11 | replica state persistence、redirect policy、primary-down behavior が決まっている | catchup, redirect, restart, primary-down, multi replica tests が通る |
+| 12 | manifest schema、frame naming、retention cleanup、consistency check が決まっている | archive write, cleanup, corruption detection, restart tests が通る |
+| 13 | restore transaction model、rollback temp layout、PITR selector schema が決まっている | backup/restore/PITR/rollback/corrupt archive tests が通る |
+| 14 | branch metadata schema、branch naming、source selector、delete semantics が決まっている | branch create/list/delete/isolation/restart tests が通る |
+| 15 | Phase 15.x 仕様 PR が承認され、API/永続化/HA/テストが具体化されている | Phase 15.x ごとの Done を仕様 PR 内で定義する |
+
+### 9.12 PR レビュー観点
+
+PR レビューでは以下を必ず確認する。該当しない項目は PR description に `N/A` と理由を書く。
+
+| 観点 | 確認内容 |
+|------|----------|
+| Phase 境界 | その PR が対象 Phase のスコープ内か。対象外機能を成功応答付きで公開していないか |
+| API 契約 | method/path/auth/status/body/error が §9.5 と一致しているか |
+| 永続化 | metadata と file の更新順、atomic update、fsync、rollback が §9.6 と一致しているか |
+| エラー | 仕様済み error code を使っているか。`INTERNAL_ERROR` で隠していないか |
+| 認証/認可 | JWT/Admin/replication token の境界が正しいか。ro/rw/DB scope が正しいか |
+| ログ/秘匿 | secret/token/SQL args/backup contents をログに出していないか |
+| 再起動互換 | 既存 metadata で起動できるか。migration が必要なら仕様化されているか |
+| 並行性 | concurrent request、DB lock、shutdown 中 request の挙動が決まっているか |
+| テスト | §9.8 の該当列を満たしているか。regression target が落ちていないか |
+| 後方互換 | 既存 endpoint、metadata、config、SDK 互換を壊していないか |
+
+### 9.13 設定値契約表
+
+| 設定 | CLI | Env | TOML | Default | Phase | 不正値時 |
+|------|-----|-----|------|---------|-------|----------|
+| data dir | `--data` | なし | 書かない | 必須 | 1 | clap error / 起動失敗 |
+| API port | `--port` | なし | `[server] port` | `8080` | 1 | 起動失敗 |
+| admin port | `--admin-port` | なし | `[server] admin_port` | `8081` | 1 | 起動失敗 |
+| config path | `--config` | なし | n/a | `{data}/config.toml` | 1 | 読み込み/parse 失敗で起動失敗 |
+| JWT secret | `--auth-jwt-secret` | `ADLAIRE_JWT_SECRET` | `[auth] jwt_secret` | 認証無効 | 4 | 32 bytes 未満は起動失敗 |
+| JWT secret file | `--auth-jwt-secret-file` | なし | `[auth] jwt_secret_file` | なし | 4 | 読み込み失敗/短すぎは起動失敗 |
+| admin token | `--admin-auth-token` | `ADLAIRE_ADMIN_TOKEN` | `[admin] auth_token` | 管理 API 認証無効 | 7 | 空文字は未指定扱い |
+| log level | `--log-level` | `ADLAIRE_LOG_LEVEL` | `[server] log_level` | `info` | 5 | 不正値は起動失敗を原則とする。fallback する場合は WARN 必須 |
+| skip integrity | `--skip-integrity-check` | なし | `[storage] skip_integrity_check` | `false` | 2 | boolean parse 失敗で起動失敗 |
+| busy timeout | `--busy-timeout` | なし | `[server] busy_timeout_ms` | `5000` | 2 | `0` は許可しない。起動失敗 |
+| shutdown timeout | `--shutdown-timeout` | なし | `[server] shutdown_timeout` | `30` | 3 | `0` は即時 abort として明記しない限り起動失敗 |
+| replication role | `--role` | なし | なし | `standalone` | 10 | unknown role は起動失敗 |
+| primary port | `--primary-port` | なし | なし | `8082` | 10 | bind 失敗で起動失敗 |
+| primary URL | `--primary-url` | なし | なし | replica では必須 | 11 | replica で未指定/parse 失敗なら起動失敗 |
+| replication token | `--replication-auth-token` | なし | なし | なし | 10 | required mode で未指定なら起動失敗 |
+| replication write mode | `--replication-write-mode` | なし | `[replication] write_mode` | `async` | 10 | unknown は起動失敗。未定義 sync semantics は起動失敗 |
+| WAL mode | なし | なし | `[storage] wal_mode` | `passive` | 2 | unknown は起動失敗 |
+| WAL retention | なし | なし | `[storage] wal_retention_days` | `0` | 12 | parse 失敗で起動失敗 |
+| replication sync timeout | なし | なし | `[replication] sync_timeout_ms` | `5000` | 10 | `0` は起動失敗 |
+
+### 9.14 セキュリティ境界表
+
+| 境界 | 信頼しない入力 | 必須対策 | 禁止事項 |
+|------|----------------|----------|----------|
+| public HTTP | method/path/header/body | size limit、JSON validation、auth、timeout | panic、secret log、silent fallback |
+| hrana SQL | SQL text、args、named_args | parameter conversion、write permission、ATTACH interception | SQL split、任意 path open |
+| admin API | path name、JSON body、admin token | Bearer 完全一致、DB name validation、atomic update | token value の再表示、auth bypass |
+| WebSocket | upgrade headers、frames、stream_id | hello auth、message size limit、stream lifecycle validation | hello 前 request 処理、open tx 放置 |
+| replication API | token、frame_no、frame bytes | replication token、CRC32、range validation | checksum 無視、unauthenticated stream |
+| filesystem | metadata JSON、DB files、archive files | canonical data_dir join、atomic update、integrity check | path traversal、自動上書き修復 |
+| backup/restore | uploaded DB、PITR selector | temp restore、integrity_check、rollback | 元 DB の直接上書き、失敗後の不整合 |
+| branch | branch name、source frame/time | DB name validation、source existence check | `___` 含有名、metadata 先行 commit |
+| config/env | TOML/env/CLI values | priority rule、type validation、secret length check | invalid default fallback、secret logging |
+
+### 9.15 互換性ルール
+
+- hrana-http v2 と hrana-ws v3 の wire format は後方互換を維持する
+- `/v2/pipeline` は Phase 6 以降も常に `default` DB を対象とする
+- 新 field を response に追加する場合は、既存 field を削除・rename しない
+- metadata JSON に field を追加する場合は、古い field を読み飛ばせるようにし、既存 file の migration path を仕様化する
+- config の default 値を変更する場合は、migration note と regression test を追加する
+- error `code` を変更してはならない。message は詳細化してよいが、client が code で分岐できる状態を維持する
+- TypeScript `@libsql/client` 互換は Phase 5 以降の regression target とする
+- backup/restore/PITR/branch のファイル形式を変える場合は、旧形式読み込み可否と不可の場合の明示エラーを仕様化する
+
+### 9.16 実装順序ルール
+
+各 Phase の実装は原則として次の順に行う。
+
+1. 仕様内の schema / error / persistence 契約を確定する
+2. 永続化 schema と migration / recovery を実装する
+3. core service logic を実装する
+4. HTTP/WebSocket/CLI API を公開する
+5. 正常系と異常系テストを追加する
+6. restart / rollback / regression test を追加する
+7. README や運用メモを更新する
+
+**順序例外禁止：**
+
+- 永続化 schema 未確定のまま API を先に公開しない
+- rollback 方針未確定のまま破壊的 API を実装しない
+- auth 方針未確定のまま管理 API / replication API を公開しない
+- tests がない状態で Phase 完了扱いにしない
+
+### 9.17 共通実装詳細
 
 全フェーズで共有される型定義・モジュール構成を以下に示す。
 
@@ -2974,6 +3422,17 @@ impl SqldAdapter for MockSqldAdapter {
 - GET `/v2/health`
 - POST `/v2/pipeline`（hrana-http v2 完全実装）
 
+**Phase 3 の実装境界：**
+
+- Web フレームワーク（axum・actix-web・rocket 等）は使用しない。HTTP 受信、ルーティング、JSON パース、エラー応答は hyper ベースの自前実装とする
+- `/v2/pipeline` は常に `default` DB を対象とする。`/{db-name}/v2/pipeline` は Phase 6 以降の経路であり、Phase 3 の完了条件には含めない
+- `baton` は受け取るが Phase 3 ではセッションを保持しない。レスポンスの `baton` / `base_url` は常に `null` とする
+- `execute` は positional `args` をサポートする。`named_args` が空でない場合は、その request を `results[].type="error"` として返す
+- JSON 不正・未知の request type・必須フィールド欠落など、リクエスト全体を解釈できない場合は HTTP 400 `INVALID_REQUEST` を返す
+- SQL 実行エラー、引数変換エラー、読み取り専用トークンによる書き込み拒否など、個別 request の失敗は HTTP 200 のまま `results[i].type="error"` として返す
+- `close` を受け取ったら `close` の ok response を追加し、それ以降の request は処理しない
+- JWT 認証は Phase 4 対象。Phase 3 では secret が未設定の場合のみ起動でき、全 request を `rw` の unauthenticated claims として処理する
+
 **完了条件（テストケース）：**
 
 ```
@@ -3013,15 +3472,28 @@ T-5: HTTP サーバー骨格（hyper）
 
 T-6: hrana-http v2 パイプライン実装
   [ ] POST /v2/pipeline のリクエスト JSON デシリアライズ
-      （baton, requests[].type, requests[].stmt.sql/args/want_rows）
+      （baton, requests[].type, requests[].stmt.sql/args/named_args/want_rows）
   [ ] requests を libsql::Connection.query() / execute() / execute_batch() に渡す
   [ ] libsql の行・カラム型を hrana-http v2 results[] 形式に変換
       （cols, rows, rows_affected, last_insert_rowid）
   [ ] SQL エラーを results[i].type="error" として返す（HTTP 200 のまま）
+  [ ] named_args が空でない execute は results[i].type="error" として返す
   [ ] "close" type リクエストを正しく処理する
   参照: §6.2, §3.3.3
   検証: TC-1（SQL 実行）
 ```
+
+**Phase 3 完了ゲート：**
+
+Phase 3 は次をすべて満たした時点で完了と判定する。
+
+1. `cargo build` と `cargo test` が成功する
+2. `TC-1` / `TC-2` / `TC-6` が手動または統合テストで成功する
+3. `--auth-jwt-secret` または `ADLAIRE_JWT_SECRET` 指定時は、JWT 未実装として起動を拒否する
+4. `meta/databases.json` / `meta/tokens.json` / `meta/branches.json` が初回起動時に初期化される
+5. 起動時の DB オープン・WAL 設定・busy timeout・integrity_check のいずれかに失敗した場合、サーバーは起動成功扱いにしない
+6. malformed JSON は HTTP 400、SQL エラーは HTTP 200 + hrana error という境界が守られている
+7. ソースコードに Web フレームワーク依存がない
 
 ---
 
@@ -3052,14 +3524,18 @@ pub async fn route(
         ("POST", "/v2/pipeline") => pipeline::handle(req, state, "default").await,
         // Phase 6: パスベース DB ルーティング
         ("POST", p) if p.ends_with("/v2/pipeline") => {
-            let db = extract_db_name(p).unwrap_or("default");
-            pipeline::handle(req, state, db).await
+            match extract_db_name(p) {
+                Some(db) => pipeline::handle(req, state, db).await,
+                None     => Ok(not_found()),
+            }
         }
         // Phase 8: WebSocket upgrade
         ("GET", "/v3/baton")   => ws::handle(req, state).await,
         ("GET", p) if p.ends_with("/v3/baton") => {
-            let db = extract_db_name(p).unwrap_or("default");
-            ws::handle_db(req, state, db).await
+            match extract_db_name(p) {
+                Some(db) => ws::handle_db(req, state, db).await,
+                None     => Ok(not_found()),
+            }
         }
         _ => Ok(not_found()),
     }
@@ -3116,7 +3592,11 @@ pub async fn admin_route(
 
 /// パスから db_name を抽出する（"/{db_name}/v2/pipeline" 形式）
 fn extract_db_name(path: &str) -> Option<&str> {
-    path.trim_start_matches('/').split('/').next()
+    let mut segs = path.trim_start_matches('/').split('/');
+    match (segs.next(), segs.next(), segs.next(), segs.next()) {
+        (Some(db), Some("v2"), Some("pipeline"), None) if !db.is_empty() => Some(db),
+        _ => None,
+    }
 }
 
 fn is_db_path(p: &str) -> bool {
@@ -3245,7 +3725,7 @@ pub async fn handle(
     state: SharedState,
     db_name: &str,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
-    let claims = match extract_claims(&req, &state) {
+    let claims = match extract_claims(&req, &state).await {
         Ok(c)  => c,
         Err(e) => return Ok(e.into_response()),
     };
@@ -3282,8 +3762,24 @@ async fn execute_pipeline(
     for req in requests {
         match req {
             StreamRequest::Execute { stmt } => {
+                if !stmt.named_args.is_empty() {
+                    responses.push(StreamResult::Error {
+                        error: HranaError {
+                            message: "named arguments are not supported yet".into(),
+                            code: "SQLITE_ERROR".into(),
+                        },
+                    });
+                    continue;
+                }
+
                 if is_write_stmt(&stmt.sql) && claims.resolve_access(db_name) != AccessLevel::Rw {
-                    return Err(AppError::PermissionDenied);
+                    responses.push(StreamResult::Error {
+                        error: HranaError {
+                            message: "write not permitted".into(),
+                            code: "PERMISSION_DENIED".into(),
+                        },
+                    });
+                    continue;
                 }
                 let sql_args: Result<Vec<_>, _> = stmt.args.iter().map(hrana_to_sql).collect();
                 let sql_args = match sql_args {
@@ -4447,8 +4943,10 @@ impl WsSession {
                 }
                 Ok(ResponseBody::Batch { step_results, step_errors })
             }
-            // store_sql / close_sql（SQL テキストキャッシュ）は Phase 8 未実装
+            // store_sql / close_sql（SQL テキストキャッシュ）は Phase 8 完了条件に含める
             RequestBody::StoreSql { .. } | RequestBody::CloseSql { .. } => {
+                // 実装では statement id → SQL 文字列のキャッシュを WsSession 内に保持する
+                // ここに到達する実装は Phase 8 未完了扱い
                 Err(AppError::InvalidRequest)
             }
         }
@@ -4530,7 +5028,7 @@ TC-3-6: メトリクス API
   （c）GET /admin/v1/metrics（管理トークンなし）→ 401
 ```
 
-**Phase 8 実装タスク：**
+**Phase 8 実装タスク（WebSocket）：**
 
 ```
 T3-1: WebSocket サーバー追加（hyper の WebSocket upgrade）
@@ -4641,7 +5139,9 @@ pub async fn get(
 
 ### Phase 10：レプリケーション基盤（WAL ストリーム・スナップショット）
 
-**目標**：プライマリ・レプリカ構成での運用
+**目標**：プライマリが WAL ストリームとスナップショットを公開できる状態にする
+
+Phase 10 はレプリケーションの**送信側（primary）基盤**を完成させるフェーズである。レプリカが WAL を継続取得・適用して追いつくこと、レプリカ書き込みを redirect すること、health に lag を出すことは Phase 11 の完了条件とする。
 
 #### アーキテクチャ
 
@@ -4654,8 +5154,8 @@ pub async fn get(
 ```
 
 - プライマリとレプリカは同じバイナリ。起動フラグでロールを決定する
-- レプリカはプライマリの WAL フレームを HTTP ストリームで受信して自身の DB に適用する
-- レプリカへの書き込みは `307 Temporary Redirect` でプライマリへ転送する
+- Phase 10 では primary role の replication API を実装する
+- Phase 11 では replica role の WAL 取得・適用ループと書き込み redirect を実装する
 
 #### 起動フラグ（Phase 10 追加）
 
@@ -4663,7 +5163,7 @@ pub async fn get(
 # プライマリとして起動
 adlaire-db serve --data ./data --role primary --primary-port 8082
 
-# レプリカとして起動
+# レプリカとして起動（Phase 11 で完了）
 adlaire-db serve --data ./data --role replica --primary-url http://primary:8082
 ```
 
@@ -4671,7 +5171,7 @@ adlaire-db serve --data ./data --role replica --primary-url http://primary:8082
 |--------|------|
 | `--role` | `standalone`（デフォルト）/ `primary` / `replica` |
 | `--primary-port` | プライマリが WAL ストリームを公開するポート（デフォルト: 8082）|
-| `--primary-url` | レプリカが接続するプライマリの URL |
+| `--primary-url` | レプリカが接続するプライマリの URL（Phase 11 で有効化） |
 | `--replication-auth-token` | プライマリ・レプリカ間の認証トークン |
 
 #### レプリケーション API
@@ -4815,7 +5315,7 @@ pub struct ReplicaStatus {
 }
 ```
 
-**レプリカ側フレーム受信・適用ループ：**
+**レプリカ側フレーム受信・適用ループ（Phase 11 実装）：**
 
 ```rust
 // replication/replica.rs
@@ -4891,7 +5391,7 @@ TC-4-5: マルチレプリカ同期
   両レプリカで同じデータが返ること
 ```
 
-**Phase 10 実装タスク：**
+**Phase 10 実装タスク（前フェーズの完了条件）：**
 
 ```
 T4-1: --role フラグ対応（standalone / primary / replica の起動分岐）
@@ -5323,6 +5823,8 @@ Phase 14 完了後に計画する。候補（優先度未確定）：
 - 高可用性・自動フェイルオーバー
 - メトリクス永続化・外部監視連携（Prometheus 等）
 
+Phase 15 は候補機能の集合であり、この節だけを根拠に実装してはならない。実装開始前に §9.4 の Phase 15 表に従い、対象機能、API、永続化形式、障害時挙動、テストゲートを具体化する仕様変更を先に行うこと。
+
 ---
 
 
@@ -5595,4 +6097,3 @@ Phase 1〜7 と並行して着手可能なものから開始する。
 | プロパティテスト | 1000 ケース以上で回帰チェック |
 
 ---
-
