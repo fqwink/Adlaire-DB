@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.72
+**バージョン：** 0.73
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -2298,6 +2298,48 @@ artifact path は deterministic に固定し、実装者、実行環境、実行
 
 artifact は Phase 完了 PR と同じ commit に含める。後続 PR で artifact だけを追加して Phase 完了扱いにすることは禁止する。artifact を更新する場合は、対応する仕様 section、Contract ID、test ID、manifest、PR description を同時に更新しなければならない。
 
+#### 9.1.12 仕様矛盾解消固定契約
+
+仕様書内の複数 section が同じ対象について異なる挙動、status、error code、永続化 schema、設定優先順位、認証境界、Phase 境界、証跡要件を示す場合、その状態を仕様矛盾とみなす。仕様矛盾がある対象は、実装者の判断で実装してはならない。
+
+**仕様優先順位：**
+
+| 優先順位 | Source | 適用範囲 |
+|----------|--------|----------|
+| 1 | §1.4 設計不変条件 | 全 Phase、全機能の最上位制約 |
+| 2 | §9.1〜§9.17 の実装固定契約 | Phase 完了条件、契約 ID、証跡、ゼロバグ判定 |
+| 3 | §9.2 Phase 別完了ゲート / §9.4 unsupported 固定表 | Phase 境界、対象外、前倒し可否 |
+| 4 | §9.5 API endpoint 契約表 / §9.6 永続化ファイル契約表 / §9.7 エラーコード使用契約表 / §9.13 設定値契約表 / §9.14 セキュリティ境界表 | 実装対象の具体契約 |
+| 5 | 各 Phase 詳細節 | Phase 内の補足仕様 |
+| 6 | Rust コード例、JSON 例、CLI 例、説明文中の例 | 実装参考。上位契約と矛盾する場合は上位契約を正とする |
+
+上位 Source と下位 Source が矛盾する場合は、上位 Source を一時的な正とする。ただし、下位 Source を放置したまま実装 PR を進めてはならない。矛盾を発見した PR は、実装前に仕様修正 PR として矛盾箇所を解消する。
+
+**矛盾の種類と必須対応：**
+
+| 矛盾 | 必須対応 |
+|------|----------|
+| Phase 境界と詳細節が異なる | §9.2 / §9.4 と詳細節を同じ PR で修正する |
+| API status/body と error code 表が異なる | §9.5、§9.7、該当 API 節、snapshot 期待値を同時更新する |
+| persistence schema と Phase 詳細が異なる | §9.6、該当 Phase 節、migration / rollback 契約を同時更新する |
+| config default / priority が複数箇所で異なる | §9.13、CLI/env/TOML 例、manifest の Config map を同時更新する |
+| security boundary と API 説明が異なる | §9.14、該当 API 節、deny/redaction test を同時更新する |
+| Turso Cloud 互換方針と自己ホスト差分が異なる | §1.4、§9.4、該当 Phase 節、compatibility diff を同時更新する |
+| コード例 / JSON 例 / CLI 例だけが本文と異なる | 例を本文に合わせる。本文を変える場合は上位契約も更新する |
+
+**禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| 矛盾を PR description だけで説明し、仕様本文を直さない | Phase 未完了 |
+| 上位 Source だけを直し、下位 Source の矛盾を残す | review failure |
+| test 期待値だけを直し、仕様本文を直さない | review failure |
+| manifest だけを直し、Contract ID / artifact path / 仕様 section を直さない | Phase 未完了 |
+| 「実装上はこちらを採用」として仕様矛盾を残す | merge 不可 |
+| 未来 Phase で直す前提で現在 Phase の成功応答を公開する | merge 不可 |
+
+矛盾解消後は、該当 Contract ID、manifest、test name、artifact path、PR description の追跡表が同じ挙動を指していなければならない。1 つでも古い仕様を参照している場合は、矛盾未解消として扱う。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -2925,6 +2967,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Phase スコープ | 対象機能と対象外が §9.2 / §9.4 に明記されている | 仕様追記まで実装しない |
 | Phase 受入 manifest | §9.1.10 の必須 fields が実装開始前に固定されている | 実装 PR として扱わない |
 | Evidence artifact | §9.1.11 の保存先、命名、正規化、secret scan が固定されている | 証跡生成まで完了扱いにしない |
+| 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | API 契約 | method/path/auth/request/success/error が §9.5 または各 API 節に明記されている | route を追加しない |
 | Error code | 失敗条件ごとの `code` が §7.3 / §9.7 に存在する | 先に error code を追加する |
 | 永続化 | ファイル名、schema、atomic update、rollback、破損時挙動が §9.6 に明記されている | 書き込み処理を実装しない |
