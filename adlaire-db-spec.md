@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.40  
+**バージョン：** 0.41  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-12  
 
@@ -239,11 +239,10 @@ regex              = "1"
 # tokio-tungstenite = "0.21"
 # Phase 9〜 で追加予定
 # dashmap = "5"
+bytes              = "1"
 # Phase 10〜 で追加予定
 # url   = "2"
-# bytes = "1"
 # crc32fast = "1"
-# hex   = "0.4"
 ```
 
 **adlaire-server/Cargo.toml：**
@@ -278,6 +277,10 @@ tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid               = { workspace = true }
 regex              = { workspace = true }
+
+[dev-dependencies]
+reqwest  = { version = "0.12", features = ["json"] }
+tempfile = "3"
 ```
 
 #### 3.3.2 libsql crate との境界（呼び出しインターフェース）
@@ -363,9 +366,9 @@ POST /v2/pipeline
 | `async-trait` | 0.1 | `SqldAdapter` トレイトの async fn | 1 |
 | `dashmap` | 5 | `Metrics`・`ReplicationState` の並行マップ | 9 |
 | `url` | 2 | `ServerRole::Replica` の `primary_url` 型 | 10 |
-| `bytes` | 1 | WAL フレームバッファ（`WalFrame::data`） | 10 |
+| `bytes` | 1 | WAL フレームバッファ（`WalFrame::data`）・hyper レスポンスボディ | 1 |
 | `crc32fast` | 1 | WAL フレーム CRC32 チェックサム | 10 |
-| `cc`（build-dep） | 1 | `libsql-sys` が SQLite をコンパイルするためのビルド依存 | 1 |
+| `cc`（推移的ビルド依存） | 1 | `libsql-sys` → `libsql` の推移的依存。`libsql-sys` が SQLite C ソースをコンパイルするために使用。`Cargo.toml` には書かない | 1 |
 
 **内製クレート一覧（現行 + 計画）：**
 
@@ -571,6 +574,8 @@ OPTIONS:
                          JWT 署名秘密鍵（HS256）。未指定時は認証無効（開発用）
   --auth-jwt-secret-file <FILE>
                          秘密鍵をファイルから読み込む
+  --admin-auth-token <TOKEN>
+                         管理 API 固定認証トークン（未指定時は認証無効）。環境変数 ADLAIRE_ADMIN_TOKEN も使用可
   --log-level <LEVEL>    ログレベル: error / warn / info / debug（デフォルト: info）
   --skip-integrity-check 起動時の PRAGMA integrity_check をスキップ（非推奨。WARN ログ出力）
   --replication-write-mode <MODE>
@@ -722,6 +727,8 @@ Phase 7 から JWT に省略可能な `dbs` クレームを追加する。
 
 **Phase 7 JWT 検証フロー（DB スコープ対応版）：**
 
+> **§5.4 vs §5.6 の使い分け**：§5.6 の 6 ステップフローは Phase 1〜6 の実装基準（`dbs` クレーム不使用）。§5.4 の 7 ステップフローは Phase 7 以降の拡張版（`dbs` クレームによる DB スコープ権限を追加）。実装フェーズに応じて参照するセクションを切り替える。
+
 ```
 1. Authorization: Bearer <JWT> ヘッダを取得
    → なし → 401 AUTH_REQUIRED
@@ -818,6 +825,7 @@ adlaire-db token create --secret "my-secret" \
 
 **パフォーマンス：**
 - サーバー起動時に `tokens.json` をメモリへロードする
+- 失効済みトークン ID の集合はメモリ上に `RwLock<HashSet<String>>` で保持する（`AuthState` 内）
 - `DELETE /admin/v1/tokens/{id}` 受信時にメモリ上の失効リストを更新し `tokens.json` を書き直す
 - メモリロード後は `tokens.json` の再読み込みは行わない（サーバー再起動で反映）
 
@@ -1341,8 +1349,8 @@ GET /admin/v1/metrics     全 DB のメトリクス取得
 | `DB_ALREADY_EXISTS` | 409 | 同名 DB が既に存在する |
 | `INVALID_DB_NAME` | 400 | DB 名がバリデーションを通過しない |
 | `INVALID_REQUEST` | 400 | リクエスト JSON が不正 |
-| `SQLITE_ERROR` | 400 | SQL 構文・実行エラー |
-| `SQLITE_CONSTRAINT` | 400 | 制約違反（UNIQUE 等） |
+| `SQLITE_ERROR` | 200※ | SQL 構文・実行エラー |
+| `SQLITE_CONSTRAINT` | 200※ | 制約違反（UNIQUE 等） |
 | `STORAGE_BUSY` | 503 | WAL ロック待機タイムアウト |
 | `REPLICATION_TIMEOUT` | 503 | sync モードでレプリカ ACK タイムアウト |
 | `PITR_NOT_ENABLED` | 503 | PITR 試行時に `wal_retention_days = 0` |
@@ -1351,6 +1359,8 @@ GET /admin/v1/metrics     全 DB のメトリクス取得
 | `RESTORE_FRAME_CORRUPT` | 409 | WAL フレームの CRC32 検証失敗 |
 | `DB_RESERVED_NAME` | 400 | `___` を含む DB 名の直接作成試行 |
 | `INTERNAL_ERROR` | 500 | サーバー内部エラー |
+
+※ `SQLITE_ERROR` / `SQLITE_CONSTRAINT` は `POST /v2/pipeline` の HTTP レスポンスが 200 OK でも、`results[].type = "error"` として返す（hrana プロトコルの仕様）。HTTP 400 を返すのは `INVALID_REQUEST`（JSON 不正等）のみ。
 
 ### 7.4 エラーレスポンステストケース
 
@@ -1586,6 +1596,8 @@ Step 5: 停止完了
 
 全フェーズで共有される型定義・モジュール構成を以下に示す。
 
+> **§14.x 番号規則**：§14 以下のサブセクション番号は実装順ではなく参照便宜のための固定 ID。欠番（§14.x が存在しない番号）は将来追加のために予約している。各フェーズの実装詳細は対応フェーズ節の直下に配置するが、§14.x 番号で相互参照できる。
+
 #### 14.1 モジュール構成
 
 ```
@@ -1651,11 +1663,12 @@ pub struct AppState {
 
 pub type SharedState = Arc<AppState>;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub enum ServerRole {
     Standalone,
     Primary { primary_port: u16 },
-    // Phase 10: Replica { primary_url: url::Url },
+    // Phase 10: 下記を有効化（url クレート追加が前提）
+    // Replica { primary_url: url::Url },
 }
 ```
 
@@ -1672,8 +1685,7 @@ pub struct Config {
     pub admin_auth_token:  Option<String>,   // None = 認証無効（開発用）
     pub jwt_secret_bytes:  Option<Vec<u8>>, // 32 バイト以上。None = 認証無効
     pub shutdown_timeout:  u64,             // グレースフルシャットダウン最大秒数（デフォルト 30）
-    pub skip_integrity_check: bool,         // 起動時整合性チェックをスキップ（デフォルト false）
-    pub storage:           StorageConfig,
+    pub storage:           StorageConfig,   // skip_integrity_check は StorageConfig に移管
     pub replication:       ReplicationConfig,
 }
 
@@ -2236,7 +2248,7 @@ pub enum CliCommand {
 #[derive(Subcommand)]
 pub enum TokenSubcommand { Create(TokenCreateArgs) }
 
-#[derive(Parser)]
+#[derive(Parser, Default)]
 pub struct ServeArgs {
     #[arg(long, required = true)] pub data:                    PathBuf,
     #[arg(long)] pub port:                                     Option<u16>,
@@ -2451,6 +2463,8 @@ async fn shutdown_signal_named() -> &'static str {
 
 #### 14.13 Config 解決ロジック
 
+> **フィールドマッピング注意**：`busy_timeout_ms` は TOML では `[server]` セクションに書くが（§4.2）、Rust の型システムでは `StorageConfig::busy_timeout_ms` に格納する。これは「ストレージに近い設定」として内部的に分類しているためで、TOML の `[storage]` に書いても無視される。
+
 ```rust
 // config.rs
 
@@ -2486,8 +2500,10 @@ pub struct TomlAdmin {
 
 #[derive(Debug, serde::Deserialize, Default)]
 pub struct TomlStorage {
-    pub wal_mode:              Option<String>,
-    pub skip_integrity_check:  Option<bool>,
+    pub wal_mode:                          Option<String>,
+    pub skip_integrity_check:              Option<bool>,
+    pub wal_retention_days:                Option<u64>,
+    pub integrity_check_interval_hours:    Option<u64>,
 }
 
 #[derive(Debug, serde::Deserialize, Default)]
@@ -2543,8 +2559,10 @@ impl Config {
         // 4. 3-way マージ（CLI > TOML > デフォルト）
         let port       = args.port.or(srv.port).unwrap_or(8080);
         let admin_port = args.admin_port.or(srv.admin_port).unwrap_or(8081);
+        let log_level_env = std::env::var("ADLAIRE_LOG_LEVEL").ok();
         let log_level  = args.log_level.as_deref()
             .or(srv.log_level.as_deref())
+            .or(log_level_env.as_deref())
             .unwrap_or("info")
             .to_string();
         let busy_timeout_ms: u64  = args.busy_timeout.or(srv.busy_timeout_ms).unwrap_or(5000);
@@ -2734,7 +2752,7 @@ pub trait SqldAdapter: Send + Sync {
     /// 単一ステートメントを実行する。
     /// **注記**: RealSqldAdapter の実装では呼び出しのたびに新規 Connection を生成する。
     /// そのため、execute() を複数回呼び出しても同一トランザクション内に収まる保証はない。
-    /// インタラクティブトランザクション（BEGIN/COMMIT を跨ぐ操作）は Phase 5 の WebSocket
+    /// インタラクティブトランザクション（BEGIN/COMMIT を跨ぐ操作）は Phase 8 の WebSocket
     /// セッション設計時に再検討する。
     async fn execute(
         &self,
@@ -3067,6 +3085,11 @@ pub fn hrana_to_sql(v: &Value) -> Result<SqlValue, AppError> {
     })
 }
 
+/// hrana `Value` のスライスを `SqlValue` の `Vec` に変換する（ws/session.rs から呼び出す）
+pub fn hrana_values_to_params(args: &[Value]) -> Result<Vec<SqlValue>, AppError> {
+    args.iter().map(hrana_to_sql).collect()
+}
+
 /// `SqlResult` → hrana `StmtResult`
 pub fn sql_to_stmt_result(r: SqlResult) -> StmtResult {
     let rows = r.rows.into_iter().map(|row| {
@@ -3098,7 +3121,7 @@ fn sql_val_to_hrana(v: SqlValue) -> Value {
 #### 14.15 HTTP ハンドラ実装
 
 ```rust
-// handlers/pipeline.rs
+// http/pipeline.rs
 
 use hyper::{Request, Response, body::Incoming};
 use http_body_util::{Full, BodyExt};
@@ -3234,9 +3257,12 @@ fn is_write_stmt(sql: &str) -> bool {
 }
 
 // ヘルスチェックハンドラ
-// handlers/health.rs
-pub async fn handle() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok" }))
+// http/health.rs
+pub async fn handle(
+    _req: Request<Incoming>,
+    _state: SharedState,
+) -> Result<Response<Full<Bytes>>, Infallible> {
+    Ok(json_ok(&serde_json::json!({ "status": "ok" })))
 }
 ```
 
@@ -3255,14 +3281,16 @@ pub async fn handle() -> Json<serde_json::Value> {
 **完了条件（テストケース）：**
 
 ```
-TC-3: JWT 認証ありモード
-  $ SECRET="test-secret"
+TC-3: JWT 認証ありモード（Phase 4 CLI 手動確認）
+  $ SECRET="test-secret-at-least-32bytes-long"
   $ TOKEN=$(./adlaire-db token create --secret "$SECRET")
   $ ./adlaire-db serve --data ./testdb --port 8080 --auth-jwt-secret "$SECRET"
   （a）有効なトークンで SQL 実行 → 200 OK
   （b）Authorization ヘッダなし → 401 AUTH_REQUIRED
   （c）不正なトークン → 401 AUTH_INVALID
 ```
+
+> **注意**：TC-3 の自動化（tokens.json CRUD + revoke フローを含む完全検証）は Phase 7 の TC-2-4〜TC-2-5 で行う。Phase 4 では上記の CLI ベース手動確認が完了条件。自動テストは `tests/integration/auth.rs` として Phase 7 で追加する。
 
 **実装タスク：**
 
@@ -3308,7 +3336,7 @@ use hyper::{Request, body::Incoming};
 
 /// Authorization ヘッダから JWT を検証し Claims を返す
 /// 認証無効モード（jwt_secret 未設定）は Claims::unauthenticated() を返す
-pub fn extract_claims<B>(
+pub async fn extract_claims<B>(
     req: &Request<B>,
     state: &SharedState,
 ) -> Result<Claims, AppError> {
@@ -3323,7 +3351,7 @@ pub fn extract_claims<B>(
         .and_then(|s| s.strip_prefix("Bearer "))
         .ok_or(AppError::AuthRequired)?;
 
-    state.auth.verify(raw)
+    state.auth.verify(raw).await
 }
 ```
 
@@ -3352,8 +3380,41 @@ impl AuthState {
     }
 }
 
+#[cfg(test)]
+impl AuthState {
+    /// テスト用: 秘密鍵と失効済み sub リストを直接指定して AuthState を構築する
+    pub fn load_with(secret: &[u8], revoked_subs: Vec<String>) -> Self {
+        let mut revoked = std::collections::HashSet::new();
+        for sub in revoked_subs { revoked.insert(sub); }
+        Self {
+            secret_bytes: Some(secret.to_vec()),
+            revoked:      tokio::sync::RwLock::new(revoked),
+        }
+    }
+
+    /// テスト用: 有効期限なしのテストトークンを発行する
+    pub fn issue_test_token(&self, access: AccessLevel) -> String {
+        // Phase 4 で実装
+        let _ = access;
+        unimplemented!("issue_test_token は Phase 4 で実装")
+    }
+
+    /// テスト用: 任意の exp を持つテストトークンを発行する
+    pub fn issue_test_token_exp(&self, access: AccessLevel, exp: Option<chrono::DateTime<chrono::Utc>>) -> String {
+        let _ = (access, exp);
+        unimplemented!("issue_test_token_exp は Phase 4 で実装")
+    }
+
+    /// テスト用: 指定 sub を同期的に失効リストへ追加する
+    pub fn revoke_sync(&self, sub: &str) {
+        // Phase 4 で実装（tokio::sync::RwLock は非同期。テスト用に try_write を使用）
+        let _ = sub;
+        unimplemented!("revoke_sync は Phase 4 で実装")
+    }
+}
+
 /// Phase 4 スタブ。tokens.json の読み込みは Phase 4 で実装する。
-pub fn load_tokens(_config: &Config) -> anyhow::Result<Vec<()>> {
+pub fn load_tokens(_config: &Config) -> anyhow::Result<Vec<TokenRecord>> {
     Ok(vec![])
 }
 ```
@@ -4147,11 +4208,15 @@ pub struct DescribeParam { pub name: Option<String> }
 ```rust
 // ws/session.rs
 use std::collections::HashMap;
-use crate::hrana::convert::hrana_values_to_params;
+use crate::hrana::convert::{hrana_values_to_params, sql_to_stmt_result};
+use crate::db::sqld_adapter::SqldAdapter;
+
+// sql_to_stmt_result のローカルエイリアス（ws 内での可読性向上）
+fn to_stmt_result(r: SqlResult) -> StmtResult { sql_to_stmt_result(r) }
 
 pub struct WsSession {
-    db:      std::sync::Arc<libsql::Database>,
-    streams: HashMap<u32, WsStream>,  // stream_id → WsStream
+    db:      std::sync::Arc<dyn SqldAdapter>,  // Arc<libsql::Database> ではなくアダプタ経由
+    streams: HashMap<u32, WsStream>,           // stream_id → WsStream
     auth:    Claims,
 }
 
@@ -4164,7 +4229,7 @@ pub struct WsStream {
 pub enum TransactionMode { None, ReadOnly, ReadWrite }
 
 impl WsSession {
-    pub fn new(db: std::sync::Arc<libsql::Database>, auth: Claims) -> Self {
+    pub fn new(db: std::sync::Arc<dyn SqldAdapter>, auth: Claims) -> Self {
         Self { db, streams: HashMap::new(), auth }
     }
 
@@ -4205,10 +4270,9 @@ impl WsSession {
             }
             RequestBody::Sequence { sql } => {
                 let stream = self.streams.get_mut(&stream_id).ok_or(AppError::InvalidRequest)?;
-                for stmt_sql in split_sql_statements(&sql) {
-                    stream.conn.execute(&stmt_sql, libsql::params![]).await
-                        .map_err(|e| AppError::Sqld(e.to_string()))?;
-                }
+                // execute_batch に丸ごと渡すことで文字列リテラル内のセミコロンを誤分割しない
+                stream.conn.execute_batch(&sql).await
+                    .map_err(|e| AppError::Sqld(e.to_string()))?;
                 Ok(ResponseBody::Sequence)
             }
             RequestBody::Describe { stmt } => {
@@ -4344,7 +4408,7 @@ T3-8: 統合テスト TC-3-1〜TC-3-6
 /// foo が Adlaire 管理外（バリデーション失敗 or 未登録）なら Err を返す。
 pub async fn resolve_attach(
     sql: &str,
-    db_mgr: &dyn DbManager,
+    db_mgr: &DbManager,
     data_dir: &std::path::Path,
 ) -> Result<String, AppError> {
     let re = regex::Regex::new(
@@ -4383,13 +4447,13 @@ pub fn record_metrics(metrics: &DbMetrics, results: &[StreamResult]) {
     }
 }
 
-// handlers/admin/metrics.rs
+// http/admin/metrics.rs
 
 /// GET /admin/v1/metrics  → プロセス起動からの累積カウンター
 pub async fn get_metrics(
-    State(state): State<Arc<AppState>>,
-    _auth: AdminAuth,
-) -> Json<serde_json::Value> {
+    req: Request<Incoming>,
+    state: SharedState,
+) -> Result<Response<Full<Bytes>>, Infallible> {
     use std::sync::atomic::Ordering::Relaxed;
     let uptime = state.metrics.started_at.elapsed().as_secs();
     let databases: Vec<serde_json::Value> = state.metrics.databases.iter().map(|e| {
@@ -4412,12 +4476,12 @@ pub async fn get_metrics(
             "rows_written_total":m.rows_written_total.load(Relaxed),
         })
     }).collect();
-    Json(serde_json::json!({
+    Ok(json_ok(&serde_json::json!({
         "uptime_seconds":  uptime,
         "databases":       databases,
         "tokens_total":    state.metrics.tokens_total.load(Relaxed),
         "tokens_revoked":  state.metrics.tokens_revoked.load(Relaxed),
-    }))
+    })))
 }
 ```
 
@@ -4733,7 +4797,9 @@ fn is_mutating_request(req: &Request<Incoming>) -> bool {
     )
 }
 
-// handlers/health.rs（Phase 11 拡張）
+// http/health.rs（Phase 11 拡張）
+// Phase 10 前提: ServerRole::Replica 有効化・ReplicationState 型の確定後に実装
+// Phase 10 完了後は ServerRole のコメントアウトを解除する（§14.2 AppState 参照）
 
 #[derive(serde::Serialize)]
 pub struct HealthResponse {
@@ -4742,18 +4808,21 @@ pub struct HealthResponse {
     pub replication_lag_frames: Option<u64>,  // replica のみ
 }
 
-pub async fn handle(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
+pub async fn handle(
+    _req: Request<Incoming>,
+    state: SharedState,
+) -> Result<Response<Full<Bytes>>, Infallible> {
     let lag = state.replication.as_ref()
         .map(|r| r.lag_frames.load(std::sync::atomic::Ordering::Relaxed));
     let status = match lag {
         Some(lag) if lag > 1000 => "degraded",
         _ => "ok",
     };
-    Json(HealthResponse {
+    Ok(json_ok(&HealthResponse {
         status,
         role: state.role.clone(),
         replication_lag_frames: lag,
-    })
+    }))
 }
 ```
 
