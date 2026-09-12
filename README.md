@@ -47,6 +47,34 @@ curl -s -X POST http://localhost:8080/v2/pipeline \
   -d '{"requests":[{"type":"execute","stmt":{"sql":"SELECT 1","want_rows":true}}]}' | jq .
 ```
 
+## Docker 検証
+
+ローカルに Rust toolchain がない環境では、Docker でテストを実行する。
+
+```sh
+make test-docker
+```
+
+直接実行する場合:
+
+```sh
+./scripts/test-docker.sh
+```
+
+実行内容:
+
+```sh
+cargo test --workspace --locked
+```
+
+フォーマット確認も Docker で実行できる。
+
+```sh
+make fmt-docker
+```
+
+Cargo registry / git / target は Docker volume に保存されるため、2回目以降の実行は初回より速くなる。
+
 ## libSQL クライアント SDK からの接続
 
 ```typescript

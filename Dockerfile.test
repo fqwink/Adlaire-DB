@@ -1,0 +1,24 @@
+FROM rust:1.88-slim
+
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+
+WORKDIR /workspace
+
+RUN rustup component add rustfmt
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        clang \
+        cmake \
+        git \
+        libsqlite3-dev \
+        make \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY Cargo.toml Cargo.lock ./
+COPY adlaire-server/Cargo.toml adlaire-server/Cargo.toml
+COPY adlaire-server/src adlaire-server/src
+
+CMD ["cargo", "test", "--workspace", "--locked"]
