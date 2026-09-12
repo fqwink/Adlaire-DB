@@ -1,7 +1,7 @@
 # Adlaire DB
 
-libSQL ワイヤプロトコル（hrana-http v2）互換のセルフホスト DB サーバー。
-Rust + axum + libsql（embedded SQLite）で実装する。
+libSQL ワイヤプロトコル（hrana-http v2 / hrana-ws v3）互換のセルフホスト DB サーバー。
+Rust + libsql（embedded SQLite）で実装する。外部 Web フレームワークは使用しない。
 
 ## 現在の状態
 
@@ -13,13 +13,17 @@ Rust + axum + libsql（embedded SQLite）で実装する。
 | Phase 2 | データディレクトリ初期化・libsql 統合・プロセスロック | ✅ 完了 |
 | Phase 3 | HTTP サーバー・hrana-http v2 パイプライン・シングル DB | ✅ 完了 |
 | Phase 4 | JWT 認証・`token create` コマンド | 🔲 未実装 |
-| Phase 5 | hrana WebSocket v3 | 🔲 未実装 |
-| Phase 6 | マルチ DB URL ルーティング | 🔲 未実装 |
-| Phase 7 | 管理 API（DB CRUD・トークン CRUD） | 🔲 未実装 |
+| Phase 5 | ログ・統合テスト | 🔲 未実装 |
+| Phase 6 | マルチ DB ルーター | 🔲 未実装 |
+| Phase 7 | 管理 API・トークン CRUD・DB スコープ JWT | 🔲 未実装 |
 | Phase 8 | WebSocket（hrana-ws v3） | 🔲 未実装 |
-| Phase 10 | プライマリ・レプリカ構成 | 🔲 未実装 |
-| Phase 12-13 | バックアップ・PITR | 🔲 未実装 |
+| Phase 9 | ATTACH DB・メトリクス | 🔲 未実装 |
+| Phase 10 | レプリケーション基盤（WAL ストリーム・スナップショット） | 🔲 未実装 |
+| Phase 11 | レプリカ同期・書き込みリダイレクト | 🔲 未実装 |
+| Phase 12 | WAL アーカイブ・manifest 管理 | 🔲 未実装 |
+| Phase 13 | バックアップ・リストア・PITR | 🔲 未実装 |
 | Phase 14 | ブランチ | 🔲 未実装 |
+| Phase 15 | SQLite 拡張・内製化・HA | 🔲 未実装 |
 
 ## 起動方法
 
@@ -57,7 +61,7 @@ const result = await db.execute("SELECT 1");
 |------|------|
 | 実装言語 | Rust 2021 edition |
 | ストレージ基盤 | `libsql` crate（embedded SQLite / WAL モード）|
-| HTTP フレームワーク | `axum` 0.7 + `tokio` |
+| HTTP サーバー | `hyper` v1（直接使用 / フレームワーク不使用）+ `tokio` |
 | シリアライゼーション | `serde_json` |
 | ロギング | `tracing` + `tracing-subscriber`（JSON 形式）|
 | CLI | `clap` 4（derive API）|
