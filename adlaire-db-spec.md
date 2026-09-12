@@ -84,6 +84,9 @@ HTTP サーバー層に Web フレームワーク（axum・actix-web・rocket �
 | バックアップ・エクスポート | 13 | オンラインバックアップ取得・リストア |
 | ポイントインタイムリストア | 13 | WAL アーカイブから任意の時点への DB 復元 |
 | ブランチ | 14 | DB のブランチ作成（WAL スナップショットから派生） |
+| データベースロケーション | 15 | Turso Cloud の location/region 概念と互換の DB 配置・所属属性 |
+| 組織・グループ管理 | 15 | Turso Cloud の organization/group 管理モデルと互換の管理境界 |
+| ストレージクォータ | 15 | Turso Cloud の quota/usage 概念と互換の容量制限・使用量管理 |
 
 ### 2.3 レプリケーション
 
@@ -93,13 +96,17 @@ HTTP サーバー層に Web フレームワーク（axum・actix-web・rocket �
 | WAL ベース同期 | 10 | libSQL の WAL レプリケーションを使用 |
 | レプリカへの書き込みリダイレクト | 11 | 307 Temporary Redirect でプライマリへ転送 |
 
-### 2.4 対象外（自己ホストでは不適用）
+### 2.4 Turso Cloud 互換として対象に含める管理機能
 
-| 機能 | 理由 |
-|------|------|
-| データベースロケーション | Turso のエッジノード概念。自己ホストでは単一サーバーのため不要 |
-| 組織・グループ管理 | マルチテナント SaaS 向け機能。単一運営者の自己ホストには不要 |
-| ストレージクォータ | クラウド課金と連動した機能。自己ホストでは OS レベルで管理 |
+以下の機能は自己ホスト環境でも対象外にしない。Adlaire DB は Turso Cloud 互換を価値の中心に置くため、単一サーバー構成であっても API・メタデータ・権限判定・エラー応答上は Turso Cloud と互換の管理モデルを提供する。
+
+| 機能 | Phase | 互換方針 |
+|------|-------|----------|
+| データベースロケーション | 15 | Turso Cloud の location/region 概念と互換にする。自己ホストでも DB の `location` は正式属性として扱い、DB 作成・一覧・詳細・replication・backup/restore・branch の仕様と整合させる |
+| 組織・グループ管理 | 15 | Turso Cloud の organization/group モデルと互換にする。DB、token、location、quota、admin 権限の所属・管理境界として扱う |
+| ストレージクォータ | 15 | Turso Cloud の quota/usage 概念と互換にする。DB/group/organization 単位の制限値、使用量、超過時エラー、write/import/restore/replication apply への影響を仕様化する |
+
+Phase 15 の仕様変更 PR では、上記 3 機能について Turso Cloud 互換 API、永続化形式、権限モデル、エラーコード、既存 admin API への影響、テストゲートを具体化してから実装を開始する。
 
 ---
 
@@ -1646,7 +1653,7 @@ Step 5: 停止完了
 | **Phase 12** | WAL アーカイブ・manifest 管理 | TC-5-8 (1件) | T5-1〜T5-4 (4件) |
 | **Phase 13** | バックアップ・リストア・PITR API | TC-5-1〜TC-5-7 (7件) | T5-5〜T5-9 (5件) |
 | **Phase 14** | ブランチ作成・一覧・削除 | TC-6-1〜TC-6-7 (7件) | T6-1〜T6-7 (7件) |
-| **Phase 15** | SQLite 拡張・内製化・HA | — | — |
+| **Phase 15** | SQLite 拡張・内製化・HA・Turso Cloud 互換管理機能 | — | — |
 
 
 ### 9.0 実装判断ルール
@@ -1726,7 +1733,7 @@ Step 5: 停止完了
 | Phase 12 | WAL archive と manifest.json がアトミックに更新され、retention cleanup が動く。CRC32 と manifest/files の整合性検査がある | backup/restore API、PITR restore、branch |
 | Phase 13 | backup、restore、PITR API が動き、restore 失敗時は元 DB が復元される。PITR 無効、範囲外、CRC 不一致のエラーが §7.3 と一致する | branch、外部ストレージ転送、HA |
 | Phase 14 | branch 作成、一覧、削除、再起動後復元が動く。branch DB は `{db}___{branch}` として通常 DB と同じ pipeline でアクセスでき、元 DB と独立して書き込める | branch merge、copy-on-write 最適化、SQLite 拡張 |
-| Phase 15 | SQLite 拡張ロード、内製化対象、HA 方針を実装可能な仕様として再確定し、採用する拡張/内製化範囲ごとのテストゲートを追加する。Phase 15 は本表のまま実装開始してはならない | 未承認の外部依存、仕様未確定の HA 自動 failover |
+| Phase 15 | SQLite 拡張ロード、内製化対象、HA 方針、Turso Cloud 互換管理機能（location、organization/group、quota）を実装可能な仕様として再確定し、採用範囲ごとの API・永続化・権限・エラー・テストゲートを追加する。Phase 15 は本表のまま実装開始してはならない | 未承認の外部依存、仕様未確定の HA 自動 failover、仕様未確定の location/organization/group/quota |
 
 ### 9.3 API 実装決定表
 
@@ -1829,6 +1836,9 @@ Phase 15 は「候補フェーズ」であり、以下を追記してからで�
 | SQLite 拡張 | 対象拡張名、ロード方式（`.so` / Wasm / static link）、許可ディレクトリ、署名検証、sandbox 方針 |
 | 内製化 | libSQL から置き換える対象、互換性テスト、rollback 方針、性能目標 |
 | HA | leader election 方式、failover 条件、split-brain 防止、書き込み一貫性、運用手順 |
+| データベースロケーション | Turso Cloud 互換 API、`location` の値体系、DB 作成/一覧/詳細での表現、replication/backup/restore/branch との関係 |
+| 組織・グループ管理 | Turso Cloud 互換 API、organization/group の識別子、DB/token/quota/admin 権限との所属関係、既存 admin API への影響 |
+| ストレージクォータ | Turso Cloud 互換 API、quota/usage の単位、使用量計測方法、超過時エラー、write/import/restore/replication apply の拒否条件 |
 | API | 新規 endpoint、既存 endpoint の変更有無、後方互換性 |
 | テスト | failure injection、crash recovery、性能回帰、長時間 soak test |
 
@@ -5874,6 +5884,9 @@ Phase 14 完了後に計画する。候補（優先度未確定）：
 - SQLite 拡張機能ロード（`.so` / Wasm）
 - libSQL 内部コンポーネントの段階的内製化（§3.5.3 のロードマップに従う）
 - 高可用性・自動フェイルオーバー
+- Turso Cloud 互換のデータベースロケーション
+- Turso Cloud 互換の組織・グループ管理
+- Turso Cloud 互換のストレージクォータ
 - メトリクス永続化・外部監視連携（Prometheus 等）
 
 Phase 15 は候補機能の集合であり、この節だけを根拠に実装してはならない。実装開始前に §9.4 の Phase 15 表に従い、対象機能、API、永続化形式、障害時挙動、テストゲートを具体化する仕様変更を先に行うこと。
