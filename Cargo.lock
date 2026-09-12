@@ -19,6 +19,7 @@ dependencies = [
  "libc",
  "libsql",
  "regex",
+ "ring",
  "serde",
  "serde_json",
  "thiserror",
