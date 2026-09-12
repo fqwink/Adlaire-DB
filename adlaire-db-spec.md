@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.68
+**バージョン：** 0.69
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -2123,6 +2123,33 @@ PR は「変更なし」として分類を省略してはならない。仕様�
 | 内部 adapter | 不可 | 不可 | 不可 | shadow/rollback/regression/performance artifact |
 
 手動確認は、自動化できない外部環境依存の補助証跡としてのみ許可する。認証、永続化、破壊的操作、Turso 互換、secret redaction、rollback、concurrency は手動確認だけで完了扱いにしてはならない。
+
+#### 9.1.8 契約カバレッジ固定契約
+
+§9.5 API endpoint 契約表、§9.6 永続化ファイル契約表、§9.7 エラーコード使用契約表、§9.13 設定値契約表、§9.14 セキュリティ境界表は契約 ID の発生源である。実装 PR は、対象 Phase の該当行すべてに契約 ID を割り当て、テストと証跡でカバーしなければならない。
+
+| Source section | Contract ID | Contract summary | Required tests | Required evidence | Owner phase |
+|----------------|-------------|------------------|----------------|-------------------|-------------|
+| `§9.5` | `API-P{phase}-{kebab-name}` | method/path/auth/status/body/error/persistence/idempotency | normal / invalid / auth / error / idempotency | response snapshot, request fixture, log redaction sample | endpoint の Phase |
+| `§9.6` | `PERSIST-P{phase}-{kebab-name}` | file path/schema/update/fsync/corruption/backup | atomic write / corruption / restart / rollback | metadata fixture, crash fixture, recovery log | first write Phase |
+| `§9.7` | `ERR-{code}` | code/status/retry/client action |発火 test / status-body assertion / retry decision | error snapshot, triggering fixture | first use Phase |
+| `§9.13` | `CFG-P{phase}-{kebab-name}` | CLI/env/TOML/default/invalid handling | default / override priority / invalid / target Phase before-after | config fixture, stderr/log sample | config Phase |
+| `§9.14` | `SEC-{boundary}` | untrusted input / required control / forbidden behavior | allow / deny / redaction / bypass attempt | auth matrix, redaction log, denied response | first exposed Phase |
+
+既存表の行に明示 ID が書かれていない場合でも、実装 PR では上表の形式で ID を割り当てる。割り当てた ID は PR description だけでなく、該当する test 名、snapshot path、fixture path、または仕様本文のいずれかに残す。
+
+**契約 ID 欠落時の扱い：**
+
+| 欠落状態 | 判定 |
+|----------|------|
+| 対象 Phase の §9.5 endpoint に API 契約 ID がない | Phase 未完了 |
+| 更新する §9.6 persistence 行に PERSIST 契約 ID がない | Phase 未完了 |
+| 発火する §9.7 error code に ERR 契約 ID の test がない | Phase 未完了 |
+| 追加/変更する §9.13 config に CFG 契約 ID がない | Phase 未完了 |
+| 触れる §9.14 security boundary に SEC 契約 ID の deny/redaction test がない | Phase 未完了 |
+| PR description の一時 ID だけで、仕様本文・test・artifact のどこにも残らない | Phase 未完了 |
+
+Phase 完了時は、対象 Phase の API / persistence / error / config / security / compatibility 契約に未カバー行が 0 件でなければならない。`N/A` は、その契約が対象外である理由が §9.2、§9.4、該当 Phase 節、または unsupported 固定表に明記されている場合だけ許可する。
 
 ### 9.2 Phase 別完了ゲート
 
