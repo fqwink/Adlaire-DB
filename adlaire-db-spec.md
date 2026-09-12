@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.49  
+**バージョン：** 0.50  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-12  
 
@@ -214,35 +214,42 @@ members = ["adlaire-server"]
 resolver = "2"
 
 [workspace.dependencies]
+# ── Phase 1〜3（常時有効） ──────────────────────────────────────────────────
 anyhow             = "1"
-async-trait        = "0.1"
 base64             = "0.22"
-chrono             = { version = "0.4", features = ["serde"] }
+bytes              = "1"
+chrono             = { version = "0.4",  features = ["serde"] }
+clap               = { version = "4",    features = ["derive"] }
 http-body-util     = "0.1"
-hyper              = { version = "1", features = ["full"] }
-hyper-util         = { version = "0.1", features = ["tokio"] }
-clap               = { version = "4", features = ["derive"] }
+hyper              = { version = "1",    features = ["http1", "server"] }
+hyper-util         = { version = "0.1",  features = ["tokio"] }
 libc               = "0.2"
-libsql             = "0.6"   # embedded SQLite（WAL モード）
-serde              = { version = "1", features = ["derive"] }
+libsql             = "0.6"              # embedded SQLite（WAL モード）
+regex              = "1"
+serde              = { version = "1",    features = ["derive"] }
 serde_json         = "1"
-thiserror          = "1"
-tokio              = { version = "1", features = ["full"] }
+thiserror          = "2"
+tokio              = { version = "1",    features = ["full"] }
 toml               = "0.8"
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
-uuid               = { version = "1", features = ["v4"] }
-regex              = "1"
-# Phase 4〜 で追加予定
-# jsonwebtoken = "9"
-# Phase 8〜 で追加予定
-# tokio-tungstenite = "0.21"
-# Phase 9〜 で追加予定
-# dashmap = "5"
-bytes              = "1"
-# Phase 10〜 で追加予定
-# url = { version = "2", features = ["serde"] }   # ServerRole::Replica の primary_url + HealthResponse シリアライズに必要
-# crc32fast = "1"
+uuid               = { version = "1",   features = ["v4"] }
+
+# ── Phase 4〜（JWT 認証） ──────────────────────────────────────────────────
+jsonwebtoken       = "9"
+
+# ── Phase 8〜（WebSocket） ────────────────────────────────────────────────
+tokio-tungstenite  = "0.24"
+
+# ── Phase 9〜（マルチ DB・ATTACH） ────────────────────────────────────────
+dashmap            = "6"
+
+# ── Phase 10〜（レプリケーション） ────────────────────────────────────────
+url                = { version = "2",   features = ["serde"] }  # ServerRole::Replica の primary_url
+crc32fast          = "1"                                          # WAL フレーム整合性チェック
+
+# ── dev のみ ───────────────────────────────────────────────────────────────
+# [dev-dependencies] は adlaire-server/Cargo.toml で管理（workspace 共有なし）
 ```
 
 **adlaire-server/Cargo.toml：**
@@ -258,16 +265,18 @@ name = "adlaire-db"
 path = "src/main.rs"
 
 [dependencies]
+# Phase 1〜3
 anyhow             = { workspace = true }
-async-trait        = { workspace = true }
 base64             = { workspace = true }
+bytes              = { workspace = true }
 chrono             = { workspace = true }
+clap               = { workspace = true }
 http-body-util     = { workspace = true }
 hyper              = { workspace = true }
 hyper-util         = { workspace = true }
-clap               = { workspace = true }
 libc               = { workspace = true }
 libsql             = { workspace = true }
+regex              = { workspace = true }
 serde              = { workspace = true }
 serde_json         = { workspace = true }
 thiserror          = { workspace = true }
@@ -276,8 +285,15 @@ toml               = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid               = { workspace = true }
-regex              = { workspace = true }
-bytes              = { workspace = true }
+# Phase 4〜
+jsonwebtoken       = { workspace = true }
+# Phase 8〜
+tokio-tungstenite  = { workspace = true }
+# Phase 9〜
+dashmap            = { workspace = true }
+# Phase 10〜
+url                = { workspace = true }
+crc32fast          = { workspace = true }
 
 [dev-dependencies]
 reqwest  = { version = "0.12", features = ["json"] }
@@ -1574,6 +1590,12 @@ Step 5: 停止完了
 --admin-port         > config.toml [server] admin_port  (default: 8081)
 --log-level          > ADLAIRE_LOG_LEVEL (env) > config.toml [server] log_level  (default: info)
 --busy-timeout       > config.toml [storage] busy_timeout_ms  (default: 5000)
+
+# Phase 10 レプリケーション設定（CLI のみ・TOML 対応なし）
+--role                      standalone（デフォルト）     CLI のみ（TOML 対応なし）
+--primary-port              8082（デフォルト）           CLI のみ（TOML 対応なし）
+--primary-url               必須（--role replica 時のみ）CLI のみ（TOML 対応なし）
+--replication-auth-token    なし（デフォルト）           CLI のみ（TOML 対応なし）
 ```
 
 ---
@@ -1713,7 +1735,8 @@ pub enum WalCheckpointMode { Passive, Full, Restart }
 #[derive(Debug, Clone)]
 pub struct ReplicationConfig {
     pub write_mode:      ReplicationWriteMode,
-    pub sync_timeout_ms: u64,  // デフォルト 5000
+    pub sync_timeout_ms: u64,           // デフォルト 5000
+    pub auth_token:      Option<String>, // --replication-auth-token（Phase 10）
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2343,12 +2366,13 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
     );
 
     // Step 7: AppState 構築
+    let role = parse_server_role(&args)?;
     let state: SharedState = Arc::new(AppState {
         config:      Arc::clone(&config),
         db_mgr,
         auth,
         metrics:     Arc::new(Metrics::new()),
-        role:        ServerRole::Standalone,
+        role,
         replication: None,
     });
 
@@ -2614,6 +2638,7 @@ impl Config {
             replication: ReplicationConfig {
                 write_mode,
                 sync_timeout_ms: 5000,
+                auth_token: args.replication_auth_token.clone(),
             },
         }))
     }
@@ -2633,6 +2658,24 @@ fn parse_write_mode(s: &str) -> anyhow::Result<ReplicationWriteMode> {
         "async" => Ok(ReplicationWriteMode::Async),
         "sync"  => Ok(ReplicationWriteMode::Sync),
         other   => anyhow::bail!("unknown replication write_mode: {other}. Use 'async' or 'sync'"),
+    }
+}
+
+pub fn parse_server_role(args: &ServeArgs) -> anyhow::Result<ServerRole> {
+    match args.role.as_deref().unwrap_or("standalone") {
+        "standalone" => Ok(ServerRole::Standalone),
+        "primary"    => Ok(ServerRole::Primary {
+            primary_port: args.primary_port.unwrap_or(8082),
+        }),
+        // Phase 10 で Replica variant 解除後に有効化：
+        // "replica" => {
+        //     let url = args.primary_url.as_deref()
+        //         .ok_or_else(|| anyhow::anyhow!("--primary-url は --role replica 時に必須です"))?;
+        //     Ok(ServerRole::Replica { primary_url: url.parse()? })
+        // }
+        other => anyhow::bail!(
+            "unknown role '{other}'. Use 'standalone', 'primary', or 'replica'"
+        ),
     }
 }
 ```
