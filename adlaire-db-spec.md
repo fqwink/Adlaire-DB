@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.52  
+**バージョン：** 0.53  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-12  
 
@@ -2632,8 +2632,8 @@ impl Config {
         };
 
         let admin_auth_token = args.admin_auth_token.clone()
-            .or(adm.auth_token)
-            .or_else(|| std::env::var("ADLAIRE_ADMIN_TOKEN").ok());
+            .or_else(|| std::env::var("ADLAIRE_ADMIN_TOKEN").ok())
+            .or(adm.auth_token);
 
         Ok(Arc::new(Config {
             data_dir:             args.data.clone(),
