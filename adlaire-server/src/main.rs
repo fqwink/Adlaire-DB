@@ -8,6 +8,7 @@ mod hrana;
 mod http;
 mod metrics;
 mod state;
+mod token;
 
 use std::sync::Arc;
 
@@ -17,7 +18,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 
 use crate::{
-    auth::{AuthState, AccessLevel},
+    auth::{sign_claims, AccessLevel, AuthState, Claims},
     cli::{Cli, CliCommand, TokenSubcommand},
     config::Config,
     data_dir::{DataDir, ProcessLock},
@@ -64,16 +65,11 @@ async fn run_serve(args: crate::cli::ServeArgs) -> anyhow::Result<()> {
     let _lock = ProcessLock::acquire(&config.data_dir)?;
 
     // Step 5: AuthState 初期化
-    let auth = Arc::new(AuthState::new(&config));
+    let revoked = auth::load_revoked_tokens(&config)?;
+    let auth = Arc::new(AuthState::new(&config, revoked));
     if !auth.is_auth_enabled() {
         tracing::warn!("JWT auth is disabled — all requests are unauthenticated");
     }
-    // Phase 4 未実装のため JWT 設定時は起動を拒否する（verify() が常に失敗するため）
-    anyhow::ensure!(
-        !auth.is_auth_enabled(),
-        "JWT auth is configured but not yet implemented (Phase 4). \
-         Unset jwt_secret to start in unauthenticated mode."
-    );
 
     // Step 6: DB 全件オープン
     let db_mgr = Arc::new(
@@ -227,15 +223,62 @@ fn run_token_create(args: crate::cli::TokenCreateArgs) -> anyhow::Result<()> {
     let secret = args.secret.as_bytes().to_vec();
     anyhow::ensure!(secret.len() >= 32, "--secret は 32 バイト以上の文字列を指定してください");
 
-    let _access: AccessLevel = match args.access.as_str() {
-        "rw" => AccessLevel::Rw,
-        "ro" => AccessLevel::Ro,
-        other => anyhow::bail!("unknown access level: {other}. Use 'rw' or 'ro'"),
+    let access = parse_access(&args.access)?;
+    let dbs = parse_db_scopes(&args.db)?;
+    let now = chrono::Utc::now();
+    let expires_at = token::util::parse_expiry(args.expiry.as_deref(), now)?;
+    let token_id = token::util::generate_token_id();
+    let claims = Claims {
+        iss: None,
+        sub: token_id.clone(),
+        iat: now.timestamp(),
+        exp: expires_at.map(|t| t.timestamp()),
+        a: access.clone(),
+        dbs: dbs.clone(),
     };
+    let jwt = sign_claims(&secret, &claims)?;
 
-    // Phase 4 で JWT 発行を実装する
-    println!("(Phase 4 stub) token create — secret len={}", secret.len());
+    if let Some(data_dir) = args.data.as_deref() {
+        DataDir::init(data_dir)?;
+        let record = token::util::TokenRecord {
+            id: token_id,
+            access,
+            dbs,
+            created_at: now,
+            expires_at,
+            revoked: false,
+            revoked_at: None,
+        };
+        token::util::append_token(data_dir, record)?;
+    }
+
+    println!("{jwt}");
     Ok(())
+}
+
+fn parse_access(s: &str) -> anyhow::Result<AccessLevel> {
+    match s {
+        "rw" => Ok(AccessLevel::Rw),
+        "ro" => Ok(AccessLevel::Ro),
+        other => anyhow::bail!("unknown access level: {other}. Use 'rw' or 'ro'"),
+    }
+}
+
+fn parse_db_scopes(
+    scopes: &[String],
+) -> anyhow::Result<Option<std::collections::HashMap<String, AccessLevel>>> {
+    if scopes.is_empty() {
+        return Ok(None);
+    }
+    let mut dbs = std::collections::HashMap::new();
+    for scope in scopes {
+        let (db, access) = scope
+            .split_once(':')
+            .ok_or_else(|| anyhow::anyhow!("invalid --db value: {scope}. Use DB:ACCESS"))?;
+        anyhow::ensure!(!db.trim().is_empty(), "db name in --db must not be empty");
+        dbs.insert(db.trim().to_string(), parse_access(access.trim())?);
+    }
+    Ok(Some(dbs))
 }
 
 // ── tracing 初期化 ────────────────────────────────────────────────────────────

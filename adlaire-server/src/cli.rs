@@ -67,6 +67,9 @@ pub struct TokenCreateArgs {
     #[arg(long, required = true)]
     pub secret: String,
 
+    #[arg(long)]
+    pub data: Option<PathBuf>,
+
     #[arg(long, default_value = "rw")]
     pub access: String,
 
