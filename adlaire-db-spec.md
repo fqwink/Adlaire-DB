@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.71
+**バージョン：** 0.72
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -2248,6 +2248,56 @@ manifest がない Phase 実装 PR は、§9.1.9 の Step 2 `Contract mapping` �
 
 Phase 完了 review では、manifest、仕様本文、test 名、artifact path、PR description の 5 点が一致していなければならない。1 つでも不一致がある場合は、実装の正しさではなく受入条件の未確定として扱い、Phase 未完了に戻す。
 
+#### 9.1.11 Evidence artifact 固定契約
+
+各 Phase 実装 PR は、§9.1.10 の Phase 受入 manifest に記載した `Evidence path` に、実際の artifact を生成しなければならない。artifact は「実装が仕様を満たしたこと」を後から再確認できる証跡であり、PR description の文章や手元ログだけでは代替できない。
+
+artifact path は deterministic に固定し、実装者、実行環境、実行時刻によって変わってはならない。timestamp、random ID、host 名、absolute path、local username を path に含めることは禁止する。
+
+**artifact 保存規則：**
+
+| 種別 | 保存先 | 必須命名 | 必須内容 |
+|------|--------|----------|----------|
+| request fixture | `tests/fixtures/phase-{phase}/{contract-id}/request.json` | Contract ID を directory に含める | request method/path/header subset/body |
+| response snapshot | `tests/snapshots/phase-{phase}/{contract-id}/response.json` | Contract ID を directory に含める | status、header subset、body、error code |
+| persistence fixture | `tests/fixtures/phase-{phase}/{contract-id}/persistence.json` | Contract ID を directory に含める | file path、schema version、before/after、fsync/rollback 結果 |
+| recovery / rollback log | `tests/artifacts/phase-{phase}/{contract-id}/recovery.log` | Contract ID を directory に含める | 起動、破損検出、復旧、rollback の要点 |
+| compatibility diff | `tests/artifacts/phase-{phase}/{contract-id}/compat.diff` | Contract ID を directory に含める | Turso/libSQL SDK との差分、正規化後比較結果 |
+| CI output | `tests/artifacts/phase-{phase}/{contract-id}/ci.txt` | Contract ID を directory に含める | 実行 command、exit code、pass/fail summary |
+| secret scan result | `tests/artifacts/phase-{phase}/{contract-id}/secret-scan.txt` | Contract ID を directory に含める | scan command、対象 path、検出 0 件の結果 |
+| performance baseline | `tests/artifacts/phase-{phase}/{contract-id}/performance.json` | Contract ID を directory に含める | p95、RSS、DB size、WAL size、測定条件 |
+
+`contract-id` は小文字化せず、§9.1.7 / §9.1.8 で割り当てた Contract ID と完全一致させる。ファイルシステム都合で大文字小文字が不安定になる環境を考慮し、同一 directory 内に大文字小文字だけが異なる Contract ID を作ってはならない。
+
+**正規化必須 field：**
+
+| Field | 正規化値 | 理由 |
+|-------|----------|------|
+| timestamp / datetime | `<normalized-time>` | 実行時刻差分を禁止 |
+| request id / trace id | `<normalized-id>` | 実行ごとの差分を禁止 |
+| absolute path | `<normalized-path>` | local 環境差分と user name 混入を禁止 |
+| host / port | `<normalized-host>` / `<normalized-port>` | CI と local 差分を禁止 |
+| JWT / Bearer token / secret | `<redacted-secret>` | secret 混入禁止 |
+| SQL bind value が機微情報の場合 | `<redacted-arg>` | user data 混入禁止 |
+| backup body / replication payload の機微 field | `<redacted-payload>` | 大容量 secret / data 混入禁止 |
+
+正規化前の raw artifact は repository にコミットしてはならない。raw artifact が必要な検証は CI 内一時領域だけに保存し、repository に残す artifact は正規化後のみとする。
+
+**artifact 欠落・不一致時の扱い：**
+
+| 状態 | 判定 |
+|------|------|
+| manifest の `Evidence path` に実ファイルが存在しない | Phase 未完了 |
+| artifact path に Contract ID が含まれない | Phase 未完了 |
+| artifact 内容が該当 Contract ID と無関係 | review failure |
+| artifact に secret / token / raw SQL args / local username が含まれる | merge 不可 |
+| snapshot が実装都合で更新され、仕様差分理由がない | review failure |
+| artifact が timestamp / random ID を含む path に保存される | Phase 未完了 |
+| PR description だけに証跡があり repository に artifact がない | Phase 未完了 |
+| 手動確認ログのみで自動 test / snapshot がない | Phase 未完了。ただし §9.1.10 の Manual exception が仕様本文に根拠付きである場合のみ補助証跡として許可 |
+
+artifact は Phase 完了 PR と同じ commit に含める。後続 PR で artifact だけを追加して Phase 完了扱いにすることは禁止する。artifact を更新する場合は、対応する仕様 section、Contract ID、test ID、manifest、PR description を同時に更新しなければならない。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -2874,6 +2924,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 |----------|----------|----------------|
 | Phase スコープ | 対象機能と対象外が §9.2 / §9.4 に明記されている | 仕様追記まで実装しない |
 | Phase 受入 manifest | §9.1.10 の必須 fields が実装開始前に固定されている | 実装 PR として扱わない |
+| Evidence artifact | §9.1.11 の保存先、命名、正規化、secret scan が固定されている | 証跡生成まで完了扱いにしない |
 | API 契約 | method/path/auth/request/success/error が §9.5 または各 API 節に明記されている | route を追加しない |
 | Error code | 失敗条件ごとの `code` が §7.3 / §9.7 に存在する | 先に error code を追加する |
 | 永続化 | ファイル名、schema、atomic update、rollback、破損時挙動が §9.6 に明記されている | 書き込み処理を実装しない |
