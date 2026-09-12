@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.62
+**バージョン：** 0.63
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -1165,7 +1165,7 @@ Phase 8 では、Adlaire 独自の `/admin/v1/*` に加えて Turso Cloud Platfo
 | database `primaryRegion` | group の `primary` |
 | database `block_reads` | database configuration の `block_reads`。既定 `false` |
 | database `block_writes` | database configuration の `block_writes`。既定 `false`。quota 超過状態は DTO ではなく `QUOTA_EXCEEDED` error と usage/quota API で表す |
-| group `version` | `adlaire-{spec version}`。例: `adlaire-0.62` |
+| group `version` | `adlaire-{spec version}`。例: `adlaire-0.63` |
 | group `uuid` | Adlaire group id |
 | group `locations` | group location の配列。Phase 8 では 1 要素 |
 | group `primary` | group の primary location |
@@ -1466,7 +1466,9 @@ GET /admin/v1/metrics     全 DB のメトリクス取得
 | 403 Forbidden | 権限不足（ro トークンで書き込み等）|
 | 404 Not Found | 存在しない DB・エンドポイント |
 | 405 Method Not Allowed | 既知 path に未定義 method が指定された |
+| 406 Not Acceptable | `Accept` header が endpoint の response media type と一致しない |
 | 409 Conflict | 既存 resource との競合・integrity/HA 状態不整合 |
+| 413 Payload Too Large | request body が endpoint の上限を超えた |
 | 501 Not Implemented | 未来 Phase の stub endpoint。成功応答として扱わない |
 | 503 Service Unavailable | storage busy、replication timeout、usage unavailable、leader unavailable |
 | 500 Internal Server Error | サーバー内部エラー |
@@ -1496,6 +1498,7 @@ GET /admin/v1/metrics     全 DB のメトリクス取得
 | `LOCATION_NOT_FOUND` | 404 | 指定 location が存在しない |
 | `ENDPOINT_NOT_FOUND` | 404 | 指定 endpoint path が存在しない |
 | `METHOD_NOT_ALLOWED` | 405 | 既知 endpoint path に未定義 HTTP method が指定された |
+| `NOT_ACCEPTABLE` | 406 | `Accept` header が endpoint の response media type と一致しない |
 | `ORG_ALREADY_EXISTS` | 409 | 同名 organization または slug が既に存在する |
 | `GROUP_ALREADY_EXISTS` | 409 | 同一 organization 内に同名 group または slug が既に存在する |
 | `LOCATION_ALREADY_EXISTS` | 409 | 同名 location が既に存在する |
@@ -1505,6 +1508,7 @@ GET /admin/v1/metrics     全 DB のメトリクス取得
 | `DB_ALREADY_EXISTS` | 409 | 同名 DB が既に存在する |
 | `INVALID_DB_NAME` | 400 | DB 名がバリデーションを通過しない |
 | `INVALID_REQUEST` | 400 | リクエスト JSON が不正 |
+| `PAYLOAD_TOO_LARGE` | 413 | request body が endpoint の上限を超えた |
 | `SQLITE_ERROR` | 200※ | SQL 構文・実行エラー |
 | `SQLITE_CONSTRAINT` | 200※ | 制約違反（UNIQUE 等） |
 | `STORAGE_BUSY` | 503 | WAL ロック待機タイムアウト |
@@ -2084,6 +2088,113 @@ IC-5: 既存 Phase の compatibility snapshot に差分がない
 IC-6: Phase 外 route は success response を返さない
 ```
 
+### 9.4.2 Phase 9〜19 ゼロバグ実装補完契約
+
+Phase 9〜19 で実装者が独自判断しやすい境界は、以下を優先仕様として固定する。各 Phase 詳細節と矛盾する場合は、本節を優先し、詳細節も同じ PR で修正する。ここに書かれた項目は推奨ではなく完了条件である。
+
+**Protocol / wire 互換固定表：**
+
+| Phase | 対象 | 固定仕様 | テスト artifact |
+|-------|------|----------|-----------------|
+| 9 | WebSocket subprotocol | `Sec-WebSocket-Protocol` は client 提示順を保持して解釈し、server が Phase 9 で対応する `hrana3`、`hrana2`、`hrana1` のうち最初に一致したものを選択する。`hrana3-protobuf` は Phase 9 では未対応のため選択しない。protobuf 対応を追加する場合は先に依存と schema を本仕様へ追加する | `phase9_ws/subprotocols.json` |
+| 9 | unknown protocol field | Hrana wire protocol の JSON object に含まれる unknown field は互換のため無視する。管理 API の unknown field 拒否方針を WebSocket message に適用してはならない | `phase9_ws/forward_compat.json` |
+| 9 | message ordering | client は hello 応答前に request を送ってよい。server は hello 認証完了後に受信順で処理し、hello が失敗した場合は未処理 request へ response を返さず close する | `phase9_ws/pipelined_hello.json` |
+| 9 | cursor API | `open_cursor` / `fetch_cursor` / `close_cursor` を受信した場合は Phase 9 では response_error `NOT_IMPLEMENTED` とし、connection は維持する。unknown request type は response_error `INVALID_REQUEST` | `phase9_ws/cursor_not_implemented.json` |
+| 10 | ATTACH SQL parse | SQL text の簡易文字列分割で ATTACH を判定しない。SQL tokenizer または SQLite prepare 前の限定 parser で、文字列リテラル内の `ATTACH` を無視する | `phase10_attach/parser_cases.json` |
+| 11 | replication stream | SSE は `id:{frame_no}` と `event: wal` を必須にし、`Last-Event-ID` があれば `from_frame=max(query.from_frame, last_event_id+1)` として再開する | `phase11_replication/sse_resume.txt` |
+| 14 | backup body | backup は SQLite Online Backup API 相当の snapshot を返す。単純な `data.db` file copy は、共有 lock と WAL checkpoint 整合が証明できない限り禁止 | `phase14_restore/backup_headers.json` |
+| 17 | Prometheus text | 出力は UTF-8、LF 改行、末尾 LF 必須。各 metric は `HELP`、`TYPE`、samples の順で grouping する。`TYPE` は最初の sample より前に 1 回だけ出す | `phase17_metrics/prometheus.txt` |
+
+**Phase 10 ATTACH / metrics 優先順位固定表：**
+
+| 条件 | 優先順位 | 結果 |
+|------|----------|------|
+| attach 対象 DB が存在しない | 1 | `404 DB_NOT_FOUND` |
+| JWT / org / group / db scope 外 | 2 | `403 ORG_SCOPE_DENIED` |
+| `allow_attach=false` | 3 | `403 PERMISSION_DENIED` |
+| `block_reads=true` の DB を read source にする | 4 | `403 PERMISSION_DENIED` |
+| `block_writes=true` の DB へ write する | 5 | `403 PERMISSION_DENIED` |
+| ro token で attach 先へ write | 6 | `403 PERMISSION_DENIED` |
+| alias 不正、quote 不正、任意 path | 7 | `400 INVALID_REQUEST` または DB 名 validation 由来の `INVALID_DB_NAME` |
+
+metrics は成功・失敗の両方で `http_requests_total` と `errors_total` を更新する。SQL execution counter は libSQL に渡した step のみ加算し、validation で拒否した SQL は加算しない。WebSocket は connection close 時に `connections_active` を必ず decrement し、二重 decrement は禁止する。
+
+**Phase 11〜15 data lifecycle 固定表：**
+
+| Phase | 操作 | commit 順序 | crash 後の扱い |
+|-------|------|-------------|----------------|
+| 11 | replication snapshot | temp snapshot 作成、integrity_check、header 生成、stream 開始 | temp snapshot は起動時 cleanup。metadata は変更しない |
+| 12 | replica apply | frame checksum 検証、apply、fsync、`replica-state.json` 更新 | state より進んだ frame は再検証してから再適用。重複 frame は idempotent skip |
+| 13 | archive append | frame file fsync、manifest tmp fsync、rename、directory fsync | manifest にない frame は orphan として WARN 後 cleanup。manifest にある file 欠損は起動失敗 |
+| 14 | restore/PITR | upload temp、verify、runtime close、old rename、new rename、directory fsync、reopen、success response | `restore-failed.json` があれば起動失敗。operator が手動復旧するまで自動上書き禁止 |
+| 15 | branch create | branch dir temp、DB 構築、integrity_check、runtime open、`branches.json` commit、dir finalize | metadata active で dir 不在は起動失敗。dir だけ存在し metadata なしは cleanup |
+
+**Phase 14 backup / restore request 固定表：**
+
+| API | Content-Type | body limit | lock | success |
+|-----|--------------|------------|------|---------|
+| `GET /admin/v1/databases/{name}/backup` | response `application/octet-stream` | response streaming。メモリ全読み込み禁止 | source read lock は Online Backup API の step 中だけ | 200 + SQLite snapshot bytes |
+| `POST /admin/v1/databases/{name}/restore` | request `application/octet-stream` | `restore_max_bytes` 未定義時は min(DB size x2, 1GiB)。超過は `413 PAYLOAD_TOO_LARGE` | DB exclusive restore lock。read は旧 DB で継続、write は `503 STORAGE_BUSY` | 204 empty body |
+| `POST /admin/v1/databases/{name}/restore/point-in-time` | request `application/json` | JSON body 最大 64KiB | DB exclusive restore lock | 204 empty body |
+
+restore/PITR は `delete_protection=true` の DB では `403 ORG_SCOPE_DENIED` とする。`block_writes=true` の DB では `403 PERMISSION_DENIED` とする。quota は restore 後サイズを事前推定し、超過する場合は commit 前に `QUOTA_EXCEEDED` を返す。
+
+**Phase 15 branch / Turso seed 接続固定表：**
+
+| 入力 | Phase 15 の扱い |
+|------|-----------------|
+| `/admin/v1/databases/{db}/branches` | 正式 branch API。`from` selector を必須にする |
+| `/v1/organizations/{org}/databases` with `seed.type:"database"` | Phase 15 で Turso 互換 branch create に昇格してよい。ただし `branch_name` または Turso 互換の branch field が明記されない request は `INVALID_REQUEST` |
+| source DB `delete_protection=true` | branch create は許可、source DB delete は active branch がある限り `403 ORG_SCOPE_DENIED` |
+| source DB `block_reads=true` | branch create は `403 PERMISSION_DENIED` |
+| source DB quota | branch DB は作成時に source の database quota を継承する。branch 作成で organization/group quota を超える場合は `QUOTA_EXCEEDED` |
+| token scope | source DB token は branch DB へ自動拡張しない。branch 用 token は別途発行する |
+
+**Phase 16 extension 状態遷移固定表：**
+
+| 状態 | 意味 | 許可遷移 |
+|------|------|----------|
+| `registered` | manifest に存在し binary/sha256 検証済み、未ロード | `loading`、`deleted` |
+| `loading` | load 試行中。API success response 前の一時状態 | `loaded`、`load_failed` |
+| `loaded` | 新規 connection に load 対象 | `disabled`、`deleted` |
+| `load_failed` | load 失敗。既存 connection へ影響なし | `loading`、`deleted` |
+| `disabled` | manifest に残すが新規 connection に load しない | `loading`、`deleted` |
+| `deleted` | manifest から削除済み。binary は残ってよい | 復帰禁止。再登録は新 record として扱う |
+
+`extensions.json` の `loaded` boolean だけで状態を表現してはならない。Phase 16 実装時は `state` field を追加し、migration で既存 `loaded:true` は `loaded`、`loaded:false` は `registered` に変換する。
+
+**Phase 17 Prometheus 固定表：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| metric order | metric name 昇順。各 metric 内は label set の辞書順 |
+| HELP escape | backslash と LF を escape |
+| label escape | backslash、double quote、LF を escape |
+| sample value | finite number のみ。取得不能値を `NaN` にせず、該当 sample を出さない |
+| route label | route pattern のみ。raw path、DB 名入り path、query string は禁止 |
+| content negotiation | `Accept` 未指定、`*/*`、`text/plain` は 200。その他は 406 `NOT_ACCEPTABLE` |
+
+**Phase 18 HA 昇格固定表：**
+
+| 状態 | write 可否 | 自動遷移 | operator API |
+|------|------------|----------|--------------|
+| `primary` | 可 | split-brain 検出時は `candidate` に降格して write 停止 | demote 可 |
+| `replica` | 不可。leader 判明時は 307 redirect | heartbeat timeout で `candidate` | promote 可。ただし最新 frame 到達が必須 |
+| `candidate` | 不可 | primary へ自動昇格禁止 | promote/demote 可 |
+| `standalone` | 可。ただし HA enabled の場合は起動時に `candidate` へ移行 | なし | promote で primary |
+
+promotion は `last_applied_frame >= leader_known_frame`、`term >= stored_term`、`ha-state.json` commit 成功、replication apply queue empty の全条件を満たす場合だけ成功する。どれか 1 つでも満たさない場合は `HA_PROMOTION_FAILED` とし、write を開始しない。
+
+**Phase 19 adapter 切替固定表：**
+
+| Mode | 実行内容 | success condition | failure |
+|------|----------|-------------------|---------|
+| `libsql` | 既存 production path | Phase 1〜18 regression pass | 失敗時は通常のテスト失敗 |
+| `shadow` | libsql を正として adapter を副実行し、結果・error code・rows affected・last_insert_rowid を比較 | 差分ゼロ。latency は記録のみ | 差分が 1 件でもあれば Phase 19 未完了 |
+| `active` | adapter 経路を response に使用 | shadow で差分ゼロ、snapshot 差分ゼロ、p95 latency 2 倍以内 | silent fallback 禁止。失敗時は error を返し rollback 手順へ |
+
+Phase 19 では storage write path の active 化は禁止する。`active` にできるのは WAL checkpoint control と executor adapter boundary までとし、metadata migration を伴う変更は Phase 20 以降の仕様改訂なしに実装してはならない。
+
 ### 9.5 全 API endpoint 契約表
 
 この表は実装対象 endpoint のインデックスである。詳細 schema は §6 および各 Phase 節を正とするが、認証・status・永続化・冪等性で迷った場合はこの表を優先する。
@@ -2224,6 +2335,8 @@ IC-6: Phase 外 route は success response を返さない
 | `DB_RESERVED_NAME` | 6+ / 15 | `meta`, `admin`, `___` 含有名 | No | name を修正 |
 | `NOT_IMPLEMENTED` | all | 未来 Phase の stub endpoint | No | 対象 Phase 実装後に再試行 |
 | `INVALID_REQUEST` | 3+ | JSON/schema/query/body 不正 | No | request を修正 |
+| `NOT_ACCEPTABLE` | 17+ | Prometheus など media type 固定 endpoint の Accept 不一致 | No | `Accept` を修正 |
+| `PAYLOAD_TOO_LARGE` | 14+ | restore/upload body size limit 超過 | No | request body を小さくする |
 | `SQLITE_ERROR` | 3+ | hrana results 内 | Depends | SQL を修正。busy は `STORAGE_BUSY` を使う |
 | `SQLITE_CONSTRAINT` | 3+ | hrana results 内 | No | data/constraint を修正 |
 | `STORAGE_BUSY` | 3+ | DB write/read lock timeout | Yes | backoff retry |
@@ -2826,6 +2939,10 @@ pub enum AppError {
     DbReservedName,
     #[error("invalid request")]
     InvalidRequest,
+    #[error("not acceptable")]
+    NotAcceptable,
+    #[error("payload too large")]
+    PayloadTooLarge,
     #[error("database is busy")]
     StorageBusy,
     #[error("replication timeout")]
@@ -2862,6 +2979,8 @@ impl AppError {
             Self::InvalidDbName         => (StatusCode::BAD_REQUEST,             "INVALID_DB_NAME"),
             Self::DbReservedName        => (StatusCode::BAD_REQUEST,             "DB_RESERVED_NAME"),
             Self::InvalidRequest        => (StatusCode::BAD_REQUEST,             "INVALID_REQUEST"),
+            Self::NotAcceptable         => (StatusCode::NOT_ACCEPTABLE,          "NOT_ACCEPTABLE"),
+            Self::PayloadTooLarge       => (StatusCode::PAYLOAD_TOO_LARGE,       "PAYLOAD_TOO_LARGE"),
             Self::StorageBusy           => (StatusCode::SERVICE_UNAVAILABLE,     "STORAGE_BUSY"),
             Self::ReplicationTimeout    => (StatusCode::SERVICE_UNAVAILABLE,     "REPLICATION_TIMEOUT"),
             Self::PitrNotEnabled        => (StatusCode::SERVICE_UNAVAILABLE,     "PITR_NOT_ENABLED"),
@@ -5139,7 +5258,7 @@ Path parameter は percent decode 後に validation する。decode 不能、dec
   },
   "TursoGroupInfo": {
     "name": "default",
-    "version": "adlaire-0.62",
+    "version": "adlaire-0.63",
     "uuid": "grp_default",
     "locations": ["default"],
     "primary": "default",
