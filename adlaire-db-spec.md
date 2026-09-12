@@ -1,8 +1,8 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.55  
+**バージョン：** 0.56
 **ステータス：** 設計中  
-**最終更新：** 2026-09-12  
+**最終更新：** 2026-09-13
 
 ---
 
@@ -405,8 +405,8 @@ POST /v2/pipeline
 |------------------|------|--------------------------|-------------|
 | `adlaire-server` | 実装中（Phase 1〜） | —（新規実装。置き換えでなく追加） | Phase 1〜 |
 | `adlaire-wal` | 計画 | libSQL WAL チェックポイント制御（`sqld`） | Phase 19 |
-| `adlaire-storage` | 計画 | libSQL SQLite ページャー（`sqld` / `libsql-sys`） | Phase 19 後続の仕様改訂で確定 |
-| `adlaire-sql-parser` | 計画 | libSQL SQLite パーサ（`libsql-sys`） | Phase 19 後続の仕様改訂で確定。Phase 19 では実装しない |
+| `adlaire-storage` | 計画 | libSQL SQLite ページャー（`sqld` / `libsql-sys`） | Phase 19 では readonly adapter まで。write path 切替は Phase 20 以降の仕様変更 PR が承認されるまで禁止 |
+| `adlaire-sql-parser` | 計画 | libSQL SQLite パーサ（`libsql-sys`） | Phase 19 では実装禁止。Phase 20 以降の仕様変更 PR が承認されるまで着手禁止 |
 
 内製クレートへの移行は §3.5.4 のロードマップ・§Phase 19 内製化方針に従い段階的に行う。
 
@@ -423,7 +423,7 @@ POST /v2/pipeline
 | DB ごとの接続数 | 接続 1 本（シンプルな実装から始める）|
 | 同一 DB への並行アクセス | SQLite の WAL モードで複数リーダー・シングルライターを実現 |
 | 異なる DB への並行アクセス | DB ごとに独立した接続のため干渉なし |
-| 接続プール | Phase 6〜18 は単一接続。プール化は Phase 19 以降に専用仕様を追加するまで実装禁止 |
+| 接続プール | Phase 6〜18 は単一接続。プール化は Phase 20 以降の仕様変更 PR が承認されるまで実装禁止 |
 
 **DB 作成フロー：**
 
@@ -474,8 +474,8 @@ Turso Cloud は Adlaire DB の互換参照実装である。Turso Cloud の挙�
 追従判断は以下の順で行う。
 
 1. 既存 libSQL SDK が利用する wire format と client-visible behavior は最優先で追従する
-2. Turso Cloud の管理 API・metadata・エラー形式は、自己ホストで実装可能な限り追従する
-3. 自己ホストでは実装できない、または安全でない挙動は、差分理由と代替仕様を明記してから採用可否を判断する
+2. Turso Cloud の管理 API・metadata・エラー形式は、自己ホストで危険な外部依存を要求しない限り追従する
+3. 自己ホストでは安全でない挙動は、差分理由、代替仕様、SDK 影響、error code を仕様書に固定してから実装する
 4. 追従によって既存 Adlaire DB の metadata migration が必要な場合は、migration 仕様、rollback 方針、後方互換テストを先に定義する
 
 互換性レビューでは、少なくとも次を確認する。
@@ -495,8 +495,8 @@ Turso Cloud は Adlaire DB の互換参照実装である。Turso Cloud の挙�
 | Phase 1〜18 | HTTP / 認証 / 管理 API / hrana 変換 | 実装可 | Turso Cloud 互換レイヤーとして Adlaire が直接実装する |
 | Phase 19 | WAL チェックポイント制御 | 実装可 | レプリケーション、PITR、HA の内部安定性に直結する |
 | Phase 19 | libSQL adapter 境界整理 | 実装可 | 外部 API を変えずに内部差し替え可能な境界を固定する |
-| Phase 19 | ストレージ層差し替え | 設計・互換テスト追加のみ可 | production path への切り替えは後続仕様改訂で確定する |
-| Phase 19 | SQL パーサ | 実装禁止 | Turso Cloud / SQLite 互換リスクが高いため、後続仕様改訂なしに着手しない |
+| Phase 19 | ストレージ層差し替え | readonly adapter と互換テスト追加のみ可 | production write path への切り替えは Phase 20 以降の仕様変更 PR が承認されるまで禁止 |
+| Phase 19 | SQL パーサ | 実装禁止 | Turso Cloud / SQLite 互換リスクが高いため、Phase 20 以降の仕様変更 PR が承認されるまで着手禁止 |
 
 内製化は I-5（段階的・計画的）に従い、**各フェーズで動作するテストスイートと Turso Cloud / libSQL SDK 互換テストが通ることを確認してから**次のコンポーネントに進む。内製化 PR は API、認証、metadata、エラー形式、SDK 互換挙動を変更してはならない。変更が必要な場合は、先に Turso Cloud 追従差分として仕様書を改訂する。
 
@@ -526,7 +526,7 @@ jobs:
 - JWT 検証の全 6 ステップ（正常・各エラー）は必ずユニットテストを書く
 - hrana-http v2 の JSON シリアライズ・デシリアライズはラウンドトリップテストを書く
 - TC-1〜TC-6 の統合テストは `cargo test --test integration` で自動実行する
-- TypeScript SDK E2E は Node.js 環境依存のため手動確認を基本とし、CI は任意とする
+- TypeScript SDK E2E は Phase 5 以降の regression gate とする。CI 環境で Node.js が利用できない場合は、Docker test image 内に Node.js を固定して実行する
 
 ### 3.6 データ整合性・保全方針
 
@@ -1117,6 +1117,24 @@ Response 200:
 - 認証失敗時: `401 {"error":"unauthorized","code":"AUTH_REQUIRED"}`
 - 管理トークンは JWT ではなく任意の文字列で良い（内部的には Bearer 文字列の完全一致で検証）
 
+#### 管理 API 共通契約
+
+Phase 7 以降の `/admin/v1/*` は、個別 endpoint で明記がない限り以下を必須とする。
+
+| 項目 | 固定仕様 |
+|------|----------|
+| Content-Type | request body を持つ JSON API は `application/json` のみ受理する。未指定または他 media type は `400 INVALID_REQUEST` |
+| unknown field | `INVALID_REQUEST`。後方互換のため明記された field 以外を黙って無視しない |
+| null | schema で `null 可` と明記された field 以外の `null` は `INVALID_REQUEST` |
+| empty body | body なし endpoint に body がある場合は `INVALID_REQUEST` |
+| path id | URL decode 後、対応する name/id validation を実行する。decode 不能は `INVALID_REQUEST` |
+| list order | 作成日時昇順。同一 `created_at` は `id` 昇順 |
+| pagination | `limit` 既定 100、最大 500、最小 1。`cursor` は opaque string。無効 cursor は `INVALID_REQUEST` |
+| response time | `created_at`、`updated_at`、`loaded_at` は RFC3339 UTC 秒精度。ミリ秒を返さない |
+| delete | 削除済みまたは存在しない resource は、個別 endpoint が冪等 204 と明記しない限り 404 |
+| error body | 必ず `{"error": "...", "code": "..."}`。追加 field は返さない |
+| secret | admin token、JWT、replication token、HA token、extension path の実 OS 絶対パスは response/log に出さない |
+
 #### DB 管理（Phase 7）
 
 ```
@@ -1399,6 +1417,9 @@ GET /admin/v1/metrics     全 DB のメトリクス取得
 | 401 Unauthorized | JWT なし・JWT 検証失敗 |
 | 403 Forbidden | 権限不足（ro トークンで書き込み等）|
 | 404 Not Found | 存在しない DB・エンドポイント |
+| 409 Conflict | 既存 resource との競合・integrity/HA 状態不整合 |
+| 501 Not Implemented | 未来 Phase の stub endpoint。成功応答として扱わない |
+| 503 Service Unavailable | storage busy、replication timeout、usage unavailable、leader unavailable |
 | 500 Internal Server Error | サーバー内部エラー |
 
 ### 7.2 エラーレスポンス形式
@@ -1450,6 +1471,7 @@ GET /admin/v1/metrics     全 DB のメトリクス取得
 | `HA_SPLIT_BRAIN` | 409 | 複数 leader または term 不整合を検出 |
 | `HA_PROMOTION_FAILED` | 409 | node 昇格または降格に失敗 |
 | `DB_RESERVED_NAME` | 400 | `___` を含む DB 名の直接作成試行 |
+| `NOT_IMPLEMENTED` | 501 | 未来 Phase の stub endpoint |
 | `INTERNAL_ERROR` | 500 | サーバー内部エラー |
 
 ※ `SQLITE_ERROR` / `SQLITE_CONSTRAINT` は `POST /v2/pipeline` の HTTP レスポンスが 200 OK でも、`results[].type = "error"` として返す（hrana プロトコルの仕様）。HTTP 400 を返すのは `INVALID_REQUEST`（JSON 不正等）のみ。
@@ -1758,6 +1780,30 @@ Step 5: 停止完了
 9. 新しい永続化ファイルを追加した場合は、ディレクトリ構成、初期値、破損時挙動、バックアップ対象かどうかを §3.2 または該当 Phase に追記する
 10. 新しい外部 crate を追加する場合は、採用理由、代替案、対象 Phase、セキュリティ影響を仕様書に明記する
 
+#### 9.1.1 バグ修正ゼロ化ゲート
+
+各 Phase の実装 PR は、以下を満たすまで完了扱いにしてはならない。1 つでも未実施または失敗がある場合は、その PR 内で修正し、後続の「バグ修正 PR」へ持ち越さない。
+
+| ゲート | 必須判定 |
+|--------|----------|
+| Contract exhaustiveness | §9.5 の該当 endpoint 全てについて、method/path/auth/request/success/error/persistence/idempotency のテストが存在する |
+| Error exhaustiveness | §7.3 / §9.7 に定義された該当 Phase の error code 全てについて、発火テストが存在する |
+| Unknown/null validation | 管理 API は unknown field、余分 body、不正 null、不正 query、不正 path decode を `INVALID_REQUEST` として拒否する |
+| Persistence atomicity | metadata 更新中の失敗注入で、partial write、空上書き、metadata/file 不整合が起きない |
+| Restart recovery | 正常更新後、異常終了後、metadata 破損後の起動結果が §9.6 と一致する |
+| Auth boundary | 認証なし、不正 token、scope 外、ro/rw の境界を全 endpoint で確認する |
+| Secret leakage | stdout/stderr/log file/HTTP response に secret、JWT、admin token、replication token、HA token、生 SQL args、backup body、extension 絶対 path が出ない |
+| Concurrency | 同一 resource への同時 create/delete/update で二重作成、lost update、破損 metadata が起きない |
+| Regression | 当該 Phase より前の Phase の TC がすべて通る |
+| Compatibility | Phase 5 以降は TypeScript `@libsql/client` の CRUD regression、Phase 9 以降は WebSocket regression、Phase 12 以降は replication regression が通る |
+
+**失敗時の扱い：**
+
+- ゲート失敗はすべて当該 Phase の未完了として扱う
+- test skip で通過扱いにしてはならない
+- flaky test は `retry` で隠さず、原因を修正してから完了扱いにする
+- 外部環境依存で自動化できない検証は、手順、期待値、実行ログ保存先を仕様書または PR description に固定する
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -1960,6 +2006,8 @@ API を実装する場合は、各 endpoint について必ず次を仕様本文
 | `{data-dir}/meta/locations.json` | 8 | location 管理 | `{"locations":[{"id":"default","name":"default","provider":"self-hosted","region":"local","primary":true}]}` | tmp write + fsync + rename | 必須 | 起動失敗。自動修復しない | Yes |
 | `{data-dir}/meta/quotas.json` | 8 | quota 管理 | `{"quotas":[]}` | tmp write + fsync + rename | 必須 | 起動失敗。自動修復しない | Yes |
 | `{data-dir}/meta/usage.json` | 8 | usage snapshot | `{"usage":[],"updated_at":null}` | tmp write + fsync + rename | 任意。fsync 失敗時は WARN + `USAGE_UNAVAILABLE` | 破損時は起動 WARN 後に再計測。空上書きは禁止 | No |
+| `{data-dir}/meta/phase8-migration.json` | 8 | migration marker | migration 完了時のみ作成 | tmp write + fsync + rename | 必須 | marker 破損時は起動失敗。再 migration しない | Yes |
+| `{data-dir}/meta/migration-backup/phase8-{timestamp}/` | 8 | migration backup | migration 開始前に作成 | copy + fsync | 必須 | 復元不能なら起動失敗 | No |
 | `{data-dir}/meta/branches.json` | 2 / 15 | branch 管理 | `{"branches":[]}` | tmp write + fsync + rename | 必須 | Phase 15 以降は起動失敗。Phase 14 以前は初期化のみ | Yes |
 | `{data-dir}/databases/{name}/data.db` | 2+ | libsql / DbManager | libsql 作成 | libsql commit | libsql に委譲 | integrity_check NG なら起動失敗 | Yes |
 | `{data-dir}/databases/{name}/data.db-wal` | 2+ | SQLite WAL | SQLite 作成 | SQLite WAL | SQLite に委譲 | SQLite recovery に委譲。integrity_check で検出 | Yes |
@@ -2003,6 +2051,7 @@ API を実装する場合は、各 endpoint について必ず次を仕様本文
 | `DB_ALREADY_EXISTS` | 7+ | DB create | No | 別名を使う |
 | `INVALID_DB_NAME` | 6+ | DB/branch create/path validation | No | name を修正 |
 | `DB_RESERVED_NAME` | 6+ / 15 | `meta`, `admin`, `___` 含有名 | No | name を修正 |
+| `NOT_IMPLEMENTED` | all | 未来 Phase の stub endpoint | No | 対象 Phase 実装後に再試行 |
 | `INVALID_REQUEST` | 3+ | JSON/schema/query/body 不正 | No | request を修正 |
 | `SQLITE_ERROR` | 3+ | hrana results 内 | Depends | SQL を修正。busy は `STORAGE_BUSY` を使う |
 | `SQLITE_CONSTRAINT` | 3+ | hrana results 内 | No | data/constraint を修正 |
@@ -2133,6 +2182,12 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | primary URL | `--primary-url` | なし | なし | replica では必須 | 12 | replica で未指定/parse 失敗なら起動失敗 |
 | replication token | `--replication-auth-token` | なし | なし | なし | 11 | required mode で未指定なら起動失敗 |
 | replication write mode | `--replication-write-mode` | なし | `[replication] write_mode` | `async` | 11 | unknown は起動失敗。未定義 sync semantics は起動失敗 |
+| HA node id | `--ha-node-id` | なし | `[ha] node_id` | `standalone` | 18 | validation 失敗なら起動失敗 |
+| HA token | `--ha-token` | `ADLAIRE_HA_TOKEN` | `[ha] token` | なし | 18 | HA API 有効時に未指定なら起動失敗 |
+| HA failover timeout | `--ha-failover-timeout-ms` | なし | `[ha] failover_timeout_ms` | `10000` | 18 | `1000` 未満は起動失敗 |
+| internal WAL | `--internal-wal` | なし | `[internal] wal` | `libsql` | 19 | `libsql` / `adlaire` 以外は起動失敗 |
+| internal storage | `--internal-storage` | なし | `[internal] storage` | `libsql` | 19 | `libsql` / `adlaire-readonly` 以外は起動失敗 |
+| internal executor | `--internal-executor` | なし | `[internal] executor` | `libsql` | 19 | `libsql` / `adlaire-adapter` 以外は起動失敗 |
 | WAL mode | なし | なし | `[storage] wal_mode` | `passive` | 2 | unknown は起動失敗 |
 | WAL retention | なし | なし | `[storage] wal_retention_days` | `0` | 13 | parse 失敗で起動失敗 |
 | replication sync timeout | なし | なし | `[replication] sync_timeout_ms` | `5000` | 11 | `0` は起動失敗 |
@@ -2146,6 +2201,9 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | admin API | path name、JSON body、admin token | Bearer 完全一致、DB name validation、atomic update | token value の再表示、auth bypass |
 | WebSocket | upgrade headers、frames、stream_id | hello auth、message size limit、stream lifecycle validation | hello 前 request 処理、open tx 放置 |
 | replication API | token、frame_no、frame bytes | replication token、CRC32、range validation | checksum 無視、unauthenticated stream |
+| extension | extension name/version/sha256/filename | allowlist、sha256、固定 directory、manifest validation | 任意 path load、SQL からの直接 load、未署名拡張 |
+| HA | HA token、node_id、term、leader_id | HA token、term 単調増加、operator promotion、split-brain rejection | unauthenticated promotion、自動 primary 昇格、古い term の採用 |
+| internal switch | internal flags、adapter output | 起動時 validation、rollback flag、互換 snapshot test | silent fallback、metadata migration、wire/API 差分 |
 | filesystem | metadata JSON、DB files、archive files | canonical data_dir join、atomic update、integrity check | path traversal、自動上書き修復 |
 | backup/restore | uploaded DB、PITR selector | temp restore、integrity_check、rollback | 元 DB の直接上書き、失敗後の不整合 |
 | branch | branch name、source frame/time | DB name validation、source existence check | `___` 含有名、metadata 先行 commit |
@@ -4781,6 +4839,72 @@ Phase 8 で公開する API は §9.5 の Phase 8 行を正とする。すべて
 
 `PUT /admin/v1/quotas/{scope}` の `{scope}` は URL encode 済みの `organization:{id}`、`group:{id}`、`database:{name}` のいずれかとする。scope type が不明な場合は `INVALID_REQUEST`、scope が存在しない場合は対応する `ORG_NOT_FOUND`、`GROUP_NOT_FOUND`、`DB_NOT_FOUND` を返す。
 
+**Phase 8 API schema 固定表：**
+
+| API | Request | Success response | Validation |
+|-----|---------|------------------|------------|
+| `GET /admin/v1/organizations` | query `limit?`, `cursor?` | `{"organizations":[OrganizationInfo],"next_cursor": string|null}` | 不明 query は `INVALID_REQUEST` |
+| `POST /admin/v1/organizations` | `{name, slug?}` | 201 `OrganizationInfo` | `name`/`slug` は `^[a-zA-Z0-9_-]{1,63}$`。`slug` 省略時は `name` と同じ。重複は `ORG_ALREADY_EXISTS` |
+| `GET /admin/v1/organizations/{org}` | body なし | `OrganizationInfo` | `{org}` は `id` または `slug` |
+| `DELETE /admin/v1/organizations/{org}` | body なし | 204 | `default` は削除禁止で `403 ORG_SCOPE_DENIED`。配下 group/DB/token がある場合も `403 ORG_SCOPE_DENIED` |
+| `GET /admin/v1/groups` | query `organization?`, `limit?`, `cursor?` | `{"groups":[GroupInfo],"next_cursor": string|null}` | `organization` が存在しなければ `ORG_NOT_FOUND` |
+| `POST /admin/v1/groups` | `{organization, name, slug?, location?}` | 201 `GroupInfo` | `location` 省略時は `default`。同一 organization 内の name/slug 重複は `GROUP_ALREADY_EXISTS` |
+| `GET /admin/v1/groups/{group}` | body なし | `GroupInfo` | group 名が複数 organization で重複する場合は `organization` query 必須。未指定なら `INVALID_REQUEST` |
+| `DELETE /admin/v1/groups/{group}` | body なし | 204 | `default` は削除禁止。配下 DB/token/quota がある場合は `403 ORG_SCOPE_DENIED` |
+| `GET /admin/v1/locations` | query `limit?`, `cursor?` | `{"locations":[LocationInfo],"next_cursor": string|null}` | 不明 query は `INVALID_REQUEST` |
+| `POST /admin/v1/locations` | `{name, provider?, region?, primary?}` | 201 `LocationInfo` | `provider` 省略時 `"self-hosted"`、`region` 省略時 `"local"`、`primary` 省略時 `false` |
+| `GET /admin/v1/locations/{location}` | body なし | `LocationInfo` | `{location}` は `id` または `name` |
+| `DELETE /admin/v1/locations/{location}` | body なし | 204 | DB/group が参照中なら `403 ORG_SCOPE_DENIED`。`default` は削除禁止 |
+| `GET /admin/v1/quotas` | query `organization?`, `group?`, `database?`, `limit?`, `cursor?` | `{"quotas":[QuotaInfo],"next_cursor": string|null}` | scope query は同時に 1 種類のみ。複数指定は `INVALID_REQUEST` |
+| `PUT /admin/v1/quotas/{scope}` | `{storage_bytes, rows?, write_ops_per_minute?}` | 200 `QuotaInfo` | `storage_bytes` は 0 以上の integer。`null` は無制限。負数は `INVALID_REQUEST` |
+| `GET /admin/v1/usage` | query `organization?`, `group?`, `database?`, `limit?`, `cursor?` | `{"usage":[UsageInfo],"next_cursor": string|null}` | usage 再計測不能時は `USAGE_UNAVAILABLE` |
+
+**Phase 8 DTO schema：**
+
+```json
+{
+  "OrganizationInfo": {
+    "id": "org_default",
+    "name": "default",
+    "slug": "default",
+    "created_at": "2026-09-13T00:00:00Z"
+  },
+  "GroupInfo": {
+    "id": "grp_default",
+    "organization": "default",
+    "name": "default",
+    "slug": "default",
+    "location": "default",
+    "created_at": "2026-09-13T00:00:00Z"
+  },
+  "LocationInfo": {
+    "id": "loc_default",
+    "name": "default",
+    "provider": "self-hosted",
+    "region": "local",
+    "primary": true,
+    "created_at": "2026-09-13T00:00:00Z"
+  },
+  "QuotaInfo": {
+    "scope_type": "organization",
+    "scope": "default",
+    "storage_bytes": 10737418240,
+    "rows": null,
+    "write_ops_per_minute": null,
+    "updated_at": "2026-09-13T00:00:00Z"
+  },
+  "UsageInfo": {
+    "scope_type": "database",
+    "scope": "default",
+    "storage_bytes": 0,
+    "rows": null,
+    "updated_at": "2026-09-13T00:00:00Z"
+  }
+}
+```
+
+上記 DTO の field はすべて必須である。`rows` と `write_ops_per_minute` だけ `null` 可とする。`id` は実装内で `org_`、`grp_`、`loc_` prefix を付けた一意文字列にする。既存 Turso Cloud の slug 互換を優先するため、API path では `id` と `slug/name` の両方を解決できるようにする。
+
 **既存 API の Phase 8 拡張：**
 
 - `POST /admin/v1/databases` は `{name, organization?, group?, location?, quota?}` を受け付ける。省略時はすべて `"default"` を使う
@@ -4822,6 +4946,19 @@ Phase 8 初回起動時に Phase 7 までの metadata を検出した場合、�
 3. 既存 `tokens.json` の全 token に `organization_scope:null`、`group_scope:null` を付与し、従来の `dbs` claim は維持する
 4. migration 中に失敗した場合は起動失敗とし、途中で更新済みの metadata を成功扱いにしない
 5. migration は tmp write、fsync、rename の順で行い、全 metadata が整合した後に起動成功とする
+
+**Phase 8 migration / rollback 固定手順：**
+
+| 手順 | 必須処理 |
+|------|----------|
+| preflight | 既存 `databases.json` と `tokens.json` を読み、JSON parse、必須 field、DB directory 存在を検証する。失敗時は書き込み前に起動失敗 |
+| backup | `{data-dir}/meta/migration-backup/phase8-{timestamp}/` に既存 metadata を copy + fsync する。backup 失敗時は起動失敗 |
+| write | 新規 metadata は `.tmp` に書き、file fsync、directory fsync、rename、directory fsync の順で確定する |
+| commit marker | 全 metadata 更新後に `{data-dir}/meta/phase8-migration.json` を `{"from_phase":7,"completed_at":...,"backup":"..."}` で書く |
+| rollback | migration 中断を検出した場合、commit marker がなければ backup から復元して起動失敗にする。commit marker がある場合は rollback せず通常起動 |
+| idempotency | commit marker がある状態で再起動した場合、migration を再実行しない |
+
+Phase 8 migration は data loss を避けるため自動削除をしない。不要になった backup の削除 API は Phase 8 対象外であり、手動削除のみ許可する。
 
 **Phase 8 権限優先順位：**
 
@@ -6107,6 +6244,37 @@ Phase 16 では `.so` 拡張のみを対象とする。Wasm 拡張、任意パ�
 - 永続化: `meta/extensions.json` と `{data-dir}/extensions/{name}/{version}/`（§9.6）
 - 完了条件: TC-16-1〜TC-16-6 と T16-1〜T16-6 をすべて満たす
 
+**Phase 16 extension manifest schema：**
+
+```json
+{
+  "extensions": [
+    {
+      "name": "vector",
+      "version": "0.1.0",
+      "filename": "vector.so",
+      "sha256": "64 lowercase hex chars",
+      "enabled": true,
+      "loaded": false,
+      "loaded_at": null,
+      "created_at": "2026-09-13T00:00:00Z"
+    }
+  ]
+}
+```
+
+| Field | Validation |
+|-------|------------|
+| `name` | `^[a-zA-Z0-9_-]{1,64}$`。`sqlite`、`libsql`、`adlaire` prefix は予約で `EXTENSION_NOT_ALLOWED` |
+| `version` | semver `MAJOR.MINOR.PATCH` のみ。pre-release/build metadata は Phase 16 対象外 |
+| `filename` | `{name}.so` のみ。slash、dot-dot、絶対 path は `INVALID_REQUEST` |
+| `sha256` | lowercase hex 64 文字のみ |
+| `enabled` | boolean 必須 |
+| `loaded` | runtime 状態。起動時は全 extension で `false` から再評価する |
+| `loaded_at` | `loaded=true` の時だけ RFC3339 UTC 秒精度。未ロードは `null` |
+
+登録時は binary を `{data-dir}/extensions/{name}/{version}/{filename}` に配置済みであることを確認し、sha256 が一致した場合だけ `extensions.json` に追加する。HTTP API から binary upload は受け付けない。load は server 起動時と `POST /admin/v1/extensions` 後に行い、失敗時は metadata を追加せず `EXTENSION_LOAD_FAILED` を返す。`DELETE` は metadata から削除し、binary directory は削除しない。
+
 ### Phase 17：メトリクス永続化・外部監視連携
 
 **目標**：Phase 10 のインメモリ metrics を永続 counter に拡張し、Prometheus 互換出力を提供する。
@@ -6117,6 +6285,43 @@ Phase 17 では alerting、remote write、外部 SaaS 連携は対象外とす�
 - 永続化: `meta/metrics-snapshot.json`
 - quota 判定用 usage: Phase 8 の `usage.json` を正とする
 - 完了条件: TC-17-1〜TC-17-5 と T17-1〜T17-5 をすべて満たす
+
+**Phase 17 metrics snapshot schema：**
+
+```json
+{
+  "counters": {
+    "queries_total": 0,
+    "rows_read_total": 0,
+    "rows_written_total": 0,
+    "http_requests_total": 0,
+    "errors_total": 0
+  },
+  "gauges": {
+    "databases_total": 0,
+    "connections_active": 0,
+    "storage_bytes": 0,
+    "wal_size_bytes": 0
+  },
+  "updated_at": "2026-09-13T00:00:00Z"
+}
+```
+
+Prometheus endpoint は `text/plain; version=0.0.4; charset=utf-8` を返し、metric 名は以下に固定する。
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `adlaire_queries_total` | counter | `db`, `kind` (`read`/`write`) |
+| `adlaire_rows_read_total` | counter | `db` |
+| `adlaire_rows_written_total` | counter | `db` |
+| `adlaire_http_requests_total` | counter | `method`, `route`, `status` |
+| `adlaire_errors_total` | counter | `code` |
+| `adlaire_databases_total` | gauge | なし |
+| `adlaire_connections_active` | gauge | `db` |
+| `adlaire_storage_bytes` | gauge | `db` |
+| `adlaire_wal_size_bytes` | gauge | `db` |
+
+label 値に DB 名以外の user input を直接入れてはならない。SQL text、SQL args、token、raw path は label 禁止。snapshot 書き込み間隔は 30 秒固定とし、graceful shutdown 時は最終 snapshot を同期書き込みする。
 
 ### Phase 18：HA・自動フェイルオーバー
 
@@ -6129,6 +6334,31 @@ Phase 18 は single-leader 構成のみを対象にする。multi-primary write�
 - term: 単調増加のみ許可。古い term による昇格は `HA_SPLIT_BRAIN`
 - 完了条件: TC-18-1〜TC-18-7 と T18-1〜T18-7 をすべて満たす
 
+**Phase 18 HA state schema：**
+
+```json
+{
+  "node_id": "node-a",
+  "term": 1,
+  "leader_id": "node-a",
+  "role": "primary",
+  "last_applied_frame": 42,
+  "last_heartbeat_at": "2026-09-13T00:00:00Z",
+  "updated_at": "2026-09-13T00:00:00Z"
+}
+```
+
+| Field | Validation |
+|-------|------------|
+| `node_id` | `^[a-zA-Z0-9_-]{1,64}$`。起動 flag `--ha-node-id` と一致必須 |
+| `term` | 0 以上の integer。更新時は既存値以上のみ許可 |
+| `leader_id` | `null` または node id。`role=primary` の場合は自 node id と一致必須 |
+| `role` | `standalone` / `primary` / `replica` / `candidate` のみ |
+| `last_applied_frame` | 0 以上の integer |
+| `last_heartbeat_at` | `null` または RFC3339 UTC 秒精度 |
+
+Phase 18 の leader election は外部 consensus service を使わない。promotion は `POST /ha/v1/promote` を operator が明示実行した場合のみ行う。自動 failover は primary heartbeat が `--ha-failover-timeout-ms` を超過し、replica が最新 frame に追いついている場合だけ candidate へ遷移する。candidate は operator promote なしに primary へ昇格しない。
+
 ### Phase 19：libSQL 内部コンポーネント段階的内製化
 
 **目標**：Turso Cloud / libSQL SDK 互換を維持したまま、内部コンポーネントを `adlaire-*` crate へ段階的に差し替える。
@@ -6139,6 +6369,24 @@ Phase 19 は wire format、admin API、metadata schema、JWT claim を変更し�
 - 既定値: 直前 Phase と同じ挙動
 - rollback: flag を戻すだけで完了できること
 - 完了条件: TC-19-1〜TC-19-6 と T19-1〜T19-6 をすべて満たす
+
+**Phase 19 config flags：**
+
+| Flag | TOML | Default | Allowed | 完了条件 |
+|------|------|---------|---------|----------|
+| `--internal-wal` | `[internal] wal` | `libsql` | `libsql` / `adlaire` | `adlaire` で TC-19-1〜TC-19-3 が通る |
+| `--internal-storage` | `[internal] storage` | `libsql` | `libsql` / `adlaire-readonly` | Phase 19 では readonly adapter まで。write path 切替は禁止 |
+| `--internal-executor` | `[internal] executor` | `libsql` | `libsql` / `adlaire-adapter` | API 互換を維持した adapter 境界のみ |
+
+不正値は起動失敗。`storage=adlaire-readonly` かつ write workload が来た場合は、自動 fallback せず `INTERNAL_ERROR` ではなく起動時 config error にする。rollback は全 flag を `libsql` に戻すだけで metadata migration なしに完了しなければならない。
+
+**Phase 19 性能・互換 baseline：**
+
+- `libsql` 既定経路に対して Phase 1〜18 regression は 100% 通過
+- `adlaire` 経路の p95 latency は同一 workload で `libsql` 経路の 2 倍以内
+- crash recovery 後に `PRAGMA integrity_check` が `ok`
+- TypeScript/Rust/Go libSQL SDK の CRUD smoke test が全て成功
+- wire format、error code、metadata schema、JWT claim に差分がないことを snapshot test で確認
 
 ---
 
