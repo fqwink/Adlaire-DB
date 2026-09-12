@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.64
+**バージョン：** 0.65
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -1822,6 +1822,32 @@ Step 5: 停止完了
 5. やむを得ず先行実装が必要な場合は、同じ PR の先頭 commit で仕様を更新し、その後に実装 commit を積む
 6. 仕様変更を伴う PR は、PR description に「変更した契約」「影響 Phase」「追加テスト」を明記する
 
+#### 9.0.1 実装前仕様固定プロトコル
+
+各 Phase の実装開始前に、実装者は該当 Phase について以下の契約表を作成または既存節から確認し、全項目が仕様書本文に存在することを確認する。1 つでも欠ける場合、その Phase の実装を開始してはならない。
+
+| 契約カテゴリ | 固定必須項目 | 欠けている場合の扱い |
+|--------------|--------------|----------------------|
+| API surface | method、path、path parameter、query parameter、request body、success status、success body、error status、error body、auth 種別 | 仕様未確定。実装禁止 |
+| Permission | admin/JWT/platform/replication/HA token のどれを使うか、ro/rw/scope/org/group/quota の判定順序 | 仕様未確定。実装禁止 |
+| Persistence | 更新ファイル、atomic update 手順、fsync 対象、rollback 手順、起動時 recovery、破損時挙動 | 仕様未確定。実装禁止 |
+| Compatibility | Turso Cloud との差分、libSQL SDK 影響、legacy metadata 互換、snapshot artifact の正規化方法 | 仕様未確定。実装禁止 |
+| Observability | INFO/WARN/ERROR の発火条件、metric 名、secret/log redaction、audit 相当の記録有無 | 仕様未確定。実装禁止 |
+| Test evidence | 正常系、異常系、権限系、永続化系、再起動系、互換系、concurrency 系の test ID | 仕様未確定。実装禁止 |
+
+**実装前チェックリスト：**
+
+1. 該当 Phase の「対象外」に書かれた機能を実装予定に含めていない
+2. 追加 endpoint は §9.5 または該当 Phase 節に method/path 単位で存在する
+3. 追加 error code は §7.3 に存在し、HTTP status と message 粒度が固定されている
+4. 追加 metadata field は §9.6 または該当 Phase 節に型、必須/任意、default、migration、破損時挙動が固定されている
+5. 追加 config/flag/env は §4 と §8.4 に default、優先順位、不正値エラーが固定されている
+6. 追加外部 crate は §3.3.5 に用途、導入 Phase、セキュリティ影響が固定されている
+7. Turso Cloud 互換に関係する変更は snapshot artifact と差分理由が固定されている
+8. 実装 PR の完了条件として実行する test command と期待結果が固定されている
+
+上記チェックリストの「固定」は、仕様書本文に追記済みであることを意味する。PR description だけに書かれた判断は仕様として扱わない。
+
 ### 9.1 全 Phase 共通の完了条件
 
 各 Phase は、個別ゲートに加えて以下をすべて満たすこと。
@@ -1862,6 +1888,30 @@ Step 5: 停止完了
 - test skip で通過扱いにしてはならない
 - flaky test は `retry` で隠さず、原因を修正してから完了扱いにする
 - 外部環境依存で自動化できない検証は、手順、期待値、実行ログ保存先を仕様書または PR description に固定する
+
+#### 9.1.1a バグ修正持ち越し禁止リスト
+
+以下の状態を含む PR は、実装が一見動作していても Phase 完了として扱わない。該当する場合は同一 PR 内で修正し、後続 PR へ「バグ修正」として分離してはならない。
+
+| 禁止状態 | 判定 |
+|----------|------|
+| TODO/FIXME による契約未実装 | Phase 未完了 |
+| error mapping の暫定 `INTERNAL_ERROR` 代用 | Phase 未完了 |
+| request validation の一部未実装 | Phase 未完了 |
+| auth/scope/quota/org/group 判定の一部 endpoint 未適用 | Phase 未完了 |
+| metadata migration の片方向のみ実装 | Phase 未完了 |
+| rollback 不能な destructive operation | Phase 未完了 |
+| crash/restart 後の挙動未検証 | Phase 未完了 |
+| concurrency test 未実施 | Phase 未完了 |
+| Turso Platform snapshot 未更新または未比較 | Phase 8 以降は Phase 未完了 |
+| TypeScript SDK regression 未実行 | Phase 5 以降は Phase 未完了 |
+| WebSocket regression 未実行 | Phase 9 以降は Phase 未完了 |
+| replication regression 未実行 | Phase 12 以降は Phase 未完了 |
+| backup/restore rollback 未検証 | Phase 14 以降は Phase 未完了 |
+| HA split-brain test 未実行 | Phase 18 以降は Phase 未完了 |
+| internal adapter rollback flag 未検証 | Phase 19 は Phase 未完了 |
+
+「後で検証する」「既知の軽微な不具合」「現時点では通る想定」は完了根拠として認めない。完了根拠は、実行済み command、保存された snapshot、または自動テスト結果のいずれかでなければならない。
 
 #### 9.1.2 全 Phase 共通実装固定契約
 
@@ -1921,6 +1971,23 @@ resource の状態を持つ Phase 9 以降の機能は、以下の状態名を�
 | ZB-6 | 9+ | connection/session/job の途中切断で未完了 write が成功扱いにならない |
 | ZB-7 | 11+ | frame/checksum/manifest の不整合を検出し、silent success しない |
 | ZB-8 | 14+ | restore/branch/adapter rollback が再起動後も整合する |
+
+#### 9.1.3 実装 PR 証跡フォーマット
+
+各 Phase の実装 PR は、PR description または同梱された test artifact に以下を残す。記録がない項目は未実施として扱う。
+
+| 項目 | 必須内容 |
+|------|----------|
+| Phase | 対象 Phase、影響する前後 Phase、対象外として確認した機能 |
+| Contract changed | 追加/変更した endpoint、metadata、config、error code、permission、migration |
+| Compatibility | Turso Cloud / libSQL SDK / legacy metadata への影響と確認結果 |
+| Test commands | 実行した command、終了コード、失敗時の修正内容 |
+| Snapshot artifacts | API snapshot、Turso Platform snapshot、Prometheus snapshot、WebSocket transcript など該当 Phase の artifact |
+| Persistence evidence | atomic write、rollback、restart recovery、corruption handling の検証結果 |
+| Security evidence | secret redaction、auth failure、scope denial、quota denial の検証結果 |
+| Regression evidence | 当該 Phase より前の TC が通ったこと |
+
+証跡は「何を実装したか」ではなく「仕様のどの契約を満たしたか」で記述する。仕様書にない判断を PR description で補って完了扱いにしてはならない。
 
 ### 9.2 Phase 別完了ゲート
 
