@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.46  
+**バージョン：** 0.47  
 **ステータス：** 設計中  
 **最終更新：** 2026-09-12  
 
@@ -572,12 +572,12 @@ OPTIONS:
   --admin-port <PORT>    管理 API ポート（デフォルト: 8081）
   --config <FILE>        設定ファイルパス（デフォルト: {data}/config.toml）
   --auth-jwt-secret <SECRET>
-                         JWT 署名秘密鍵（HS256）。未指定時は認証無効（開発用）
+                         JWT 署名秘密鍵（HS256）。未指定時は認証無効（開発用）。環境変数 ADLAIRE_JWT_SECRET も使用可
   --auth-jwt-secret-file <FILE>
                          秘密鍵をファイルから読み込む
   --admin-auth-token <TOKEN>
                          管理 API 固定認証トークン（未指定時は認証無効）。環境変数 ADLAIRE_ADMIN_TOKEN も使用可
-  --log-level <LEVEL>    ログレベル: error / warn / info / debug / trace（デフォルト: info）
+  --log-level <LEVEL>    ログレベル: error / warn / info / debug / trace（デフォルト: info）。環境変数 ADLAIRE_LOG_LEVEL も使用可
   --skip-integrity-check 起動時の PRAGMA integrity_check をスキップ（非推奨。WARN ログ出力）
   --replication-write-mode <MODE>
                          レプリケーション書き込みモード: async / sync（デフォルト: async）
@@ -1346,6 +1346,7 @@ GET /admin/v1/metrics     全 DB のメトリクス取得
 | `AUTH_REQUIRED` | 401 | Authorization ヘッダがない |
 | `AUTH_INVALID` | 401 | JWT 署名検証失敗・失効済みトークン |
 | `AUTH_EXPIRED` | 401 | JWT exp 切れ |
+| `AUTH_DISABLED` | 401 | 認証が無効な状態でのみ有効なエンドポイントへのアクセス（将来拡張用） |
 | `PERMISSION_DENIED` | 403 | ro トークンで書き込み操作 |
 | `DB_NOT_FOUND` | 404 | 指定 DB が存在しない |
 | `TOKEN_NOT_FOUND` | 404 | 指定トークン ID が存在しない |
@@ -1640,11 +1641,10 @@ adlaire-server/src/
 │   ├── mod.rs           ← WAL レプリケーション共通型（Phase 10）
 │   ├── primary.rs       ← SSE /replication/v1/log・snapshot ハンドラ
 │   └── replica.rs       ← フレーム受信・CRC32 検証・適用ループ
-├── wal/
-│   ├── mod.rs           ← WAL アーカイブ公開 API（Phase 12〜13）
-│   ├── archive.rs       ← フレーム書き込み・fsync・manifest 更新
-│   └── manifest.rs      ← Manifest / FrameMeta struct・アトミック保存
-└── metrics.rs           ← AtomicU64 カウンター・DashMap（Phase 9）
+└── wal/
+    ├── mod.rs           ← WAL アーカイブ公開 API（Phase 12〜13）
+    ├── archive.rs       ← フレーム書き込み・fsync・manifest 更新
+    └── manifest.rs      ← Manifest / FrameMeta struct・アトミック保存
 ```
 
 
@@ -3203,10 +3203,7 @@ async fn execute_pipeline(
         match req {
             StreamRequest::Execute { stmt } => {
                 if is_write_stmt(&stmt.sql) && claims.resolve_access(db_name) != AccessLevel::Rw {
-                    responses.push(StreamResult::Error {
-                        error: HranaError { message: "write not permitted".into(), code: "PERMISSION_DENIED".into() },
-                    });
-                    continue;
+                    return Err(AppError::PermissionDenied);
                 }
                 let sql_args: Result<Vec<_>, _> = stmt.args.iter().map(hrana_to_sql).collect();
                 let sql_args = match sql_args {
