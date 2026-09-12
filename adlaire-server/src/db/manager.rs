@@ -2,7 +2,7 @@ use std::{collections::HashMap, path::{Path, PathBuf}, sync::Arc};
 
 use tokio::sync::RwLock;
 
-use crate::{config::StorageConfig, error::AppError};
+use crate::{config::StorageConfig, db::validate_db_name, error::AppError};
 use super::{
     meta::DatabasesMeta,
     sqld_adapter::{RealSqldAdapter, SqldAdapter},
@@ -52,6 +52,7 @@ impl DbManager {
                 }
                 Err(e) => {
                     tracing::error!(db = %db.name, err = %e, "failed to open database");
+                    anyhow::bail!("failed to open database '{}': {e}", db.name);
                 }
             }
         }
@@ -70,6 +71,8 @@ impl DbManager {
     }
 
     pub async fn create(&self, name: &str) -> Result<DbInfo, AppError> {
+        validate_db_name(name)?;
+
         {
             let meta = self.meta.read().await;
             if meta.databases.iter().any(|d| d.name == name) {

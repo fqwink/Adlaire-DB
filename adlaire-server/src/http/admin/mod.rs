@@ -1,73 +1,93 @@
-// Phase 6〜7 で各ハンドラを実装する。現時点はすべて 501 を返す stub。
+use std::convert::Infallible;
 
-use axum::{
-    extract::{Request, State},
-    http::{header, StatusCode},
-    middleware::Next,
-    response::IntoResponse,
-};
+use hyper::{body::Incoming, Request};
 
-use crate::state::SharedState;
+use crate::{http::HttpResponse, state::SharedState};
 
-pub async fn admin_auth_middleware(
-    State(state): State<SharedState>,
-    req: Request,
-    next: Next,
-) -> axum::response::Response {
-    if let Some(expected) = &state.config.admin_auth_token {
-        let provided = req
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "));
-
-        match provided {
-            Some(token) if token == expected.as_str() => {}
-            _ => {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    axum::Json(serde_json::json!({
-                        "error": "admin authentication required",
-                        "code":  "AUTH_REQUIRED"
-                    })),
-                ).into_response();
-            }
-        }
-    }
-    next.run(req).await
+fn not_implemented() -> Result<HttpResponse, Infallible> {
+    Ok(crate::http::json_error(
+        ::http::StatusCode::NOT_IMPLEMENTED,
+        "NOT_IMPLEMENTED",
+        "not implemented",
+    ))
 }
 
 pub mod databases {
     use super::*;
-    pub async fn list()   -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn create() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn get()    -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn delete() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+
+    pub async fn list(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+        not_implemented()
+    }
+
+    pub async fn create(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+        not_implemented()
+    }
+
+    pub async fn get(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+        not_implemented()
+    }
+
+    pub async fn delete(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+        not_implemented()
+    }
 }
 
 pub mod tokens {
     use super::*;
-    pub async fn list()   -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn create() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn get()    -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn revoke() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+
+    pub async fn list(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+        not_implemented()
+    }
+
+    pub async fn create(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+        not_implemented()
+    }
+
+    pub async fn get(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+        not_implemented()
+    }
+
+    pub async fn revoke(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+        not_implemented()
+    }
 }
 
 pub mod metrics {
     use super::*;
-    pub async fn get() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+
+    pub async fn get(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+        not_implemented()
+    }
 }
 
 pub mod backup {
     use super::*;
-    pub async fn backup()  -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn restore() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn pitr()    -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+
+    pub async fn backup(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+        not_implemented()
+    }
+
+    pub async fn restore(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+        not_implemented()
+    }
+
+    pub async fn pitr(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+        not_implemented()
+    }
 }
 
 pub mod branches {
     use super::*;
-    pub async fn list()   -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn create() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
-    pub async fn delete() -> StatusCode { StatusCode::NOT_IMPLEMENTED }
+
+    pub async fn list(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+        not_implemented()
+    }
+
+    pub async fn create(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+        not_implemented()
+    }
+
+    pub async fn delete(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+        not_implemented()
+    }
 }

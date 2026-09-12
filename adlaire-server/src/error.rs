@@ -1,4 +1,6 @@
-use axum::response::IntoResponse;
+use bytes::Bytes;
+use http_body_util::Full;
+use hyper::Response;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
@@ -45,9 +47,9 @@ pub enum AppError {
     Internal(#[from] anyhow::Error),
 }
 
-impl IntoResponse for AppError {
-    fn into_response(self) -> axum::response::Response {
-        use axum::http::StatusCode;
+impl AppError {
+    pub fn into_response(self) -> Response<Full<Bytes>> {
+        use ::http::StatusCode;
         let (status, code) = match &self {
             Self::AuthRequired           => (StatusCode::UNAUTHORIZED,          "AUTH_REQUIRED"),
             Self::AuthInvalid            => (StatusCode::UNAUTHORIZED,          "AUTH_INVALID"),
@@ -70,10 +72,15 @@ impl IntoResponse for AppError {
             Self::Sqld(_)                => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
             Self::Internal(_)            => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
         };
-        let body = axum::Json(serde_json::json!({
+        let body = serde_json::to_vec(&serde_json::json!({
             "error": self.to_string(),
             "code":  code,
-        }));
-        (status, body).into_response()
+        }))
+        .unwrap_or_default();
+        Response::builder()
+            .status(status)
+            .header(::http::header::CONTENT_TYPE, "application/json")
+            .body(Full::from(Bytes::from(body)))
+            .unwrap_or_else(|_| Response::new(Full::from(Bytes::new())))
     }
 }

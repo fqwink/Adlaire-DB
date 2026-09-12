@@ -18,10 +18,21 @@ impl DataDir {
                 );
             }
         }
+        // §8.1 Step 5-1: databases.json が存在しなければ空で初期化する
+        let databases_path = data_dir.join("meta").join("databases.json");
+        if !databases_path.exists() {
+            std::fs::write(&databases_path, r#"{"databases":[]}"#)?;
+        }
+
         // §8.1 Step 5-2: tokens.json が存在しなければ空で初期化する
         let tokens_path = data_dir.join("meta").join("tokens.json");
         if !tokens_path.exists() {
             std::fs::write(&tokens_path, r#"{"tokens":[]}"#)?;
+        }
+
+        let branches_path = data_dir.join("meta").join("branches.json");
+        if !branches_path.exists() {
+            std::fs::write(&branches_path, r#"{"branches":[]}"#)?;
         }
 
         tracing::info!(path = %data_dir.display(), "DataDir initialized");

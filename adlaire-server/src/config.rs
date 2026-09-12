@@ -82,11 +82,14 @@ pub struct TomlAdmin {
 pub struct TomlStorage {
     pub wal_mode:             Option<String>,
     pub skip_integrity_check: Option<bool>,
+    pub wal_retention_days:   Option<u64>,
+    pub integrity_check_interval_hours: Option<u64>,
 }
 
 #[derive(Debug, serde::Deserialize, Default)]
 pub struct TomlReplication {
-    pub write_mode: Option<String>,
+    pub write_mode:      Option<String>,
+    pub sync_timeout_ms: Option<u64>,
 }
 
 // ── Config::resolve ───────────────────────────────────────────────────────────
@@ -115,13 +118,16 @@ impl Config {
         // JWT シークレット解決（CLI > env > TOML > TOML file）
         let raw_secret: Option<Vec<u8>> = if let Some(p) = &args.auth_jwt_secret_file {
             Some(std::fs::read(p)?)
-        } else if let Some(s) = &args.auth_jwt_secret {
+        } else if let Some(s) = non_empty(args.auth_jwt_secret.as_deref()) {
             Some(s.as_bytes().to_vec())
-        } else if let Ok(s) = std::env::var("ADLAIRE_JWT_SECRET") {
+        } else if let Some(s) = std::env::var("ADLAIRE_JWT_SECRET")
+            .ok()
+            .and_then(|s| non_empty_owned(s))
+        {
             Some(s.into_bytes())
-        } else if let Some(s) = &auth.jwt_secret {
+        } else if let Some(s) = non_empty(auth.jwt_secret.as_deref()) {
             Some(s.as_bytes().to_vec())
-        } else if let Some(p) = &auth.jwt_secret_file {
+        } else if let Some(p) = non_empty(auth.jwt_secret_file.as_deref()) {
             Some(std::fs::read(p)?)
         } else {
             None
@@ -133,25 +139,30 @@ impl Config {
 
         let port       = args.port.or(srv.port).unwrap_or(8080);
         let admin_port = args.admin_port.or(srv.admin_port).unwrap_or(8081);
-        let log_level  = args.log_level.as_deref()
-            .or(srv.log_level.as_deref())
+        let log_level_env = std::env::var("ADLAIRE_LOG_LEVEL").ok();
+        let log_level  = non_empty(args.log_level.as_deref())
+            .or_else(|| non_empty(log_level_env.as_deref()))
+            .or_else(|| non_empty(srv.log_level.as_deref()))
             .unwrap_or("info")
             .to_string();
         let busy_timeout_ms   = args.busy_timeout.or(srv.busy_timeout_ms).unwrap_or(5000);
         let shutdown_timeout  = args.shutdown_timeout.or(srv.shutdown_timeout).unwrap_or(30);
         let skip_integrity_check = args.skip_integrity_check
             || sto.skip_integrity_check.unwrap_or(false);
-        let wal_mode   = parse_wal_mode(sto.wal_mode.as_deref())?;
+        let wal_mode   = parse_wal_mode(non_empty(sto.wal_mode.as_deref()))?;
         let write_mode = match &args.replication_write_mode {
-            Some(s) => parse_write_mode(s)?,
-            None    => rep.write_mode.as_deref()
+            Some(s) if non_empty(Some(s)).is_some() => parse_write_mode(s)?,
+            _       => rep.write_mode.as_deref()
+                          .and_then(|s| non_empty(Some(s)))
                           .map(parse_write_mode)
                           .transpose()?
                           .unwrap_or(ReplicationWriteMode::Async),
         };
-        let admin_auth_token = args.admin_auth_token.clone()
-            .or(adm.auth_token)
-            .or_else(|| std::env::var("ADLAIRE_ADMIN_TOKEN").ok());
+        let admin_token_env = std::env::var("ADLAIRE_ADMIN_TOKEN").ok();
+        let admin_auth_token = non_empty(args.admin_auth_token.as_deref())
+            .or_else(|| non_empty(admin_token_env.as_deref()))
+            .or_else(|| non_empty(adm.auth_token.as_deref()))
+            .map(ToOwned::to_owned);
 
         Ok(Arc::new(Config {
             data_dir: args.data.clone(),
@@ -166,16 +177,27 @@ impl Config {
                 busy_timeout_ms,
                 wal_checkpoint_pages:         1000,
                 wal_checkpoint_mode:          wal_mode,
-                wal_retention_days:           0,
-                integrity_check_interval_hrs: 0,
+                wal_retention_days:           sto.wal_retention_days.unwrap_or(0),
+                integrity_check_interval_hrs: sto.integrity_check_interval_hours.unwrap_or(0),
                 skip_integrity_check,
             },
             replication: ReplicationConfig {
                 write_mode,
-                sync_timeout_ms: 5000,
+                sync_timeout_ms: rep.sync_timeout_ms.unwrap_or(5000),
             },
         }))
     }
+}
+
+fn non_empty(s: Option<&str>) -> Option<&str> {
+    s.and_then(|s| {
+        let trimmed = s.trim();
+        if trimmed.is_empty() { None } else { Some(trimmed) }
+    })
+}
+
+fn non_empty_owned(s: String) -> Option<String> {
+    if s.trim().is_empty() { None } else { Some(s) }
 }
 
 fn parse_wal_mode(s: Option<&str>) -> anyhow::Result<WalCheckpointMode> {
