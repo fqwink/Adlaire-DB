@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.171
+**バージョン：** V.172
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.171` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.172` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -4093,7 +4093,7 @@ Phase implementation packet は、実装開始前に以下の canonical key を�
 | `task_ids` | 対象 Phase の atomic task ID 一覧。各 task は入力契約、禁止変更、完了条件、verification command に接続する |
 | `scenario_ids` | 対象 Phase の scenario ID 一覧。各 scenario は expected result、artifact path、oracle に接続する |
 | `artifact_paths` | test、snapshot、fixture、log、manifest、review handoff、secret scan の保存先一覧 |
-| `audit_results` | §9.17 の `phase_packet_result`、`acceptance_manifest_result`、`oracle_result`、`scenario_matrix_result`、`schema_registry_result`、`decision_precedence_result`、`coverage_closure_result`、`artifact_paths_result`、`failure_remediation_result`、`transition_ready_result`、`review_handoff_result`、`operator_delta_result`、`precision_closure_index_result`、`change_impact_closure_result`、`phase_done_final_result`、`readiness_audit_result` を全て含む |
+| `audit_results` | §9.17 の `phase_packet_result`、`acceptance_manifest_result`、`oracle_result`、`scenario_matrix_result`、`schema_registry_result`、`decision_precedence_result`、`coverage_closure_result`、`artifact_paths_result`、`failure_remediation_result`、`transition_ready_result`、`review_handoff_result`、`operator_delta_result`、`precision_closure_index_result`、`change_impact_closure_result`、`rollout_readiness_closure_result`、`phase_done_final_result`、`readiness_audit_result` を全て含む |
 | `blocking_items` | 実装開始前に残っている blocker 一覧。実装開始可能な packet では空配列または `none` |
 | `ready_to_implement` | 実装開始を許可する最終 boolean。`true` 以外は実装開始禁止 |
 
@@ -5172,6 +5172,26 @@ Phase change impact / drift control に関係する仕様変更は、§0、§7.3
 | `rollout_readiness_result` | rollout ID ごとの startup、shutdown、restart、rollback、health、operator、compatibility、data safety 証跡 |
 | `operator_acceptance_result` | operator action、manual step、解除条件、command、artifact。不要な場合は `none` |
 | `release_blocker_result` | blocked release reason が 0 件、または rollout 不可として明示されていること |
+
+**canonical rollout readiness closure audit：**
+
+rollout readiness は運用投入の出口 gate であり、Phase Done receipt の存在だけで代替してはならない。対象 Phase の readiness packet と Done receipt は、以下の closure audit field を持ち、`rollout_readiness_closure_result = pass` でなければ release / deploy / production enable に進めない。
+
+| Audit field | pass 条件 | fail 時の扱い |
+|-------------|----------|---------------|
+| `startup_closure_result` | startup condition、config、data-dir、metadata、lock、migration marker、secret の前提が明記され、起動成功と起動拒否の evidence がある | release 不可 |
+| `shutdown_closure_result` | shutdown 時の flush、fsync、lock release、job cancel、transaction rollback、partial write 防止が artifact と command で再現できる | release 不可 |
+| `restart_closure_result` | restart 後に state、health、metadata、runtime map、compat behavior が restart 前の期待値へ戻ることを snapshot で確認している | rollout ready 不可 |
+| `rollback_closure_result` | rollback flag、backup、old metadata、restore marker、operator 手順、rollback 不能時の扱いが検証済みである | release 不可 |
+| `health_gate_result` | health endpoint / CLI status / log / metric が `ok`、`degraded`、`operator_required`、`rollback_required`、`blocked` を隠さず区別する | merge 不可 |
+| `operator_action_result` | operator action が必要な場合、command、実行順序、解除条件、確認 artifact、manual approval の要否が固定されている。不要なら `none` の根拠がある | Phase 未完了 |
+| `observability_result` | log、metric、health snapshot、audit 相当記録、request id / trace id、redaction scan が artifact manifest に接続されている | Phase 未完了 |
+| `compatibility_gate_result` | Turso Cloud、libSQL SDK、legacy metadata、previous Phase regression の pass 条件と差分理由が compatibility baseline と一致している | rollout ready 不可 |
+| `data_safety_result` | data loss、partial commit、success-before-fsync、corruption handling、backup readability のリスクが 0 件である | merge 不可 |
+| `blocked_release_result` | release blocker が 0 件、または `blocked_release_reason` として明示され release / deploy が禁止されている | review failure |
+| `rollout_readiness_closure_result` | 上記 field がすべて `pass`。startup / shutdown / restart / rollback / health / operator / observability / compatibility / data safety / blocker の未評価が 0 件 | `pass` 以外は release / deploy / production enable 禁止 |
+
+`rollout_readiness_closure_result` は readiness packet の `audit_results` と Done receipt に必ず含める。Phase が release / deploy 対象でない場合も `rollout_readiness_closure_result = pass` とし、`release_surface:none`、`blocked_release_reason:none`、`operator_action:none`、および非対象理由を `closure_evidence` に記録する。これにより「運用投入なし」の判断も、後続 Phase と reviewer が再現できる状態にする。
 
 Phase rollout readiness に関係する仕様変更は、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.1.15、§9.1.24、§9.1.32、§9.1.33、§9.1.37、§9.1.39、§9.1.41、§9.1.44、§9.1.45、§9.2、§9.4、§9.6、§9.8、§9.11、§9.15、§9.16、§9.17、該当 Phase 詳細節を同時更新する。rollout readiness matrix がない Phase 実装 PR は、実装完了後の起動・再起動・rollback・health・operator 判断の欠落による後続バグ修正を防げないため、release / deploy / production enable 不可とする。
 
@@ -8197,8 +8217,9 @@ Phase 1〜19 の実装開始前に、実装者は対象 Phase の readiness pack
 | `operator_delta_result` | §9.1.52 に従い、operator から見える before/after、migration/config、rollback、health/log/metric、release note、evidence が固定されている | Phase 完了扱い禁止 |
 | `precision_closure_index_result` | §9.11.1〜§9.11.13 と §9.17 の precision closure 系 field が Phase packet、Done receipt、artifact manifest、reviewer reproduction で相互参照できる | 実装開始禁止 |
 | `change_impact_closure_result` | §9.1.45 に従い、change impact matrix の affected sections / matrices / tests / artifacts / compatibility / migration / rollback / approval / cross-reference がすべて閉じている | 実装開始禁止 |
+| `rollout_readiness_closure_result` | §9.1.46 に従い、startup / shutdown / restart / rollback / health / operator / observability / compatibility / data safety / release blocker がすべて閉じている | 実装開始禁止 |
 | `phase_done_final_result` | §9.1.33 に従い、Done receipt final audit の readiness、manifest、artifact、failure、regression、handoff、operator、precision closure、zero-bug がすべて pass である | Phase 完了扱い禁止 |
-| `readiness_audit_result` | 上記 15 field がすべて `pass`。ただし `phase_done_final_result` は実装完了時に評価する。`missing`、`partial`、`manual_only`、`not_run`、`N/A` 根拠なし、または値不一致が 0 件 | `pass` 以外は実装開始禁止 |
+| `readiness_audit_result` | 上記 16 field がすべて `pass`。ただし `phase_done_final_result` は実装完了時に評価する。`missing`、`partial`、`manual_only`、`not_run`、`N/A` 根拠なし、または値不一致が 0 件 | `pass` 以外は実装開始禁止 |
 
 `readiness_audit_result` は Phase 実装開始の入口 gate であり、実装後の Done receipt で初めて埋めてはならない。実装中に scope、API、schema、error、persistence、auth、compatibility、artifact path、review command、operator behavior のいずれかが変わる場合は、同じ PR で readiness packet、受入 manifest、oracle、scenario matrix、schema registry、precision closure を更新し、再度 `readiness_audit_result = pass` にする。更新しないまま code、test、snapshot、artifact だけを変更した場合は merge 不可とする。
 
@@ -8214,6 +8235,7 @@ Phase 1〜19 の実装開始前に、実装者は対象 Phase の readiness pack
 | decision precedence 未定義のまま複数拒否条件、commit/rollback、auth/quota、resource state を実装する | merge 不可 |
 | coverage closure に未接続の Contract ID、schema ID、scenario ID、decision ID がある | Phase 未完了 |
 | change impact の affected sections、affected matrices、affected tests、affected artifacts、compatibility、migration、rollback、approval、cross-reference のいずれかが未更新または旧値を参照する | 実装開始禁止 |
+| rollout readiness の startup、shutdown、restart、rollback、health、operator、observability、compatibility、data safety、release blocker のいずれかが未評価または artifact 未接続である | 実装開始禁止 |
 | artifact path、hash、secret scan、reviewer command が readiness packet、受入 manifest、Done receipt、artifact manifest、review handoff の間で一致しない | Phase 未完了 |
 | failure が未分類、root cause 未記載、再検証 command 未記載、artifact / regression / secret scan 再実行漏れのまま残る | Phase 未完了 |
 | source Phase の Done receipt、regression、artifact hash、compatibility baseline、operator delta、known blocker が target Phase readiness packet に継承されていない | 実装開始禁止 |
@@ -13903,7 +13925,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.171` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.172` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
