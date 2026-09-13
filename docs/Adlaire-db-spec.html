@@ -668,6 +668,29 @@ a:focus-visible {
 <h4 id="0-2-3-ポリシーとして記載する内容" class="mh h4">0.2.3 ポリシーとして記載する内容</h4>
 <p class="mp">ポリシーには、判断ルール、運用ルール、禁止事項、許可条件、レビュー判定基準を記載する。ポリシーは仕様ではない。たとえば「secret をログに出さない」はポリシーであり、そのままでは実装対象ではない。</p>
 <p class="mp">ポリシーを実装する場合は、先に仕様へ変換しなければならない。例えば「secret をログに出さない」というポリシーは、そのままでは実装対象ではない。仕様にするには、secret field、対象ログ、redaction 形式、error、artifact、検証 command、test を <code class="ic">docs/spec/</code> 配下の仕様正本へ固定する。</p>
+<p class="mp"><strong>ポリシーの例：</strong></p>
+<div class="tw"><table class="mt">
+<tr><th>ポリシー</th><th>意味</th><th>仕様化する場合に必要な内容</th></tr>
+<tr><td>互換差分明示ポリシー</td><td>Turso Cloud と異なる挙動は暗黙にしない</td><td>対象 API、差分内容、error、SDK 影響、test</td></tr>
+<tr><td>secret redaction policy</td><td>secret をログや artifact に出さない</td><td>secret field、redaction 形式、対象ログ、検証 command</td></tr>
+<tr><td>write policy</td><td>状態に応じて write を許可または拒否する</td><td>状態、判定順、error、永続化影響、test</td></tr>
+<tr><td>retention policy</td><td>artifact や backup の保持ルールを定める</td><td>対象 data、保持期間、削除条件、例外、test</td></tr>
+</table></div>
+<p class="mp"><strong>ポリシーと仕様の関係：</strong></p>
+<ul class="ml">
+<li>ポリシーは実装対象ではない</li>
+<li>ポリシーは仕様正本ではない</li>
+<li>ポリシーだけでは API、error、metadata、永続化、test は確定しない</li>
+<li>ポリシーを実装する場合は、仕様に変換してから実装する</li>
+<li>ポリシーと仕様が矛盾した場合は、仕様を優先する</li>
+</ul>
+<p class="mp"><strong>ポリシー運用の禁止事項：</strong></p>
+<div class="tw"><table class="mt">
+<tr><th>禁止事項</th><th>理由</th></tr>
+<tr><td>ポリシーだけを根拠に実装する</td><td>実装対象が未確定であるため</td></tr>
+<tr><td>ポリシーだけを根拠に Phase 完了扱いにする</td><td>完了条件と証跡が仕様化されていないため</td></tr>
+<tr><td>ポリシーを仕様の代わりに PR description で補う</td><td>正本に残らず後続実装が迷うため</td></tr>
+</table></div>
 <h4 id="0-2-4-仕様として記載する内容" class="mh h4">0.2.4 仕様として記載する内容</h4>
 <p class="mp">仕様には、実装者がそのまま実装、テスト、レビュー、完了判定できる確定契約を記載する。実装根拠にできるのは、<code class="ic">docs/spec/</code> 配下で仕様正本として固定された契約だけである。</p>
 <p class="mp">仕様として扱うには、少なくとも対象、入力、出力、状態遷移、永続化、error、認証認可、互換差分、rollback、検証 command、artifact、Done 判定のうち該当項目が明示されていなければならない。</p>
