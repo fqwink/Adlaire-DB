@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.88
+**バージョン：** V.89
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.88` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.89` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.88` の次は `V.89` とし、以後 `V.90`、`V.91` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.89` の次は `V.90` とし、以後 `V.91`、`V.92` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -3524,6 +3524,112 @@ endpoint が上表と異なる順序を必要とする場合は、endpoint 表�
 
 list / pagination に関係する仕様変更は、§9.1.18、§9.1.20、§9.1.22、§9.1.23、§9.1.26、§9.5、該当 Phase 節、manifest の Endpoint / Compatibility / Regression map、pagination matrix、cursor fixture、order snapshot、mutation fixture、filter matrix を同時更新する。正常系だけが通っても、cursor scope、filter binding、stable order、page mutation、snapshot order が固定されていない場合は Phase 完了扱いにしない。
 
+#### 9.1.28 SQL execution / transaction / result mapping 固定契約
+
+hrana-http、hrana-ws、ATTACH、replication redirect、backup consistency、internal executor 差し替えに関係する Phase は、SQL 実行単位、transaction 境界、result mapping、error surface、SDK 互換 transcript を実装開始前に固定しなければならない。SQL を libsql crate に渡すだけでは完了条件を満たさない。client が観測する wire format は Turso Cloud / libSQL SDK 互換を優先し、内部 executor の都合で status、result shape、transaction rollback 条件を変えてはならない。
+
+**SQL request 種別別契約：**
+
+| 種別 | 実行単位 | 成功応答 | 失敗応答 |
+|------|----------|----------|----------|
+| hrana-http `execute` | 単一 `stmt`。`want_rows` に従い `query` または `execute` | `results[i].type="ok"` + `response.type="execute"` | pipeline 全体は HTTP 200、当該 item は `results[i].type="error"` |
+| hrana-http `sequence` | SQL 文字列全体を `execute_batch` へ渡す。自前 semicolon split 禁止 | 当該 item `ok`。個別 statement result は返さない | pipeline 全体は HTTP 200、当該 item は `error` |
+| hrana-http `close` | 以降の request を処理しない | `close` の ok response | close 後の request は無視し、追加 result を返さない |
+| hrana-ws `execute` | open stream 上の単一 `stmt` | `response_ok` + `execute` result | `response_error`。connection は維持 |
+| hrana-ws `batch` | `batch` 配列順に `stmt` を逐次実行 | step ごとの result / error を順序維持で返す | request 自体の schema 不正は `response_error` |
+| hrana-ws `sequence` | SQL 文字列全体を `execute_batch` へ渡す | `response_ok`。個別 statement result は返さない | `response_error` |
+| hrana-ws `describe` | prepare / describe のみ。実行しない | parameter / column metadata | prepare error は `response_error` |
+
+**`stmt` validation / parameter mapping：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| `sql` | 非空文字列必須。空、空白のみ、NUL を含む値は `INVALID_REQUEST` |
+| `args` | positional args。省略時は空配列。配列以外、変換不能 value は request 単位の SQL error surface に載せる |
+| `named_args` | Phase 3〜8 の hrana-http では空配列または省略のみ許可。非空は当該 item を `SQLITE_ERROR` とする。Phase 9 以降で対応する場合は name 重複、positional 併用、SDK transcript を固定する |
+| `want_rows` | boolean 必須。省略許可にする場合は endpoint / protocol 節で default を明記する |
+| integer | hrana wire 上は文字列で返す。SQLite integer 範囲外または parse 不能は `SQLITE_ERROR` |
+| float | IEEE 754 double として扱う。NaN / Infinity は JSON として受理しない |
+| text | UTF-8 文字列。変換不能 byte列は blob としてのみ扱う |
+| blob | base64 文字列。decode 不能は `SQLITE_ERROR` |
+| null | SQLite NULL として bind し、response では hrana の null value として返す |
+
+SQL text、args、row value は log / artifact / error message に生値で出してはならない。証跡では statement kind、arg count、type list、result column count までを許可し、値は `<redacted-arg>` または fixture 固定値だけにする。
+
+**result mapping：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| `cols` | `want_rows=true` の query では libsql / SQLite の column order を保持する。`want_rows=false` の execute では空配列 |
+| `rows` | row order は SQLite が返した順序を保持する。test 側で sort しない。`want_rows=false` では空配列 |
+| `rows_affected` | execute / write statement は libsql が返す affected rows。DDL や query で未定義の場合は 0 |
+| `last_insert_rowid` | insert 成功後の値を文字列で返す。値が意味を持たない operation は `null`。数値型で返さない |
+| multi result | `sequence` は個別 statement の `cols` / `rows` / `rows_affected` を返さない |
+| column type | SQLite dynamic type を hrana value type に変換し、unsupported type は `SQLITE_ERROR` |
+| response order | request order と results order は 1:1。parallel 実行で順序を入れ替えない |
+
+**transaction / connection state：**
+
+| 状態 | 固定仕様 |
+|------|----------|
+| HTTP pipeline | Phase 3〜8 では request 間 session を保持しない。SQLite 明示 transaction SQL は同一 pipeline 内の同一 connection で順序実行する場合のみ有効 |
+| WebSocket stream | stream ごとに dedicated connection または同等の transaction isolation を持つ。別 stream の transaction state と混ぜない |
+| `BEGIN` | stream state を `tx_active` にする。`BEGIN IMMEDIATE` / `BEGIN EXCLUSIVE` は write operation として認可・quota・block 判定する |
+| `COMMIT` | commit が libsql / SQLite で成功し、response 送信前の状態更新が完了した場合だけ success |
+| `ROLLBACK` | rollback 成功後に stream state を `open` へ戻す。rollback 失敗は `response_error` |
+| close_stream | open transaction がある場合は rollback を試行してから close。rollback 失敗時は log / metric / evidence に残す |
+| connection close | open transaction は rollback。COMMIT 成功応答前の切断は success と扱わない |
+| shutdown | shutdown timeout 内に running SQL を完了または rollback する。timeout 後の abort は recovery evidence 必須 |
+
+**permission / quota / block precedence：**
+
+| 順位 | 判定 | 失敗時 |
+|------|------|--------|
+| 1 | request / wire schema validation | `INVALID_REQUEST` または protocol 固有 error |
+| 2 | DB existence / resource state | `DB_NOT_FOUND`、`PERMISSION_DENIED` など |
+| 3 | auth / scope / ro-rw | `AUTH_*`、`PERMISSION_DENIED` |
+| 4 | block policy | `block_reads` / `block_writes` に応じて `PERMISSION_DENIED` |
+| 5 | quota | write / import 相当 SQL は `QUOTA_EXCEEDED` |
+| 6 | SQL prepare / execute | `SQLITE_ERROR`、`SQLITE_CONSTRAINT`、SQLite 固有 code |
+
+read/write 判定は SQL text の単純な prefix だけに依存してはならない。Phase 10 の ATTACH、Phase 16 の extension、transaction control statement、DDL、PRAGMA を含む分類表を該当 Phase 節で更新する。分類できない statement は write 側に倒す。
+
+**batch / sequence 途中失敗：**
+
+| 種別 | 固定仕様 |
+|------|----------|
+| hrana-http request array | item ごとに順序実行する。ある item が SQL error でも後続 item は処理する。ただし `close` 後は処理しない |
+| hrana-http `sequence` | `execute_batch` に委ねる。途中 statement の commit / rollback は SQLite の transaction semantics に従う |
+| hrana-ws `batch` | step ごとの success / error を順序保持で返す。transaction 中の error 後に stream を強制 close しない |
+| hrana-ws `sequence` | `execute_batch` に委ね、成功なら全体 success、失敗なら全体 `response_error` |
+| explicit transaction | `BEGIN` 後の step error では自動 rollback しない。client の `ROLLBACK` または close / disconnect で rollback |
+
+**必須 evidence：**
+
+| Evidence | 必須内容 |
+|----------|----------|
+| SDK transcript | TypeScript / Rust / Go libSQL SDK の execute、batch、transaction、error 観測結果 |
+| result mapping snapshot | cols、rows、integer string、blob、null、rows_affected、last_insert_rowid |
+| args conversion matrix | integer、float、text、blob、null、invalid base64、integer overflow、named_args 非空 |
+| SQL error matrix | syntax error、missing table、constraint、readonly、busy、permission、quota、block_reads/writes |
+| transaction fixture | BEGIN/COMMIT/ROLLBACK、disconnect rollback、close_stream rollback、COMMIT 前切断 |
+| batch / sequence matrix | 途中失敗、後続継続、sequence の execute_batch 境界、close 後無視 |
+| redaction snapshot | SQL text、args、row value、absolute path、token が log / artifact / error に出ないこと |
+
+**禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| SQL error を hrana-http の HTTP 500 / 400 に変換する | merge 不可 |
+| `sequence` を ad hoc semicolon split する | merge 不可 |
+| request order と results order を入れ替える | merge 不可 |
+| `last_insert_rowid` を数値型で返す | SDK 互換 failure |
+| open transaction を close / disconnect 後に残す | merge 不可 |
+| SQL text、args、row value を log / artifact に出す | merge 不可 |
+| read/write 判定不能 statement を read として許可する | merge 不可 |
+
+SQL execution に関係する仕様変更は、§6.2、§6.3、§7.3、§9.1.16、§9.1.18、§9.1.20、§9.1.21、§9.1.22、§9.1.23、§9.5、§9.14、該当 Phase 節、manifest の Endpoint / Security / Compatibility / Regression map、SDK transcript、result mapping snapshot、args conversion matrix、transaction fixture、batch / sequence matrix を同時更新する。正常系だけが通っても、SQL error surface、result mapping、transaction rollback、permission precedence、SDK transcript が固定されていない場合は Phase 完了扱いにしない。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -4156,14 +4262,14 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Failure closure | §9.1.14 の失敗、flaky、未検証、artifact 欠落、secret 混入が同一 PR で閉じている | merge 不可 |
 | 後方互換 / migration | §9.1.15 の互換影響、migration plan、rollback、旧形式 fixture が固定されている | 既存契約を変更しない |
 | 設定解決 / validation | §9.1.19 に従い、CLI/env/TOML/default/secret file の優先順位、不正値、対象 Phase 前挙動、秘匿が固定されている | config 実装を開始しない |
-| API 契約 | §9.1.20 / §9.1.27 に従い、method/path/auth/request/success/error/schema/validation/serialization/list order/pagination/cursor/filtering が §9.5 または各 API 節に明記されている | route を追加しない |
+| API 契約 | §9.1.20 / §9.1.27 / §9.1.28 に従い、method/path/auth/request/success/error/schema/validation/serialization/list order/pagination/cursor/filtering/SQL result mapping が §9.5 または各 API 節に明記されている | route を追加しない |
 | Error code | §9.1.22 に従い、失敗条件ごとの `code`、status、wire surface、retry、client action、precedence が §7.3 / §9.7 に存在する | 先に error code と retry 契約を追加する |
 | 永続化 | §9.1.21 / §9.1.26 に従い、ファイル名、schema、atomic update、fsync、directory sync、rollback、破損時挙動、path normalization、recovery evidence が §9.6 に明記されている | 書き込み処理を実装しない |
 | 認証/認可 | §9.1.18 に従い、必要 token、scope、ro/rw、org/group、quota、block policy、拒否条件 precedence が明記されている | success response を返す API を公開しない |
 | ログ/秘匿 | §9.1.17、§12、§9.14 に従い、出力 field、request id、audit 相当記録、秘匿対象、redaction evidence が明記されている | request/SQL/token をログに出す実装を入れない |
-| 並行性 / job lifecycle | §9.1.16 / §9.1.25 に従い、同時 request、resource lock、idempotency、shutdown、transaction、long-running operation の扱いが定義されている | 並行実行で状態を変更する処理を入れない |
+| 並行性 / job lifecycle | §9.1.16 / §9.1.25 / §9.1.28 に従い、同時 request、resource lock、idempotency、shutdown、transaction、SQL execution、long-running operation の扱いが定義されている | 並行実行で状態を変更する処理を入れない |
 | 後方互換 / Turso 追従 | §9.1.23 に従い、既存 endpoint/schema/config への影響、Turso 差分分類、SDK 影響、migration path が明記されている | 既存契約を変更しない |
-| テスト | §9.8 と §9.1.24 / §9.1.27 に従い、該当 Phase 行に正常/異常/認可/永続化/障害系、list/pagination/cursor/filter evidence、CI / release-check / secret scan evidence がある | 完了扱いにしない |
+| テスト | §9.8 と §9.1.24 / §9.1.27 / §9.1.28 に従い、該当 Phase 行に正常/異常/認可/永続化/障害系、list/pagination/cursor/filter evidence、SQL/result/transaction evidence、CI / release-check / secret scan evidence がある | 完了扱いにしない |
 | 運用 | config、metrics、health、rollback、job status / recovery 手順が必要な Phase では明記されている | 運用 API を公開しない |
 
 **Phase 間の前倒し実装ルール：**
@@ -5538,6 +5644,7 @@ impl SqldAdapter for MockSqldAdapter {
 **Phase 3 の実装境界：**
 
 - Web フレームワーク（axum・actix-web・rocket 等）は使用しない。HTTP 受信、ルーティング、JSON パース、エラー応答は hyper ベースの自前実装とする
+- `/v2/pipeline` の SQL 実行、transaction、result mapping、SQL error surface は §9.1.28 に従う
 - `/v2/pipeline` は常に `default` DB を対象とする。`/{db-name}/v2/pipeline` は Phase 6 以降の経路であり、Phase 3 の完了条件には含めない
 - `baton` は受け取るが Phase 3 ではセッションを保持しない。レスポンスの `baton` / `base_url` は常に `null` とする
 - `execute` は positional `args` をサポートする。`named_args` が空でない場合は、その request を `results[].type="error"` として返す
@@ -5592,7 +5699,7 @@ T-6: hrana-http v2 パイプライン実装
   [ ] SQL エラーを results[i].type="error" として返す（HTTP 200 のまま）
   [ ] named_args が空でない execute は results[i].type="error" として返す
   [ ] "close" type リクエストを正しく処理する
-  参照: §6.2, §3.3.3
+  参照: §6.2, §3.3.3, §9.1.28
   検証: TC-1（SQL 実行）
 ```
 
@@ -7489,7 +7596,7 @@ Phase 1〜8 と同様、**Adlaire 独自の hrana-ws プロトコル変換レイ
 - Phase 1〜8 で構築した hrana-http 変換レイヤー（§3.3.3）の延長として実装でき、アーキテクチャの一貫性を保てる
 - WebSocket コネクションのライフサイクル（hello / stream_id / baton 管理）を Adlaire が完全制御できる
 
-WebSocket フレームの受受信・送信には `tokio-tungstenite` クレートを使用する。クエリ実行は Phase 1〜8 と同じ `libsql::Connection::execute_batch()` を経由する（§3.3.2）。
+WebSocket フレームの受受信・送信には `tokio-tungstenite` クレートを使用する。クエリ実行は Phase 1〜8 と同じ libsql crate 経路を使い、SQL execution、transaction、result mapping、permission precedence は §9.1.28 に従う。
 
 **Phase 9 実装固定契約：**
 
