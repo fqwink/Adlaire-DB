@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.94
+**バージョン：** V.95
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.94` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.95` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.94` の次は `V.95` とし、以後 `V.96`、`V.97` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.95` の次は `V.96` とし、以後 `V.97`、`V.98` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -4056,6 +4056,72 @@ Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§
 
 Phase completion gate に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§9.1.14、§9.1.24、§9.1.29、§9.1.32、§9.2、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。Done receipt を満たさない Phase は、機能が動作していても仕様上は完了扱いにしない。
 
+#### 9.1.34 Phase execution sequence / handoff / interruption 固定契約
+
+各 Phase の実装は、Phase packet と Done receipt の間に固定された execution sequence を持たなければならない。実装者は、どの順番で契約を確定し、どの順番でコードへ反映し、どの時点で API を公開してよいかを Phase 開始前に固定する。実装途中で担当者が変わる、中断する、失敗を検出する、未来 Phase の helper を先に作る場合でも、この節に従い現在位置と次の作業を判定する。
+
+**Execution sequence 必須 step：**
+
+| Step | 名称 | 完了条件 | 次 step へ進む条件 |
+|------|------|----------|--------------------|
+| 0 | intake | `AGENTS.md`、仕様 version、branch 整合性、対象 Phase を確認する | local / remote が一致し、対象 Phase が明記されている |
+| 1 | packet freeze | §9.1.32 の Phase packet と §9.1.10 の manifest を作成する | scope、target surface、unsupported behavior、regression set が固定済み |
+| 2 | contract freeze | schema、error、persistence、auth、compatibility、concurrency 契約を確定する | §9.5 / §9.6 / §9.7 / Phase 詳細節の参照が一致済み |
+| 3 | persistence / recovery | metadata、migration、atomic update、rollback、recovery を実装する | 破損、再起動、rollback の証跡計画が存在する |
+| 4 | core logic | API 非公開の service logic、validation、permission、state transition を実装する | internal tests または unit tests で契約境界が確認済み |
+| 5 | external surface | HTTP / WebSocket / CLI / config / admin API を公開する | auth、error、unsupported、redaction、compatibility の snapshot が固定済み |
+| 6 | evidence run | normal、error、auth、persistence、restart、rollback、regression、secret scan を実行する | §9.1.11 の artifact が生成済み |
+| 7 | Done receipt | §9.1.33 の Done receipt を作成し、failure closure を 0 件にする | reviewer が `Done` と判定できる |
+
+**Handoff state 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `phase` | 対象 Phase、仕様 version、branch、commit |
+| `current_step` | 上記 execution sequence の step 番号 |
+| `completed_contracts` | 完了済み API / persistence / error / security / compatibility / regression 契約 ID |
+| `open_contracts` | 未完了契約 ID と未完了理由 |
+| `last_successful_command` | 最後に成功した command、exit code、artifact path |
+| `last_failed_command` | 最後に失敗した command、exit code、原因、再実行条件。失敗がない場合は `none` |
+| `allowed_next_changes` | 次に変更してよい file / module / spec 節 |
+| `forbidden_changes` | 現在 step で変更してはいけない API / metadata / config / behavior |
+| `next_command` | 次に実行する verification command |
+| `blocking_decision` | ユーザー承認、仕様変更、依存修正、環境復旧など必要な判断。不要な場合は `none` |
+
+**前倒し実装の扱い：**
+
+| 前倒し内容 | 許可条件 | 禁止条件 |
+|------------|----------|----------|
+| internal helper / type | 外部 API、永続化 schema、config default、wire format を変えない | success response や metadata commit に接続する |
+| future route stub | 501 `NOT_IMPLEMENTED` と固定 body のみ返す | 200 / 201 / 204 / 307 / partial success を返す |
+| future metadata file | §9.6 に初期値、破損時挙動、読み飛ばし可否が明記済み | migration なしで既存起動 path に必須化する |
+| future config key | default、validation、unknown key handling、secret redaction が明記済み | default 挙動を変える、または未定義 key を有効化する |
+| future dependency | feature flag off で既存挙動に影響しない | build/test/release-check を遅くするだけの未使用依存 |
+
+**中断・再開ルール：**
+
+| 状態 | 必須対応 |
+|------|----------|
+| Step 1 前に中断 | Phase 実装未開始として扱い、再開時に packet を作り直す |
+| Step 2〜4 で中断 | Handoff state を残し、API success response を公開しない |
+| Step 5 で中断 | 公開 surface を 501 / auth reject / feature flag off のいずれかに戻す |
+| Step 6 で失敗 | §9.1.14 の failure closure に記録し、同一 PR で修正または仕様修正する |
+| Step 7 前に未検証が残る | Done receipt 作成禁止 |
+| 再開時に仕様 version が進んでいる | Phase packet、manifest、contract map を新 version に合わせて再確認する |
+
+**実装順序違反の扱い：**
+
+| 違反 | 判定 |
+|------|------|
+| persistence / rollback 未確定で external API を公開する | merge 不可 |
+| error code 未確定で route を追加する | merge 不可 |
+| auth / quota / scope 未確定で管理 API success response を返す | merge 不可 |
+| migration / recovery 未確定で metadata schema を変更する | Phase 未完了 |
+| test / artifact より先に Done receipt を作成する | Phase 未完了 |
+| handoff state なしで途中作業を引き継ぐ | Phase 未完了 |
+
+Phase execution sequence に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§9.1.14、§9.1.32、§9.1.33、§9.2、§9.4、§9.8、§9.11、§9.16、§9.17、該当 Phase 詳細節を同時更新する。実装者が現在 step、次 step、禁止変更を仕様本文だけで判断できない場合は、実装開始不可とする。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -4661,6 +4727,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 ### 9.16 実装順序ルール
 
 各 Phase の実装は原則として次の順に行う。
+詳細な step、handoff state、中断・再開、前倒し実装の扱いは §9.1.34 を正とする。
 
 1. 仕様内の schema / error / persistence 契約を確定する
 2. 永続化 schema と migration / recovery を実装する
@@ -4688,6 +4755,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Phase 受入 manifest | §9.1.10 の必須 fields が実装開始前に固定されている | 実装 PR として扱わない |
 | Evidence artifact | §9.1.11 の保存先、命名、正規化、secret scan が固定されている | 証跡生成まで完了扱いにしない |
 | Phase Done receipt | §9.1.33 に従い、packet、manifest、contract map、evidence index、regression result、failure closure、compatibility / redaction result が一致している | Phase 完了扱いにしない |
+| Phase execution state | §9.1.34 に従い、current step、completed/open contracts、last command、allowed/forbidden changes、next command、blocking decision が明記されている | 中断・引継ぎ・再開を行わない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | 仕様内相互参照 | §9.1.29 に従い、Phase 番号、TC ID、Task ID、API 契約 ID、error code、persistence key、evidence 名、manifest 参照が一致している | 仕様修正 PR に戻す |
 | Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
