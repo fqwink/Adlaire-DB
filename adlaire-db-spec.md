@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.76
+**バージョン：** V.77
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.76` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.77` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.76` の次は `V.77` とし、以後 `V.78`、`V.79` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.77` の次は `V.78` とし、以後 `V.79`、`V.80` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -2502,6 +2502,58 @@ failure closure の追跡表は PR description または `docs/phase-evidence/ph
 
 破壊的変更が必要な場合は、同じ PR で §9.2、§9.5、§9.6、§9.7、§9.13、§9.14、該当 Phase 詳細、manifest、test、artifact を更新し、既存利用者への互換維持策または段階的移行策を明記する。互換維持策がない破壊的変更は、実装都合があっても Phase 完了として扱わない。
 
+#### 9.1.16 Concurrency / idempotency / shutdown 固定契約
+
+状態変更を伴う Phase 実装 PR は、同時 request、resource lock、idempotency、shutdown 中の扱いを実装開始前に固定しなければならない。並行実行で lost update、二重作成、二重削除、二重 revoke、partial commit、成功応答後 rollback が発生する可能性が残る場合、その Phase は未完了である。
+
+**resource lock 境界：**
+
+| 対象 | lock 単位 | 同時実行時の固定挙動 | 必須 evidence |
+|------|-----------|----------------------|---------------|
+| DB create / delete / update | DB name + organization/group scope | 同一 DB への create/update/delete は直列化。競合 create は `409 DB_ALREADY_EXISTS`、削除中 update は `404 DB_NOT_FOUND` または `409 STORAGE_BUSY` | concurrency test、metadata before/after fixture |
+| token create / revoke | token id + tokens.json | revoke は冪等 204。create は token id 重複禁止。revoke と auth check の順序を固定 | auth race test、tokens fixture |
+| quota / usage update | organization/group/DB quota key | usage 計算と write 判定の間で quota 超過を見逃さない。超過時は commit 前に拒否 | quota race test、denied response |
+| backup | source DB | read lock または Online Backup API 相当の一貫 snapshot。backup 中 write の可否を Phase 節で固定 | backup consistency artifact |
+| restore / PITR | target DB exclusive lock | restore 中 write は `503 STORAGE_BUSY`。read は旧 DB 継続または `503` のどちらかを Phase 節で固定 | restore lock test、rollback log |
+| branch create / delete | source DB + branch DB | 同名 branch create は `409 DB_ALREADY_EXISTS`。delete は明記された場合のみ冪等 204 | branch race fixture |
+| migration | migration id + metadata set | commit marker 前の中断は rollback または起動失敗。commit marker 後は再実行しない | interrupted migration fixture |
+| WebSocket transaction | connection id + stream id | stream ごとに transaction 状態を分離。connection close 時の open tx は rollback | WebSocket transcript |
+| metrics / counters | metric key | lost increment 禁止。restart 永続化対象は snapshot write と shutdown write の競合を固定 | counter race artifact |
+
+**HTTP method idempotency：**
+
+| Method | 既定 | 例外を許可する条件 |
+|--------|------|--------------------|
+| `GET` | 副作用禁止。同一 request の再試行で状態を変更しない | metrics read 時の内部 read counter など、仕様本文に副作用が明記される場合のみ |
+| `POST` | 非冪等。重複 request は二重作成または二重実行を防ぐ契約が必要 | endpoint ごとに idempotency key、natural key、または conflict response が仕様化される場合 |
+| `PATCH` | resource version または lock により lost update を防ぐ | 全 field が上書きではなく merge semantics として仕様化され、競合 test がある場合 |
+| `DELETE` | endpoint 表で冪等 204 と明記された場合だけ冪等。未記載なら存在しない resource は 404 | Turso Cloud 互換 endpoint が冪等削除を要求する場合 |
+
+**shutdown 中の固定挙動：**
+
+| 状態 | 必須挙動 |
+|------|----------|
+| shutdown signal 受信後の新規 request | listener を閉じる。受信済みで処理未開始の request は `503 STORAGE_BUSY` または connection close のどちらかを Phase 節で固定 |
+| commit 前の write request | 成功応答を返してはならない。rollback 可能なら rollback、不能なら recovery marker を残す |
+| commit 後・応答前の write request | 再試行時に二重実行しない。idempotency / conflict / read-after-write で結果を確認できること |
+| WebSocket open transaction | connection close または shutdown timeout で rollback。commit 完了前の close を成功扱いにしない |
+| restore / migration / backup 中 | restore/migration は commit marker と rollback を優先。backup は一貫 snapshot 以外を返さない |
+| shutdown timeout 超過 | 途中成功応答を作らない。次回起動時 recovery が完了するまで該当 resource を成功扱いにしない |
+
+**禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| 同一 resource の並行 create で二重 metadata が作成される | merge 不可 |
+| read-modify-write に lock または version check がない | Phase 未完了 |
+| commit 前に success response を返す | merge 不可 |
+| shutdown 中の partial write を次回起動で成功扱いにする | merge 不可 |
+| retry により token revoke、quota charge、restore、branch create が二重適用される | Phase 未完了 |
+| concurrency test が手動確認のみ | Phase 未完了 |
+| lock timeout / busy error が §9.7 の error code に紐づかない | review failure |
+
+並行性に関係する仕様変更は、manifest の `Endpoint map`、`Persistence map`、`Regression set`、該当 Contract ID、concurrency artifact を同時更新する。並行性 test がない状態で「単体では動く」ことを Phase 完了根拠にしてはならない。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -3138,7 +3190,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | 永続化 | ファイル名、schema、atomic update、rollback、破損時挙動が §9.6 に明記されている | 書き込み処理を実装しない |
 | 認証/認可 | 必要 token、scope、ro/rw、DB scope の判定順が明記されている | success response を返す API を公開しない |
 | ログ/秘匿 | 出力 field と秘匿対象が §12 / §9.14 に明記されている | request/SQL/token をログに出す実装を入れない |
-| 並行性 | 同時 request、lock、shutdown、transaction の扱いが定義されている | 並行実行で状態を変更する処理を入れない |
+| 並行性 | §9.1.16 に従い、同時 request、resource lock、idempotency、shutdown、transaction の扱いが定義されている | 並行実行で状態を変更する処理を入れない |
 | 後方互換 | 既存 endpoint/schema/config への影響と migration path が明記されている | 既存契約を変更しない |
 | テスト | §9.8 の該当 Phase 行に正常/異常/認可/永続化/障害系がある | 完了扱いにしない |
 | 運用 | config、metrics、health、rollback 手順が必要な Phase では明記されている | 運用 API を公開しない |
