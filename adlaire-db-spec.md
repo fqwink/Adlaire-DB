@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.165
+**バージョン：** V.166
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.165` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.166` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -4010,6 +4010,30 @@ branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§
 | `review_handoff_packet` | §9.1.51 の読む順番、再現 command、期待 artifact、判断基準、失敗分類、レビュー禁止事項 |
 | `operator_behavior_delta` | §9.1.52 の外部挙動、運用影響、互換差分、設定移行、rollback、release note |
 | `completion_gate` | merge 前に満たす Done 条件と失敗時の扱い |
+
+**canonical readiness packet format：**
+
+Phase implementation packet は、実装開始前に以下の canonical key をこの順序で持たなければならない。Markdown table または JSON object のどちらでもよいが、key 名、順序、必須/任意、pass 条件を変えてはならない。
+
+| key | 必須値 |
+|-----|--------|
+| `phase` | `Phase {N}`。N は 1〜19 の整数 |
+| `spec_version` | 実装開始時点の仕様書 version。累積 version を使い、Phase 番号や日付で代替しない |
+| `base_commit` | 実装開始前の commit SHA。PR branch の起点を示す |
+| `entry_sections` | §9.2、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節、必要な §9.1.x の一覧 |
+| `scope_in` | この Phase で成功応答、永続化、運用証跡まで完成させる対象 |
+| `scope_out` | 未来 Phase、stub、unsupported、明示対象外の対象と根拠 section |
+| `contract_ids` | API / Persistence / Security / Compatibility / Regression / Precision closure の Contract ID 一覧 |
+| `task_ids` | 対象 Phase の atomic task ID 一覧。各 task は入力契約、禁止変更、完了条件、verification command に接続する |
+| `scenario_ids` | 対象 Phase の scenario ID 一覧。各 scenario は expected result、artifact path、oracle に接続する |
+| `artifact_paths` | test、snapshot、fixture、log、manifest、review handoff、secret scan の保存先一覧 |
+| `audit_results` | §9.17 の `phase_packet_result`、`acceptance_manifest_result`、`oracle_result`、`scenario_matrix_result`、`schema_registry_result`、`decision_precedence_result`、`coverage_closure_result`、`review_handoff_result`、`operator_delta_result`、`precision_closure_index_result`、`readiness_audit_result` を全て含む |
+| `blocking_items` | 実装開始前に残っている blocker 一覧。実装開始可能な packet では空配列または `none` |
+| `ready_to_implement` | 実装開始を許可する最終 boolean。`true` 以外は実装開始禁止 |
+
+`ready_to_implement = true` にできるのは、`audit_results` の 11 field がすべて `pass`、`blocking_items` が 0 件、根拠なし `N/A` が 0 件、未接続の Contract ID / Task ID / Scenario ID / artifact path が 0 件、かつ `scope_in` / `scope_out` が仕様本文と一致する場合だけである。`ready_to_implement` が未記載、`false`、文字列、または pass 根拠なしの場合、その Phase は実装開始禁止とする。
+
+canonical readiness packet と §9.17 の readiness audit は同じ入口 gate を表す。どちらか一方だけを更新してはならない。Phase packet、受入 manifest、Done receipt、artifact manifest、review handoff のいずれかで `phase`、`spec_version`、`contract_ids`、`task_ids`、`scenario_ids`、`artifact_paths`、`audit_results` が異なる場合は、仕様修正 PR に戻す。
 
 **Phase group 粒度：**
 
@@ -13741,7 +13765,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.165` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.166` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
