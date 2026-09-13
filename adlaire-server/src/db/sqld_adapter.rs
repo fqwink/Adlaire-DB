@@ -27,6 +27,8 @@ pub struct SqlResult {
 
 #[async_trait::async_trait]
 pub trait SqldAdapter: Send + Sync {
+    fn connect(&self) -> Result<libsql::Connection, AppError>;
+
     async fn execute(
         &self,
         sql: &str,
@@ -91,11 +93,12 @@ fn libsql_err(e: libsql::Error) -> AppError {
 
 #[async_trait::async_trait]
 impl SqldAdapter for RealSqldAdapter {
+    fn connect(&self) -> Result<libsql::Connection, AppError> {
+        self.db.connect().map_err(|e| AppError::Sqld(e.to_string()))
+    }
+
     async fn execute_batch(&self, sql: &str) -> Result<(), AppError> {
-        let conn = self
-            .db
-            .connect()
-            .map_err(|e| AppError::Sqld(e.to_string()))?;
+        let conn = self.connect()?;
         conn.execute_batch(sql)
             .await
             .map(|_| ())
@@ -110,10 +113,7 @@ impl SqldAdapter for RealSqldAdapter {
     ) -> Result<SqlResult, AppError> {
         // 注意: Connection は呼び出しごとに生成される。
         // BEGIN/COMMIT をまたぐトランザクションは Phase 5 で Connection 共有に変更する。
-        let conn = self
-            .db
-            .connect()
-            .map_err(|e| AppError::Sqld(e.to_string()))?;
+        let conn = self.connect()?;
         let params = to_libsql_params(args);
 
         if want_rows {
@@ -159,7 +159,7 @@ impl SqldAdapter for RealSqldAdapter {
     }
 }
 
-fn to_libsql_params(args: Vec<SqlValue>) -> Vec<libsql::Value> {
+pub(crate) fn to_libsql_params(args: Vec<SqlValue>) -> Vec<libsql::Value> {
     args.into_iter()
         .map(|v| match v {
             SqlValue::Null => libsql::Value::Null,
@@ -171,7 +171,7 @@ fn to_libsql_params(args: Vec<SqlValue>) -> Vec<libsql::Value> {
         .collect()
 }
 
-fn from_libsql_value(v: libsql::Value) -> SqlValue {
+pub(crate) fn from_libsql_value(v: libsql::Value) -> SqlValue {
     match v {
         libsql::Value::Null => SqlValue::Null,
         libsql::Value::Integer(n) => SqlValue::Integer(n),
@@ -187,6 +187,10 @@ pub struct MockSqldAdapter;
 
 #[async_trait::async_trait]
 impl SqldAdapter for MockSqldAdapter {
+    fn connect(&self) -> Result<libsql::Connection, AppError> {
+        Err(AppError::InvalidRequest)
+    }
+
     async fn execute_batch(&self, _sql: &str) -> Result<(), AppError> {
         Ok(())
     }
