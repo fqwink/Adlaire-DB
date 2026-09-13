@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.157
+**バージョン：** V.158
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.157` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.158` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -7095,6 +7095,24 @@ canonical object は Done receipt 本文にそのまま貼れる Markdown table 
 
 `review_result` は `pass`、`fail_contract_mismatch`、`fail_missing_key`、`fail_missing_field`、`fail_artifact_path`、`fail_manifest_mismatch`、`fail_reproduction`、`fail_open_count`、`fail_summary_status` のいずれかだけを許可する。`warning`、`accepted_risk`、`manual pass`、`pass with notes`、空欄は Phase 完了根拠にしてはならない。
 
+**precision closure phase packet freeze checklist：**
+
+実装者は対象 Phase の実装開始前に、Phase packet へ以下の freeze checklist を転記する。freeze checklist は実装 PR の開始境界であり、実装中に closure field 名、artifact path、review command、open count target、summary_status 条件を暗黙変更してはならない。
+
+| freeze key | 必須内容 |
+|------------|----------|
+| `phase` | 対象 Phase 番号 |
+| `contract_id` | `P{phase}-PRECISION-CLOSURE` |
+| `closure_field_set` | 11 closure field 名の完全な一覧 |
+| `artifact_manifest_schema` | `field`、`artifact_path`、`producer_command`、`producer_exit_code`、`content_hash`、`hash_algorithm`、`generated_at_source`、`secret_scan_result`、`redaction_policy`、`reviewer_command` |
+| `reviewer_reproduction_schema` | `field`、`reviewer_command`、`working_directory`、`environment_profile`、`expected_exit_code`、`expected_artifact_path`、`expected_hash_algorithm`、`expected_content_hash`、`timeout_seconds`、`failure_classification` |
+| `review_algorithm_steps` | step 1〜8 と failure `review_result` の対応 |
+| `allowed_review_result_values` | `pass`、`fail_contract_mismatch`、`fail_missing_key`、`fail_missing_field`、`fail_artifact_path`、`fail_manifest_mismatch`、`fail_reproduction`、`fail_open_count`、`fail_summary_status` |
+| `open_count_targets` | coverage gap、open task、open scenario、open decision、known flaky、open ambiguity、open failure、unverified、missing artifact、rootless N/A、blocking item、regression failure、unsupported success、operator action gap がすべて `0` |
+| `forbidden_shortcuts` | `summary_status: pass` だけ、manual only、see CI、配列 `closure_fields`、artifact manifest 省略、reviewer reproduction 省略、open count 省略、freeze 後の暗黙変更 |
+
+freeze 後に closure field 名、artifact path、review command、open count target、review algorithm、allowed review result、`summary_status` 条件を変更する場合は、実装 PR 内の判断で処理せず、仕様修正 PR に戻す。Done receipt は Phase packet の freeze checklist と完全一致しなければならない。
+
 **命名不一致時の判定：**
 
 | 状態 | 判定 |
@@ -7125,6 +7143,10 @@ canonical object は Done receipt 本文にそのまま貼れる Markdown table 
 | review algorithm の step を飛ばす、順序を入れ替える、fail 後に後続 step で pass 扱いする | merge 不可 |
 | `review_result` が許可値以外、または失敗 step と一致しない | Phase 未完了 |
 | `summary_status` を step 1〜7 の代替証跡として扱う | merge 不可 |
+| Phase packet に precision closure freeze checklist がない | 実装開始禁止 |
+| freeze checklist と Done receipt の `precision_closure_result` が一致しない | Phase 未完了 |
+| freeze 後に closure field 名、artifact path、review command、open count target、review algorithm、allowed review result、`summary_status` 条件を暗黙変更する | merge 不可 |
+| 実装 PR 内で `summary_status` の pass 条件を緩める | merge 不可 |
 | `未解決判断 0 件` だけで `precision_closure_result` を pass とする | merge 不可 |
 | Contract ID に timestamp、random ID、local username、host name、absolute path 由来文字列が含まれる | merge 不可 |
 | artifact が生成されていないのに Done receipt で pass とする | merge 不可 |
@@ -13584,7 +13606,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.157` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.158` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
