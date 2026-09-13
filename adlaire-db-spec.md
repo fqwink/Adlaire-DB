@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.144
+**バージョン：** V.145
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.144` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.145` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -7155,7 +7155,7 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 |-------|----------|
 | `handoff_id` | `HANDOFF-P{phase}-{number}` 形式の一意 ID |
 | `spec_version` | 対象仕様書 version。Phase Done 時点の `V.{累積番号}` と一致させる |
-| `reading_order` | レビュアーが読む順番。最低でも §0、§1.4、§9.1.51、§9.11.1〜§9.11.7、対象 Phase 詳細節、Phase packet、Done receipt |
+| `reading_order` | レビュアーが読む順番。最低でも §0、§1.4、§9.1.51、§9.11.1〜§9.11.8、対象 Phase 詳細節、Phase packet、Done receipt |
 | `reproduction_commands` | clean checkout から実行できる command。各 command は working directory、env、fixture、expected exit code を持つ |
 | `expected_artifacts` | command ごとの生成 artifact path、Contract ID、Scenario ID、snapshot / transcript / log の対応 |
 | `decision_criteria` | Done / Not Done / Spec correction required の判定条件。失敗時に参照する仕様節を含める |
@@ -7294,6 +7294,57 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 | Turso Cloud / libSQL SDK 互換差分に仕様本文の理由、snapshot、client impact がない | No-Go |
 | Phase Done だが rollout readiness、operator runbook、rollback、release note が未完了 | `phase_done_only`。運用投入不可 |
 | `P{phase}-PRECISION-CLOSURE` に `entry_go = true`、`exit_go = true`、`blocking_items = 0`、`reviewer_decision = Done` がない | Phase 未完了 |
+
+### 9.11.8 Phase 1〜19 regression inheritance / non-regression closure 最低表
+
+本節は後続 Phase が過去 Phase の外部 contract、永続化、認証認可、SDK 互換、運用挙動を壊していないことを証明する最低条件を定義する。実装者は対象 Phase で追加した機能だけを検証して完了扱いにしてはならない。対象 Phase より前に Done となった Phase の regression は、仕様本文に根拠がある除外を除き、対象 Phase の Done receipt と `P{phase}-PRECISION-CLOSURE` に継承して記録する。
+
+| Phase | inherited regression 最低対象 |
+|-------|-------------------------------|
+| 1 | なし。ただし CLI / config / no persistence の snapshot は以後の基準にする |
+| 2 | Phase 1 CLI / config / no persistence |
+| 3 | Phase 1 CLI / config、Phase 2 data-dir / lock / metadata / restart |
+| 4 | Phase 1〜3 CLI、data-dir、hrana HTTP、SDK smoke、restart |
+| 5 | Phase 1〜4 CLI、data-dir、hrana HTTP、auth disabled / enabled、secret redaction |
+| 6 | Phase 1〜5 default route、SDK HTTP、auth、logs、restart、unsupported future surface |
+| 7 | Phase 1〜6 default/path route、DB isolation、auth、SDK HTTP、metadata restart |
+| 8 | Phase 1〜7 Admin API、DB CRUD、token CRUD、scope、legacy metadata、SDK HTTP |
+| 9 | Phase 1〜8 HTTP route、Admin / Turso API、auth/scope/quota、SDK HTTP、metadata migration |
+| 10 | Phase 1〜9 HTTP、WebSocket、transaction rollback、Admin / Turso API、secret redaction |
+| 11 | Phase 1〜10 HTTP、WebSocket、ATTACH denial、metrics、Admin / Turso API、SDK transcript |
+| 12 | Phase 1〜11 replication primary API、HTTP/WS SDK、Admin / Turso API、metrics、secret redaction |
+| 13 | Phase 1〜12 primary/replica、redirect、checksum mismatch、HTTP/WS SDK、Admin / Turso API |
+| 14 | Phase 1〜13 archive、replication、HTTP/WS SDK、Admin / Turso API、metadata / file consistency |
+| 15 | Phase 1〜14 backup/restore/PITR、archive、replication、HTTP/WS SDK、Admin / Turso API |
+| 16 | Phase 1〜15 branch、backup/restore/PITR、HTTP/WS SDK、Admin / Turso API、secret redaction |
+| 17 | Phase 1〜16 extension、branch、backup/restore/PITR、metrics boundary、HTTP/WS SDK |
+| 18 | Phase 1〜17 metrics、extension、branch、backup/restore/PITR、replication、HTTP/WS SDK |
+| 19 | Phase 1〜18 full regression。CLI、config、metadata、HTTP、WebSocket、auth/scope/quota、Admin / Turso API、replication、archive、backup、branch、extension、metrics、HA、SDK transcript |
+
+**regression_inheritance_record 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `regression_id` | `REG-P{phase}-INHERIT-{number}` 形式の一意 ID |
+| `phase` | 対象 Phase 番号 |
+| `inherited_phases` | 継承対象 Phase 範囲。例: `1-8` |
+| `required_surfaces` | CLI、config、data-dir、metadata、hrana HTTP、hrana WebSocket、auth/scope/quota、Admin / Turso API、replication、backup、branch、extension、metrics、HA、SDK transcript、secret redaction のうち該当面 |
+| `commands` | clean checkout から実行できる regression command、expected exit code、timeout、Docker / CI / local 差分 |
+| `artifact_paths` | regression transcript、snapshot、compat diff、secret scan、failure record、review handoff への path |
+| `allowed_exclusions` | 仕様本文 section、N/A record、代替 artifact を持つ除外だけを列挙する。空の場合は `none` |
+| `result` | `pass`、`fail`、`not_applicable_with_spec_reason` のいずれか。`not_run`、`manual_only`、`assumed_unaffected` は禁止 |
+
+**Non-regression 判定規則：**
+
+| 状態 | 判定 |
+|------|------|
+| 本節の inherited regression を実行していない | Phase 未完了 |
+| `影響なし`、`コードを触っていない`、`たぶん関係ない` だけを理由に regression を skip する | merge 不可 |
+| regression failure を別 PR、後続 Phase、既知問題として残す | merge 不可 |
+| snapshot を更新しただけで compatibility diff、oracle 更新理由、client impact がない | Phase 未完了 |
+| allowed exclusion に仕様本文 section、N/A record、代替 artifact がない | Phase 未完了 |
+| secret redaction regression を省略する | merge 不可 |
+| `P{phase}-PRECISION-CLOSURE` に inherited Phase 範囲、required surfaces、`regression_failure_count = 0`、artifact path がない | Phase 未完了 |
 
 ### 9.12 PR レビュー観点
 
@@ -13150,7 +13201,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.144` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.145` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
