@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.152
+**バージョン：** V.153
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.152` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.153` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -7003,6 +7003,26 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 | `regression_result` | `P{phase}-REGRESSION-*` の CI / regression transcript をすべて参照する |
 | `precision_closure_result` | 必ず `P{phase}-PRECISION-CLOSURE` を参照し、coverage gap、open task、open scenario、open decision、known flaky が 0 件であることを示す。さらに `ambiguity_closure_result`、`failure_closure_result`、`review_handoff_result`、`na_closure_result`、`go_no_go_result`、`regression_inheritance_result`、`determinism_result`、`assertion_binding_result`、`negative_surface_result`、`evidence_integrity_result`、`operator_observability_result` の全 field、artifact path、reviewer 再現 command、open count 0 を含める |
 
+**precision_closure_result 標準テンプレート：**
+
+`precision_closure_result` は以下の 11 field をこの名前で持つ。各 field は `status`、`contract_id`、`artifact_path`、`reviewer_command`、`open_count`、`source_section`、`blocking_rule` を必ず含める。field 名、key 名、Contract ID、artifact path、source section のいずれかが本表と一致しない場合は、実装者が意図を推測する余地が残るため Phase 未完了とする。
+
+| field | source_section | artifact_path | blocking_rule |
+|-------|----------------|---------------|---------------|
+| `ambiguity_closure_result` | §9.11.3 | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/ambiguity-closure.json` | open ambiguity 0 件 |
+| `failure_closure_result` | §9.11.4 | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/failure-closure.json` | open failure 0、known flaky 0、unverified 0、missing artifact 0 件 |
+| `review_handoff_result` | §9.11.5 | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/review-handoff.json` | third-party reproduction pass、oral context 0 件 |
+| `na_closure_result` | §9.11.6 | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/na-closure.json` | rootless N/A 0、manual only pass 0、skipped required verification 0 件 |
+| `go_no_go_result` | §9.11.7 | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/go-no-go.json` | entry_go true、exit_go true、blocking item 0 件 |
+| `regression_inheritance_result` | §9.11.8 | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/regression-inheritance.json` | inherited regression failure 0、missing previous Phase regression 0 件 |
+| `determinism_result` | §9.11.9 | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/determinism.json` | flaky 0、nondeterministic artifact 0 件 |
+| `assertion_binding_result` | §9.11.10 | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/assertion-binding.json` | missing assertion 0、oracle binding pass |
+| `negative_surface_result` | §9.11.11 | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/negative-surface.json` | unsupported success 0、denial redaction pass |
+| `evidence_integrity_result` | §9.11.12 | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/evidence-integrity.json` | stale artifact 0、manifest mismatch 0、missing integrity 0 件 |
+| `operator_observability_result` | §9.11.13 | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/operator-observability.json` | operator action gap 0、observability pass、operator secret leak 0 件 |
+
+各 field の `status` は `pass` 固定、`contract_id` は `P{phase}-PRECISION-CLOSURE` 固定、`open_count` は `0` 固定とする。`reviewer_command` は第三者がその field の artifact を生成または検証できる具体 command を記録し、`artifact_path` は上表の標準 path と完全一致させる。`status: pass` だけ、PR description だけ、手元実行ログだけ、または artifact path のない closure field は pass 扱いしてはならない。
+
 **命名不一致時の判定：**
 
 | 状態 | 判定 |
@@ -7011,7 +7031,11 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 | artifact path に Contract ID が含まれない | Phase 未完了 |
 | `precision_closure_result` が `P{phase}-PRECISION-CLOSURE` を参照しない | Phase 未完了 |
 | `precision_closure_result` に §9.11.3〜§9.11.13 に対応する 11 個の closure field が 1 つでも欠ける | Phase 未完了 |
+| closure field 名、key 名、`source_section`、`contract_id` が標準テンプレートと一致しない | Phase 未完了 |
+| closure field の `artifact_path` が `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/...` の標準形でない | Phase 未完了 |
 | closure field が pass でも artifact path、reviewer 再現 command、open count 0 のいずれかを示さない | merge 不可 |
+| closure field が `status: pass` だけで、必須 key、artifact、reviewer command、blocking rule の実証を持たない | merge 不可 |
+| reviewer が同じ command で artifact を再生成または検証できない | merge 不可 |
 | `未解決判断 0 件` だけで `precision_closure_result` を pass とする | merge 不可 |
 | Contract ID に timestamp、random ID、local username、host name、absolute path 由来文字列が含まれる | merge 不可 |
 | artifact が生成されていないのに Done receipt で pass とする | merge 不可 |
@@ -13471,7 +13495,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.152` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.153` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
