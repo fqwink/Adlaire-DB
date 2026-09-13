@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.154
+**バージョン：** V.155
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.154` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.155` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -7040,6 +7040,23 @@ Done receipt に記録する `precision_closure_result` は、以下の canonica
 
 canonical object は Done receipt 本文にそのまま貼れる Markdown table または JSON object とする。ただし JSON object を使う場合も key 名は本表と完全一致させ、`closure_fields` の 11 key を省略してはならない。
 
+**precision_closure_result review algorithm：**
+
+レビュアーと CI は以下の順序で `precision_closure_result` を評価する。各 step は fail fast とし、失敗した step より後続の step を pass 扱いしてはならない。`summary_status` は最後の step でのみ評価し、途中 step の代替証跡にしてはならない。
+
+| step | 確認内容 | failure `review_result` |
+|------|----------|-------------------------|
+| 1 | `contract_id` が `P{phase}-PRECISION-CLOSURE` と完全一致する | `fail_contract_mismatch` |
+| 2 | canonical key（`phase`、`contract_id`、`summary_status`、`closure_fields`、`artifact_manifest`、`reviewer_reproduction`、`open_counts`、`generated_at_source`）が全て存在する | `fail_missing_key` |
+| 3 | `closure_fields` に 11 closure field が固定 key object として全て存在する | `fail_missing_field` |
+| 4 | 11 field の `artifact_path` が標準 path と完全一致し、Contract ID と Phase 番号を含む | `fail_artifact_path` |
+| 5 | `artifact_manifest` が 11 field の artifact path、生成 command、hash、secret scan result と一致する | `fail_manifest_mismatch` |
+| 6 | `reviewer_reproduction` の各 command が expected exit code で終了し、expected artifact path を生成または検証できる | `fail_reproduction` |
+| 7 | `open_counts` と各 field の `open_count` が全て `0` で一致する | `fail_open_count` |
+| 8 | `summary_status` が `pass` であり、step 1〜7 の失敗が 0 件である | `fail_summary_status` |
+
+`review_result` は `pass`、`fail_contract_mismatch`、`fail_missing_key`、`fail_missing_field`、`fail_artifact_path`、`fail_manifest_mismatch`、`fail_reproduction`、`fail_open_count`、`fail_summary_status` のいずれかだけを許可する。`warning`、`accepted_risk`、`manual pass`、`pass with notes`、空欄は Phase 完了根拠にしてはならない。
+
 **命名不一致時の判定：**
 
 | 状態 | 判定 |
@@ -7057,6 +7074,9 @@ canonical object は Done receipt 本文にそのまま貼れる Markdown table 
 | `summary_status: pass` だけで 11 field、artifact manifest、reviewer reproduction、open counts を省略する | merge 不可 |
 | `artifact_manifest` と closure field の `artifact_path` が一致しない | Phase 未完了 |
 | `reviewer_command` が `see CI`、`manual`、`確認済み` など抽象表現だけで、再現可能な command ではない | merge 不可 |
+| review algorithm の step を飛ばす、順序を入れ替える、fail 後に後続 step で pass 扱いする | merge 不可 |
+| `review_result` が許可値以外、または失敗 step と一致しない | Phase 未完了 |
+| `summary_status` を step 1〜7 の代替証跡として扱う | merge 不可 |
 | `未解決判断 0 件` だけで `precision_closure_result` を pass とする | merge 不可 |
 | Contract ID に timestamp、random ID、local username、host name、absolute path 由来文字列が含まれる | merge 不可 |
 | artifact が生成されていないのに Done receipt で pass とする | merge 不可 |
@@ -13516,7 +13536,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.154` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.155` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
