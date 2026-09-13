@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.114
+**バージョン：** V.115
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.114` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.115` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -4008,6 +4008,7 @@ branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§
 | `ambiguity_closure_matrix` | §9.1.49 の implementation question、推奨決定、却下案、根拠、影響範囲、証跡 |
 | `atomic_task_ledger` | §9.1.50 の task ID、入力契約、変更対象、禁止変更、完了条件、検証、rollback |
 | `review_handoff_packet` | §9.1.51 の読む順番、再現 command、期待 artifact、判断基準、失敗分類、レビュー禁止事項 |
+| `operator_behavior_delta` | §9.1.52 の外部挙動、運用影響、互換差分、設定移行、rollback、release note |
 | `completion_gate` | merge 前に満たす Done 条件と失敗時の扱い |
 
 **Phase group 粒度：**
@@ -4110,6 +4111,7 @@ Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§
 | `ambiguity_closure_result` | §9.1.49 の ambiguity ID ごとの採用決定、却下案、仕様反映、証跡、open ambiguity 0 件 |
 | `atomic_task_result` | §9.1.50 の task ID ごとの完了条件、検証 command、証跡、rollback 可否、open task 0 件 |
 | `review_handoff_result` | §9.1.51 の第三者再現 command、artifact、判断結果、失敗分類、口頭補足なし証跡 |
+| `operator_behavior_delta_result` | §9.1.52 の external behavior、operator impact、compatibility delta、migration、rollback、release note 証跡 |
 | `reviewer_decision` | `Done`、`Not Done`、`Spec correction required` のいずれか |
 
 **Phase group Done minimum：**
@@ -5326,6 +5328,62 @@ Phase atomic task ledger に関係する仕様変更は、§9.1.7、§9.1.8、§
 
 Phase review handoff に関係する仕様変更は、§9.1.3、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.1.24、§9.1.29、§9.1.32、§9.1.33、§9.1.34、§9.1.35、§9.1.36、§9.1.44、§9.1.45、§9.1.46、§9.1.47、§9.1.48、§9.1.49、§9.1.50、§9.2、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。review handoff packet がない Phase 実装 PR は、第三者再現性、レビュー判断基準、artifact 完備性、失敗分類が未確定であるため、Phase 完了扱いにしない。
 
+#### 9.1.52 Phase release note / operator-facing behavior delta 固定契約
+
+各 Phase の実装 PR は、利用者・運用者から見える挙動差分を operator behavior delta として固定しなければならない。実装内部の完了、テスト成功、レビュアー再現性が満たされていても、外部 API、CLI、config、metadata、auth、logs、health、metrics、backup、replication、HA、rollback、非対応範囲の変化が運用者向けに分類されていない場合、その Phase は完了扱いにしない。
+
+**Operator behavior delta 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `delta_id` | `DELTA-P{phase}-{surface}-{number}` 形式の一意 ID |
+| `phase` | delta を導入する Phase |
+| `audience` | user、operator、SDK client、admin、SRE、backup operator、HA operator、developer のいずれか |
+| `external_surface` | CLI / HTTP API / WebSocket / config / metadata / auth / log / health / metrics / backup / replication / branch / HA / extension |
+| `behavior_before` | 前 Phase または未対応時の挙動。新規の場合は `not_available` と明記 |
+| `behavior_after` | 当該 Phase で観測される挙動、status、error code、log、metric、artifact、operator action |
+| `compatibility_delta` | `none`、`turso_match`、`intentional_self_host_diff`、`breaking_change`、`new_feature`、`deprecated`、`unsupported_until_phase` |
+| `operator_action` | 設定変更、migration、restart、backup、token rotation、monitoring 更新、runbook 更新。不要なら理由 |
+| `migration_or_config_change` | config key、metadata migration、env、default 変更、旧形式対応、rollback 可否 |
+| `rollback_note` | rollback 時の operator 手順、data safety、互換性、戻せない変更の有無 |
+| `release_note_text` | そのまま release note に載せられる短文。内部実装名ではなく利用者視点で書く |
+| `evidence` | snapshot、SDK transcript、health/log/metric sample、migration fixture、rollback artifact、compat diff |
+
+**Phase group operator delta minimum：**
+
+| Phase group | 最低 delta |
+|-------------|------------|
+| Phase 1〜5 | CLI 起動、config precedence、data-dir layout、health/pipeline、JWT/token、log redaction、SDK 接続方法 |
+| Phase 6〜8 | admin API、Platform API、multi DB、organization/group/location、quota/block policy、metadata migration |
+| Phase 9〜10 | WebSocket behavior、transaction rollback、ATTACH 非対応/拒否、metrics counter、ro/rw write denial |
+| Phase 11〜13 | replication primary/replica、archive manifest、retention、health/redirect、lag/degraded 表示 |
+| Phase 14〜15 | backup/restore/PITR、destructive lock、branch lifecycle、seed/source、delete protection、rollback 手順 |
+| Phase 16〜18 | extension allowlist、metrics/Prometheus、HA status/promote/demote、split-brain operator action |
+| Phase 19 | internal adapter switch、shadow/active mode、fallback denial、performance baseline、rollback flag、外部挙動差分ゼロ |
+
+**operator delta 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| 外部挙動が変わるのに release note / behavior delta がない | Phase 未完了 |
+| breaking change または intentional self-host diff が互換差分として分類されていない | merge 不可 |
+| operator action が必要なのに手順、restart 要否、rollback が未定義 | rollout ready 不可 |
+| config / metadata / token / backup / HA の変更に migration_or_config_change がない | merge 不可 |
+| logs / health / metrics の変化が sample artifact なしで記載される | Phase 未完了 |
+| unsupported / deprecated / future Phase の挙動が release note で不明 | review failure |
+| 内部実装名だけで利用者視点の release_note_text がない | Phase 未完了 |
+| rollback 不可の変更を rollback 可として扱う | merge 不可 |
+
+**Done receipt への反映：**
+
+| Done receipt field | 必須内容 |
+|--------------------|----------|
+| `operator_behavior_delta_result` | delta ID ごとの audience、external surface、before/after、compatibility delta、operator action、evidence |
+| `release_note_result` | release note text、breaking/new/deprecated/unsupported 分類、Turso/self-host 差分、公開可否 |
+| `operator_rollout_result` | migration/config/restart/rollback/monitoring 更新の要否と証跡 |
+
+Phase operator behavior delta に関係する仕様変更は、§1.4、§1.5、§3.5.3、§7.3、§9.1.10、§9.1.11、§9.1.13、§9.1.15、§9.1.17、§9.1.19、§9.1.20、§9.1.22、§9.1.23、§9.1.24、§9.1.29、§9.1.32、§9.1.33、§9.1.37、§9.1.44、§9.1.45、§9.1.46、§9.1.47、§9.1.49、§9.1.50、§9.1.51、§9.2、§9.4、§9.5、§9.6、§9.7、§9.8、§9.11、§9.14、§9.17、該当 Phase 詳細節を同時更新する。operator behavior delta がない Phase 実装 PR は、利用者・運用者から見える変更、互換差分、運用手順、release note、rollback が未確定であるため、Phase 完了扱いにしない。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -5991,6 +6049,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Ambiguity closure / implementation decision | §9.1.49 に従い、implementation question、candidate options、selected decision、rejected options、decision basis、affected contracts、edge cases、reopen trigger が固定されている | 実装開始禁止。TBD、実装判断、根拠なし N/A、open ambiguity、error/status/commit order/redaction の未決定がある場合は Phase 完了扱いにしない |
 | Atomic implementation task ledger | §9.1.50 に従い、task ID、input contracts、change targets、forbidden changes、completion condition、verification command、rollback condition、dependency が固定されている | 実装開始禁止。巨大 task、task ID なし差分、検証なし task、task 外変更、rollback 未定義、open task がある場合は Phase 完了扱いにしない |
 | Review handoff / independent reproducibility | §9.1.51 に従い、reading order、reproduction commands、expected artifacts、decision criteria、failure classification、oral context free evidence が固定されている | Phase 完了扱いにしない。口頭説明、PR description だけの根拠、local only 再現、artifact 欠落、レビュアー判断任せの N/A / snapshot 更新は禁止 |
+| Operator-facing behavior delta | §9.1.52 に従い、audience、external surface、before/after、compatibility delta、operator action、migration/config、rollback、release note、evidence が固定されている | Phase 完了扱いにしない。release note なし、operator 影響未分類、互換差分未記載、運用手順なし、rollback 不明、log/health/metric sample 欠落は禁止 |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | 仕様内相互参照 | §9.1.29 に従い、Phase 番号、TC ID、Task ID、API 契約 ID、error code、persistence key、evidence 名、manifest 参照が一致している | 仕様修正 PR に戻す |
 | Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
