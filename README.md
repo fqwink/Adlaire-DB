@@ -119,4 +119,4 @@ Phase 7 時点では、以下の管理 API が利用できる。
 
 ## 仕様書
 
-詳細仕様は [`adlaire-db-spec.md`](./adlaire-db-spec.md) を参照。
+詳細仕様は [`docs/adlaire-db-spec.md`](./docs/adlaire-db-spec.md) を参照。
