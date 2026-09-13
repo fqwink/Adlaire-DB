@@ -2,7 +2,8 @@
 
 ## 仕様書の位置づけ
 
-- `docs/adlaire-db-spec.md` は**正本**（single source of truth）である
+- `docs/adlaire-db-spec.md` と `docs/phases/*.md` は**仕様正本群**（single source of truth）である
+- `docs/adlaire-db-spec.md` は親仕様であり、Phase 1〜19 の詳細は `docs/phases/` に分割して管理する
 - `docs/Adlaire-db-spec.html` は `docs/adlaire-db-spec.md` から生成された閲覧用 HTML であり、正本ではない
 - 実装は仕様書に基づいて行うこと
 - 仕様書と実装が乖離している場合は、**仕様書を優先する**
@@ -10,7 +11,7 @@
 
 ## 仕様書 HTML 更新ルール
 
-`docs/adlaire-db-spec.md` を改訂した場合は、`docs/build-scripts/build_spec_v3.py` 経由で `docs/Adlaire-db-spec.html` を更新すること。
+`docs/adlaire-db-spec.md` または `docs/phases/*.md` を改訂した場合は、`docs/build-scripts/build_spec_v3.py` 経由で `docs/Adlaire-db-spec.html` を更新すること。
 
 - 仕様書改訂 PR では、Markdown 正本と HTML 生成物の整合性を確認する
 - HTML 生成物だけを正として仕様判断してはならない
@@ -24,7 +25,7 @@
 - `docs/build-scripts/build_spec_v3_spec.md`
 - `docs/build-scripts/DESIGN.md`
 
-Adlaire DB の仕様正本は、上記ツールではなく `docs/adlaire-db-spec.md` である。
+Adlaire DB の仕様正本群は、上記ツールではなく `docs/adlaire-db-spec.md` と `docs/phases/*.md` である。
 
 ## 作業開始時の確認
 

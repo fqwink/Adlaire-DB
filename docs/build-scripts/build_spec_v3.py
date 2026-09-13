@@ -7,9 +7,13 @@ https://github.com/fqwink/Adlaire-Design-System (Tokens/)
 """
 
 import re, html, unicodedata
+from pathlib import Path
+from typing import Optional
 
 SRC = "docs/adlaire-db-spec.md"
 OUT = "docs/Adlaire-db-spec.html"
+
+INCLUDE_RE = re.compile(r'^<!--\s*include:\s*([^>]+?)\s*-->\s*$')
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
 _seen: dict[str, int] = {}
@@ -65,9 +69,28 @@ def inline(text: str) -> str:
     t = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', t)
     return t
 
+# ─── source loading ──────────────────────────────────────────────────────────
+def load_markdown_lines(path: str, seen: Optional[set[str]] = None) -> list[str]:
+    seen = seen or set()
+    source = Path(path)
+    key = str(source)
+    if key in seen:
+        raise RuntimeError(f'Circular include detected: {path}')
+    seen.add(key)
+
+    expanded: list[str] = []
+    with source.open(encoding='utf-8') as f:
+        for line in f:
+            m = INCLUDE_RE.match(line.rstrip('\n'))
+            if m:
+                include_path = m.group(1).strip()
+                expanded.extend(load_markdown_lines(include_path, seen.copy()))
+            else:
+                expanded.append(line)
+    return expanded
+
 # ─── parse headings ──────────────────────────────────────────────────────────
-with open(SRC, encoding='utf-8') as f:
-    raw_lines = f.readlines()
+raw_lines = load_markdown_lines(SRC)
 
 headings: list[tuple[int, str, str, int]] = []
 _fence = False
