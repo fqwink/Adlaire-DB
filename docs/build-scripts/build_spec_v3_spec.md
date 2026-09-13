@@ -1,7 +1,7 @@
 # build_spec_v3.py — ビルドスクリプト仕様ドキュメント
 
-**対象スクリプト：** `build_spec_v3.py`
-**出力ファイル：** `Adlaire-db-spec.html`
+**対象スクリプト：** `docs/build-scripts/build_spec_v3.py`
+**出力ファイル：** `docs/Adlaire-db-spec.html`
 **バージョン：** v3（Adlaire Design System ブルートークン正式採用）
 **最終更新：** 2026-09-13
 **開発方針：** 仕様駆動開発（Spec-Driven Development）
@@ -423,7 +423,7 @@ vis = [(lv, tx, sl) for lv, tx, sl, _ in headings if lv <= 3]
 ## 9. 実行方法
 
 ```bash
-python3 build_spec_v3.py
+python3 docs/build-scripts/build_spec_v3.py
 ```
 
 **標準出力：**

@@ -10,7 +10,7 @@
 
 ## 仕様書 HTML 更新ルール
 
-`docs/adlaire-db-spec.md` を改訂した場合は、`docs/build_spec_v3.py` 経由で `docs/Adlaire-db-spec.html` を更新すること。
+`docs/adlaire-db-spec.md` を改訂した場合は、`docs/build-scripts/build_spec_v3.py` 経由で `docs/Adlaire-db-spec.html` を更新すること。
 
 - 仕様書改訂 PR では、Markdown 正本と HTML 生成物の整合性を確認する
 - HTML 生成物だけを正として仕様判断してはならない
@@ -20,9 +20,9 @@
 
 以下は別途リポジトリで開発したドキュメント生成ツールおよび関連文書である。
 
-- `docs/build_spec_v3.py`
-- `docs/build_spec_v3_spec.md`
-- `docs/DESIGN.md`
+- `docs/build-scripts/build_spec_v3.py`
+- `docs/build-scripts/build_spec_v3_spec.md`
+- `docs/build-scripts/DESIGN.md`
 
 Adlaire DB の仕様正本は、上記ツールではなく `docs/adlaire-db-spec.md` である。
 

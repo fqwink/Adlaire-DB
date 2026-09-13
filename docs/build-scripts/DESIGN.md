@@ -5,8 +5,8 @@
 > 以降の CSS トークン管理は ADS リポジトリ（`--adlaire-*` 変数）を参照すること。
 > 以下の内容は移行前の旧仕様として参照用に残す。
 
-**対象ファイル：** `Adlaire-db-spec.html`
-**ビルドスクリプト：** `build_spec_v3.py`
+**対象ファイル：** `docs/Adlaire-db-spec.html`
+**ビルドスクリプト：** `docs/build-scripts/build_spec_v3.py`
 **最終更新：** 2026-09-13（ADS 移行時点で廃止）
 
 ---
@@ -229,7 +229,7 @@ Google Fonts から `Noto Sans JP`（400/500）と `JetBrains Mono`（300/400/50
 
 ```bash
 # MDから HTML を生成
-python3 build_spec_v3.py
+python3 docs/build-scripts/build_spec_v3.py
 
 # 出力先
 # docs/Adlaire-db-spec.html
