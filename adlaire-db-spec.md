@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.93
+**バージョン：** V.94
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.93` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.94` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.93` の次は `V.94` とし、以後 `V.95`、`V.96` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.94` の次は `V.95` とし、以後 `V.96`、`V.97` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -3983,6 +3983,79 @@ branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§
 
 Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.1.29、§9.2、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。Phase 単位で何を実装し、何を実装しないか、何をもって完了とするかが 1 箇所で読めない場合は、実装精度不足として Phase 未完了扱いにする。
 
+#### 9.1.33 Phase completion gate / Done evidence / bug-zero acceptance 固定契約
+
+各 Phase の完了判定は、コード差分の有無ではなく、Phase packet、受入 manifest、仕様本文、test、artifact、PR description、release check result が同じ契約集合を証明していることをもって行う。実装者、reviewer、後続 Phase 担当者が仕様本文だけで完了可否を再判定できない場合、その Phase は未完了とする。
+
+**Done receipt 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `phase` | `Phase N`、対象仕様 version、対象 commit、対象 PR |
+| `packet_ref` | §9.1.32 の Phase packet 参照と commit |
+| `manifest_ref` | §9.1.10 の受入 manifest 参照と version |
+| `implemented_scope` | §9.2 / §9.4 / Phase 詳細節で完了した項目 |
+| `excluded_scope` | 同 Phase で意図的に実装しない対象と、その固定挙動 |
+| `contract_map` | API、永続化、error、security、compatibility、concurrency、operation の契約 ID |
+| `evidence_index` | artifact 名、保存先、生成コマンド、exit code、正規化内容 |
+| `regression_result` | §9.8 の対象 TC、過去 Phase regression、SDK / CLI / HTTP / WS 実行結果 |
+| `failure_closure` | 失敗、flaky、未検証、artifact 欠落、secret 混入が 0 件である根拠 |
+| `compatibility_result` | Turso Cloud / libSQL SDK / legacy metadata / previous Phase への差分分類 |
+| `redaction_result` | log、artifact、PR description、error body に secret / token / raw path / SQL args が残っていない根拠 |
+| `release_check_result` | local / Docker / CI の実行コマンド、環境差分、再実行条件 |
+| `reviewer_decision` | `Done`、`Not Done`、`Spec correction required` のいずれか |
+
+**Phase group Done minimum：**
+
+| Phase group | 最低証跡 |
+|-------------|----------|
+| Phase 1〜5 | build/test、CLI help、config precedence、data-dir 再起動、hrana-http transcript、JWT / log redaction、SDK smoke |
+| Phase 6〜8 | admin API / Platform API snapshot、metadata migration、auth scope、organization/group/location/quota、legacy fallback、Phase 1〜7 regression |
+| Phase 9〜10 | WebSocket transcript、transaction rollback、managed ATTACH 拒否、metrics counter 更新、任意 path 拒否 |
+| Phase 11〜13 | replication frame、checksum、snapshot、archive manifest、retention cleanup、corruption detection、primary/replica restart |
+| Phase 14〜15 | backup manifest、restore rollback、PITR selector、branch lifecycle、source snapshot、seed isolation、restart recovery |
+| Phase 16〜18 | extension signature/load policy、metrics persistence、Prometheus output、HA term、leader transition、split-brain prevention |
+| Phase 19 | adapter shadow/active/rollback、wire/API 差分、performance baseline、Phase 1〜18 full regression |
+
+**完了扱い禁止条件：**
+
+| 状態 | 判定 |
+|------|------|
+| Done receipt がない | Phase 未完了 |
+| Done receipt と Phase packet / manifest / 仕様本文が一致しない | Phase 未完了 |
+| evidence artifact が再生成不能、または生成コマンドが未記載 | Phase 未完了 |
+| regression set の一部が skipped / manual only / not run のまま | Phase 未完了 |
+| unsupported 対象が success response、部分成功、暗黙 fallback を返す | merge 不可 |
+| failure / flaky / TODO / FIXME / unimplemented を後続 PR に持ち越す | merge 不可 |
+| secret / token / raw path / SQL args / backup body の秘匿確認がない | merge 不可 |
+| compatibility diff が仕様化されていない | 仕様修正 PR に戻す |
+| destructive operation、auth、quota、restore、branch delete、extension load の検証が manual only | merge 不可 |
+
+**bug-zero acceptance：**
+
+| 項目 | 必須条件 |
+|------|----------|
+| known bug | 0 件。既知不具合、既知 flaky、既知未検証、既知 artifact 欠落を残さない |
+| detected bug | 同一 PR 内で code fix + test、または仕様誤りとして spec fix + test/evidence に変換する |
+| regression bug | 影響 Phase、契約 ID、TC ID、再発防止 evidence を Done receipt に記録する |
+| accepted risk | 使用禁止。risk acceptance ではなく仕様変更、対象外明記、または実装修正で閉じる |
+| follow-up | 完了条件の代替に使わない。follow-up は Done 後の改善のみ許可する |
+
+**必須 evidence artifact：**
+
+| Artifact | 必須内容 |
+|----------|----------|
+| Done receipt | `docs/phase-evidence/phase-{phase}/done.md` または PR description の同等表 |
+| contract coverage matrix | Phase packet の全契約 ID と実行結果の対応 |
+| regression transcript | command、exit code、環境、artifact path、正規化済み出力 |
+| failure closure log | 発生した失敗、原因、修正、再実行結果、残件 0 の宣言 |
+| unsupported snapshot | 未来 Phase、対象外 endpoint / field / config / operation の拒否結果 |
+| redaction scan | secret、token、raw path、SQL args、backup body が残っていない確認 |
+| compatibility diff | Turso Cloud、libSQL SDK、legacy metadata、previous Phase との差分分類 |
+| cross-reference scan | §9.1.29 の参照整合 self-check 結果 |
+
+Phase completion gate に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§9.1.14、§9.1.24、§9.1.29、§9.1.32、§9.2、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。Done receipt を満たさない Phase は、機能が動作していても仕様上は完了扱いにしない。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -4469,6 +4542,7 @@ Phase 16〜19 は本節の固定タスクを完了条件とする。追加の仕
 ### 9.11 Definition of Ready / Definition of Done
 
 各 Phase の実装を始める前に Ready を満たし、merge 前に Done を満たすこと。
+Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase 固有の最低条件として扱う。
 
 | Phase | Definition of Ready | Definition of Done |
 |-------|---------------------|--------------------|
@@ -4613,6 +4687,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Phase packet | §9.1.32 に従い、scope、target surface、API、永続化、security、concurrency、compatibility、evidence、regression、unsupported behavior、completion gate が 1 セットで固定されている | 実装開始禁止 |
 | Phase 受入 manifest | §9.1.10 の必須 fields が実装開始前に固定されている | 実装 PR として扱わない |
 | Evidence artifact | §9.1.11 の保存先、命名、正規化、secret scan が固定されている | 証跡生成まで完了扱いにしない |
+| Phase Done receipt | §9.1.33 に従い、packet、manifest、contract map、evidence index、regression result、failure closure、compatibility / redaction result が一致している | Phase 完了扱いにしない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | 仕様内相互参照 | §9.1.29 に従い、Phase 番号、TC ID、Task ID、API 契約 ID、error code、persistence key、evidence 名、manifest 参照が一致している | 仕様修正 PR に戻す |
 | Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
