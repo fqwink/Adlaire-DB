@@ -38,6 +38,12 @@ def esc(s: str) -> str:
 # ─── inline MD → HTML ────────────────────────────────────────────────────────
 def inline(text: str) -> str:
     segments: list[str] = []
+    code_segments: list[str] = []
+
+    def code_placeholder(code: str) -> str:
+        code_segments.append(code)
+        return f'\u0000CODE{len(code_segments) - 1}\u0000'
+
     i = 0
     while i < len(text):
         bt = text.find('`', i)
@@ -50,14 +56,14 @@ def inline(text: str) -> str:
             if end == -1:
                 segments.append(esc(text[bt:]))
                 break
-            segments.append(f'<code class="ic">{esc(text[bt+2:end])}</code>')
+            segments.append(code_placeholder(f'<code class="ic">{esc(text[bt+2:end])}</code>'))
             i = end + 2
         else:
             end = text.find('`', bt + 1)
             if end == -1:
                 segments.append(esc(text[bt:]))
                 break
-            segments.append(f'<code class="ic">{esc(text[bt+1:end])}</code>')
+            segments.append(code_placeholder(f'<code class="ic">{esc(text[bt+1:end])}</code>'))
             i = end + 1
     t = ''.join(segments)
     t = re.sub(r'\*\*\*(.+?)\*\*\*', r'<strong><em>\1</em></strong>', t)
@@ -67,6 +73,8 @@ def inline(text: str) -> str:
     t = re.sub(r'(?<!_)_(?!_)(.+?)(?<!_)_(?!_)', r'<em>\1</em>', t)
     t = re.sub(r'~~(.+?)~~', r'<del>\1</del>', t)
     t = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', t)
+    for idx, code in enumerate(code_segments):
+        t = t.replace(f'\u0000CODE{idx}\u0000', code)
     return t
 
 # ─── source loading ──────────────────────────────────────────────────────────
@@ -793,7 +801,7 @@ a:focus-visible {{
   <span class="hdr-title">Adlaire DB</span>
   <span class="hdr-sep">/</span>
   <span class="hdr-title" style="color:rgba(255,255,255,.7);font-weight:400">プロジェクト憲章 / 仕様正本入口</span>
-  <span class="hdr-ver">V.217</span>
+  <span class="hdr-ver">V.218</span>
 </header>
 
 <div id="lay">
