@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.78
+**バージョン：** V.79
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.78` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.79` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.78` の次は `V.79` とし、以後 `V.80`、`V.81` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.79` の次は `V.80` とし、以後 `V.81`、`V.82` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -2625,6 +2625,79 @@ audit 相当記録は、Phase 8 の `/v1/organizations/{org}/audit-logs` API を
 
 observability に関係する仕様変更は、manifest の `Security map`、`Regression set`、該当 SEC 契約 ID、log artifact、secret scan artifact を同時更新する。ログが「見やすい」だけで、秘匿・追跡・失敗調査の契約を満たさない場合は Phase 完了扱いにしない。
 
+#### 9.1.18 Auth / permission / quota precedence 固定契約
+
+各 Phase 実装 PR は、認証、認可、scope、ro/rw、organization/group、quota、usage、block policy、delete protection、replication/HA token の判定順を実装開始前に固定しなければならない。複数の拒否条件が同時に成立する場合でも、endpoint ごとに返す status/code が揺れてはならない。
+
+**共通判定順：**
+
+| Order | Gate | 失敗時の既定 error | 備考 |
+|-------|------|--------------------|------|
+| 1 | request parsing / size / method / content type | `400 INVALID_REQUEST` または `405 METHOD_NOT_ALLOWED` | 認証不要で公開してよい validation だけを先に行う |
+| 2 | required auth presence | `401 AUTH_REQUIRED` | Authorization header なし、必要 token 未設定時 |
+| 3 | auth format / signature / exact match / expiry / revoke | `401 AUTH_INVALID` または `401 AUTH_EXPIRED` | token 値の補正、trim、大小文字補正は禁止 |
+| 4 | actor scope | `403 ORG_SCOPE_DENIED` または `403 PERMISSION_DENIED` | org/group/db/replica/HA scope 外 |
+| 5 | resource existence | `404 DB_NOT_FOUND` 等 | scope 外 resource の存在を漏らす endpoint は §9.5 で例外明記 |
+| 6 | operation permission | `403 PERMISSION_DENIED` | ro token write、admin 権限不足、block_reads/block_writes |
+| 7 | protection policy | `403 ORG_SCOPE_DENIED` または `403 PERMISSION_DENIED` | delete_protection、allow_attach=false 等 |
+| 8 | usage availability / quota | `503 USAGE_UNAVAILABLE` または `403/402 QUOTA_EXCEEDED` | usage 不明は quota 超過より先に返す |
+| 9 | storage / lock / concurrency | `503 STORAGE_BUSY` | restore lock、DB busy、shutdown 中 |
+| 10 | operation execution | endpoint 固有 error | SQL / replication / backup / extension / HA 固有 error |
+
+上記順序は既定であり、Turso Cloud 互換 endpoint が異なる status を要求する場合だけ、該当 endpoint 節に差分理由と snapshot を明記して上書きできる。上書きしても `code` は §7.3 / §9.7 と一致させる。
+
+**API 種別ごとの auth source：**
+
+| API surface | Required auth | Scope / permission | Quota / block 適用 |
+|-------------|---------------|--------------------|--------------------|
+| hrana HTTP `/v2/pipeline` | JWT。Phase 4 前は auth disabled のみ | `a`、`dbs`、org/group/db scope、ro/rw | write/import 相当 SQL は quota/block_writes。read SQL は block_reads |
+| hrana WebSocket `/v3/baton` | JWT | connection DB と stream operation ごとに判定 | transaction 内でも operation ごとに判定 |
+| `/admin/v1/*` | Admin token | Admin token は管理 API 全体。ただし org/group scope 拡張が仕様化された Phase では scope を適用 | DB write、restore、branch、quota update に適用 |
+| `/v1/*` Turso Platform API | Platform token または Phase 8 の Admin token 代用 | organizationSlug / groupName / databaseName の scope を先に判定 | `/v1/*` quota 超過は Turso 互換で 402 を優先 |
+| replication API | replication token | primary/replica role、replica_id、frame range | apply/write 側のみ quota/block_writes |
+| HA API | Admin token + HA token | node_id、role、term、leader state | quota は適用しない |
+| health / metrics read | endpoint ごとの auth | read-only scope または admin scope | metrics read は quota 超過中も許可 |
+
+**複数拒否条件時の優先 error：**
+
+| 条件 | 返す error |
+|------|------------|
+| auth header なし + resource 不存在 | `401 AUTH_REQUIRED` |
+| token 不正 + scope 外 | `401 AUTH_INVALID` |
+| token 期限切れ + revoke 済み | `401 AUTH_EXPIRED` |
+| org scope 外 + DB 不存在 | `403 ORG_SCOPE_DENIED`。存在漏洩を避ける |
+| ro token write + quota 超過 | `403 PERMISSION_DENIED` |
+| block_writes=true + quota 超過 | `403 PERMISSION_DENIED`。ただし `/v1/*` で quota status 互換が明記される場合は `402 QUOTA_EXCEEDED` |
+| usage unavailable + quota 超過推定 | `503 USAGE_UNAVAILABLE` |
+| delete_protection=true + DB not found | `404 DB_NOT_FOUND` |
+| restore lock + auth failure | auth failure を優先 |
+| shutdown 中 + auth failure | auth failure を優先。auth 通過後は shutdown/storage busy |
+
+**必須 evidence：**
+
+| Evidence | 必須内容 |
+|----------|----------|
+| auth matrix | no auth / bad format / invalid / expired / revoked / valid |
+| scope matrix | global、dbs、org、group、platform、replication、HA の allow/deny |
+| permission matrix | ro/rw、read/write SQL、admin operation、restore、branch、extension |
+| quota matrix | allowed、quota exceeded、usage unavailable、Turso 402、admin/hrana 403 |
+| block policy matrix | block_reads、block_writes、delete_protection、allow_attach=false |
+| precedence snapshot | 複数拒否条件が同時に成立した時の status/code |
+| redaction evidence | denied log に token、JWT、SQL args、quota internals が出ないこと |
+
+**禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| endpoint ごとに auth / scope / quota の判定順が仕様なしに異なる | Phase 未完了 |
+| scope 外 resource の存在有無が error で漏れる | merge 不可。ただし仕様本文に例外がある場合のみ可 |
+| ro/rw、block、quota の優先順位を test していない | Phase 未完了 |
+| `/admin/v1/*` と `/v1/*` の status 差分理由が仕様本文にない | review failure |
+| replication / HA token を admin token と混同する | merge 不可 |
+| auth denial log に token や JWT claim raw value を出す | merge 不可 |
+
+認証・認可に関係する仕様変更は、manifest の `Security map`、§9.14 security boundary、該当 SEC 契約 ID、auth/scope/quota evidence、redaction artifact を同時更新する。正常系だけが通っても、拒否条件の precedence が固定されていない場合は Phase 完了扱いにしない。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -3259,7 +3332,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | API 契約 | method/path/auth/request/success/error が §9.5 または各 API 節に明記されている | route を追加しない |
 | Error code | 失敗条件ごとの `code` が §7.3 / §9.7 に存在する | 先に error code を追加する |
 | 永続化 | ファイル名、schema、atomic update、rollback、破損時挙動が §9.6 に明記されている | 書き込み処理を実装しない |
-| 認証/認可 | 必要 token、scope、ro/rw、DB scope の判定順が明記されている | success response を返す API を公開しない |
+| 認証/認可 | §9.1.18 に従い、必要 token、scope、ro/rw、org/group、quota、block policy、拒否条件 precedence が明記されている | success response を返す API を公開しない |
 | ログ/秘匿 | §9.1.17、§12、§9.14 に従い、出力 field、request id、audit 相当記録、秘匿対象、redaction evidence が明記されている | request/SQL/token をログに出す実装を入れない |
 | 並行性 | §9.1.16 に従い、同時 request、resource lock、idempotency、shutdown、transaction の扱いが定義されている | 並行実行で状態を変更する処理を入れない |
 | 後方互換 | 既存 endpoint/schema/config への影響と migration path が明記されている | 既存契約を変更しない |
