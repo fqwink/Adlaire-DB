@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.105
+**バージョン：** V.106
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.105` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.106` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -3999,6 +3999,7 @@ branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§
 | `scenario_matrix` | §9.1.40 の normal/error/auth/persistence/rollback/concurrency/compatibility/unsupported/redaction/operational scenario |
 | `resource_lifecycle_matrix` | §9.1.41 の resource type、state、allowed/forbidden transition、commit order、recovery behavior |
 | `schema_registry` | §9.1.42 の field-level schema、required/null/default/migration/compatibility/redaction 契約 |
+| `decision_precedence_matrix` | §9.1.43 の複数条件同時成立時の優先順位、selected behavior、losing behavior、error/status/client action |
 | `completion_gate` | merge 前に満たす Done 条件と失敗時の扱い |
 
 **Phase group 粒度：**
@@ -4092,6 +4093,7 @@ Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§
 | `scenario_matrix_result` | §9.1.40 の scenario ID ごとの pass/fail、not_applicable reason、evidence path、manual only 0 件 |
 | `resource_lifecycle_result` | §9.1.41 の state / transition ごとの pass/fail、forbidden transition 0 件、recovery evidence path |
 | `schema_registry_result` | §9.1.42 の schema ID ごとの field coverage、unknown/null/default/migration/redaction evidence |
+| `decision_precedence_result` | §9.1.43 の decision ID ごとの precedence 実行結果、selected behavior、error/status snapshot、losing behavior 非発火証跡 |
 | `reviewer_decision` | `Done`、`Not Done`、`Spec correction required` のいずれか |
 
 **Phase group Done minimum：**
@@ -4768,6 +4770,75 @@ Phase resource lifecycle に関係する仕様変更は、§9.1.16、§9.1.21、
 
 Phase schema registry に関係する仕様変更は、§9.1.10、§9.1.11、§9.1.12、§9.1.15、§9.1.19、§9.1.20、§9.1.23、§9.1.24、§9.1.27、§9.1.28、§9.1.29、§9.1.32、§9.1.33、§9.1.35、§9.1.40、§9.2、§9.4、§9.5、§9.6、§9.7、§9.8、§9.13、§9.17、該当 Phase 詳細節を同時更新する。schema registry がない field 変更は、DTO / metadata / fixture の意味ズレによる後続バグ修正を防げないため、実装開始不可とする。
 
+#### 9.1.43 Phase decision precedence / conflict resolution matrix 固定契約
+
+各 Phase の実装 PR は、複数の仕様条件が同時に成立した場合に、どの判定、error、HTTP status、state、client action を優先するかを decision precedence matrix として固定しなければならない。実装者が handler 内の if/else 順、既存 helper の都合、または実装しやすさで優先順位を決めることは禁止する。
+
+**Decision precedence matrix 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `decision_id` | `DEC-P{phase}-{surface}-{number}` 形式の一意 ID |
+| `phase` | 判定を導入または変更する Phase |
+| `surface` | HTTP route / hrana request / WebSocket message / admin API / CLI / metadata migration / background job / health / log_metric |
+| `conflicting_conditions` | 同時成立し得る条件。例: invalid body、auth missing、scope denied、resource missing、quota exceeded、block_writes、recovering、unsupported |
+| `precedence_order` | 高い順の判定名。最低でも選択判定と退けられる判定を含める |
+| `selected_behavior` | 優先される response、state transition、write policy、log、metric |
+| `losing_behavior` | 優先されなかった条件をどう扱うか。隠す、audit のみ、内部 reason に残す、再評価する等 |
+| `error_code` | §7.3 の error code。該当しない場合は `none` と理由 |
+| `status` | HTTP status、WebSocket error、CLI exit code、health state、job state |
+| `client_action` | retry、auth refresh、scope change、quota adjustment、operator action、request correction、none |
+| `evidence` | conflict fixture、snapshot、SDK transcript、metadata fixture、job log、health snapshot |
+
+**共通 precedence 固定表：**
+
+| 同時成立条件 | 優先する判定 | 退ける判定 / 扱い |
+|--------------|--------------|-------------------|
+| body が安全に parse できない / content-type 不正 / request size 超過 と auth missing | parse / content validation | auth 判定は行わない。認証情報、resource 存在、scope 情報を露出しない |
+| auth missing / invalid と resource missing | auth failure | resource の存在有無を返さない |
+| scope denied / permission denied と resource missing | scope / permission denial | 存在漏洩を避ける endpoint では `not_found` を返さない。Turso 互換で `not_found` が必要な場合は decision に明記する |
+| read-only token / write scope denied と quota exceeded / block_writes | scope / permission denial | quota / block policy は audit または internal reason に残すが client には優先しない |
+| quota exceeded と block_writes | block_writes | operator または policy による明示停止を quota より優先する |
+| recovering / rollback_required / operator_required と normal write | operational state refusal | write commit、metadata commit、success response を行わない |
+| unsupported future feature と invalid field | route / feature ownership 確定後に unsupported | 未所有 route は 404/405、所有済み future feature は規定 501/400。invalid field で unsupported を隠さない |
+| compatibility rule と self-host optimization | compatibility rule | security / durability / data loss を除き、Turso Cloud / libSQL SDK 互換を優先する |
+| persistence conflict と response generation | persistence conflict | success response、snapshot 更新、Done receipt 作成を禁止する |
+| secret / redaction violation と normal error body | redaction violation | 詳細 error を抑止し、artifact/log を再生成する |
+
+**Phase group 最低 decision：**
+
+| Phase group | 必須 decision |
+|-------------|---------------|
+| Phase 1〜5 | CLI/env/TOML priority、data-dir invalid vs DB open failure、JWT missing/invalid vs DB missing、hrana parse error vs auth error、log redaction vs detailed error |
+| Phase 6〜8 | DB name validation vs auth、admin scope denial vs not found、organization/group/location mismatch、quota exceeded vs block_writes、legacy metadata migration failure vs API success |
+| Phase 9〜10 | WebSocket message parse vs auth、stream/transaction rollback vs success frame、ATTACH unsupported vs path denial、metrics read degraded vs unavailable |
+| Phase 11〜13 | replica lag vs primary unavailable、checksum mismatch vs retry、archive manifest missing vs retention cleanup、replication auth denial vs frame not found |
+| Phase 14〜15 | restore rollback_required vs branch write、PITR archive missing vs invalid selector、branch source missing vs permission denied、destructive lock vs quota |
+| Phase 16〜18 | extension signature failure vs allowlist denial、metrics corruption vs read degraded、HA no leader vs split-brain operator_required、promotion conflict vs retry |
+| Phase 19 | adapter shadow diff vs active success、internal adapter failure vs compatibility fallback、rollback flag vs performance target、Turso parity diff vs self-host optimization |
+
+**merge 不可条件：**
+
+| 状態 | 判定 |
+|------|------|
+| conflict が起きる条件に decision ID がない | 実装開始禁止 |
+| handler の最初に一致した if/else で判定し、precedence matrix と対応しない | merge 不可 |
+| 同じ conflict を endpoint / protocol / CLI ごとに異なる error/status で返す | Phase 未完了。ただし Turso 互換差分として明記されている場合を除く |
+| 存在漏洩を避けるべき endpoint で scope denial より `DB_NOT_FOUND` を優先する | merge 不可 |
+| quota、block_writes、recovering、rollback_required、operator_required を write commit 後に判定する | merge 不可 |
+| unsupported / compatibility conflict を `INTERNAL_ERROR`、generic 500、ログのみで隠す | Phase 未完了 |
+| losing behavior の証跡がなく、退けられた判定が副作用を起こしていないことを確認できない | Phase 未完了 |
+
+**Done receipt への反映：**
+
+| Done receipt field | 必須内容 |
+|--------------------|----------|
+| `decision_precedence_result` | decision ID ごとの conflict fixture、selected behavior、error/status snapshot、losing behavior 非発火証跡 |
+| `decision_consistency_result` | HTTP / WebSocket / CLI / job / health 間で同じ conflict が同じ優先順位で処理された証跡 |
+| `decision_compatibility_result` | Turso Cloud、libSQL SDK、previous Phase と異なる precedence がある場合の差分理由。なければ `none` |
+
+Phase decision precedence に関係する仕様変更は、§7.3、§9.1.10、§9.1.11、§9.1.12、§9.1.14、§9.1.23、§9.1.24、§9.1.32、§9.1.33、§9.1.35、§9.1.36、§9.1.37、§9.1.39、§9.1.40、§9.1.41、§9.1.42、§9.2、§9.4、§9.5、§9.6、§9.7、§9.8、§9.15、§9.17、該当 Phase 詳細節を同時更新する。decision precedence matrix がない conflict は、実装者ごとの分岐順差、存在漏洩、誤った retry、commit 後拒否による後続バグ修正を防げないため、実装開始不可とする。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -5424,6 +5495,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Scenario matrix | §9.1.40 に従い、normal、invalid request、auth/scope/quota、persistence/restart、rollback/recovery、concurrency/idempotency、compatibility、unsupported、redaction、operational の scenario と evidence が固定され、manual only / not run / 根拠なし N/A が 0 件になっている | 実装開始禁止。ケース漏れがある場合は Phase 完了扱いにしない |
 | Resource lifecycle | §9.1.41 に従い、resource type、state、allowed/forbidden transition、entry/exit condition、API behavior、write policy、commit order、recovery behavior、state evidence が固定されている | 実装開始禁止。状態遷移未定義または forbidden transition 未検証の場合は Phase 完了扱いにしない |
 | Schema registry | §9.1.42 に従い、request、response、metadata、config、JWT claim、WebSocket message、artifact、log/metric の field-level schema、required/null/default/migration/compatibility/redaction が固定されている | 実装開始禁止。field 意味ズレ、根拠なし null/省略、migration 未定義の場合は Phase 完了扱いにしない |
+| Decision precedence | §9.1.43 に従い、複数条件同時成立時の precedence、selected behavior、losing behavior、error/status/client action、compatibility 差分が固定されている | 実装開始禁止。分岐順の実装依存、存在漏洩、commit 後拒否、protocol 間不一致がある場合は Phase 完了扱いにしない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | 仕様内相互参照 | §9.1.29 に従い、Phase 番号、TC ID、Task ID、API 契約 ID、error code、persistence key、evidence 名、manifest 参照が一致している | 仕様修正 PR に戻す |
 | Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
