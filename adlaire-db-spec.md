@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.151
+**バージョン：** V.162
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.151` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.162` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -5515,7 +5515,7 @@ Phase 1 は「実行可能な CLI skeleton と config 解決の土台」を完�
 | `coverage_closure_result` | help、invalid flag、config precedence、no persistence の coverage gap 0 件 |
 | `review_handoff_result` | 第三者が build/help/config/no persistence を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 1 は CLI skeleton 追加のみ。DB/HTTP/JWT は利用不可である release note |
-| `precision_closure_result` | help/config/no persistence/stub token の artifact path、reviewer 再現 command、未解決判断 0 件 |
+| `precision_closure_result` | help/config/no persistence/stub token の artifact path、reviewer 再現 command、`P1-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
 
 **Phase 2 完全実装精度固定契約：**
 
@@ -5587,7 +5587,7 @@ Phase 2 は data-dir、単一 default DB、metadata 初期値、process lock、l
 | `coverage_closure_result` | tree、metadata、lock、DB open、PRAGMA、integrity、restart、no HTTP exposure の coverage gap 0 件 |
 | `review_handoff_result` | 第三者が init/lock/open/restart/no HTTP を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 2 で data-dir と default DB が作成されるが外部 HTTP API はまだ使えない release note |
-| `precision_closure_result` | data-dir/lock/metadata/default DB/WAL/integrity/restart/no HTTP の artifact path、reviewer 再現 command、未解決判断 0 件 |
+| `precision_closure_result` | data-dir/lock/metadata/default DB/WAL/integrity/restart/no HTTP の artifact path、reviewer 再現 command、`P2-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
 
 **Phase 3 完全実装精度固定契約：**
 
@@ -5668,7 +5668,7 @@ Phase 3 は libSQL client SDK が HTTP 経由で最小 SQL 実行できる hrana
 | `coverage_closure_result` | health、pipeline success/error、malformed JSON、SQL error、close、restart、SDK smoke の gap 0 件 |
 | `review_handoff_result` | 第三者が health/pipeline/error/restart/SDK smoke を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 3 で HTTP API `/v2/health` と `/v2/pipeline` が初公開され、auth はまだ無効である release note |
-| `precision_closure_result` | hrana-http v2 schema、wire snapshot、SDK transcript、restart persistence、unsupported surface の artifact path、reviewer 再現 command、未解決判断 0 件 |
+| `precision_closure_result` | hrana-http v2 schema、wire snapshot、SDK transcript、restart persistence、unsupported surface の artifact path、reviewer 再現 command、`P3-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
 
 **Phase 4 完全実装精度固定契約：**
 
@@ -5761,7 +5761,7 @@ Phase 4 は Phase 3 の hrana-http v2 surface に JWT HS256 認証と `token cre
 | `coverage_closure_result` | startup、auth、permission、token CLI、revoke、redaction、Phase 1〜3 regression の gap 0 件 |
 | `review_handoff_result` | 第三者が auth matrix、permission matrix、token create、restart、secret scan を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 4 で JWT secret 設定時に `/v2/pipeline` が認証必須になり、未設定時は開発用 auth disabled として動く release note |
-| `precision_closure_result` | auth matrix、permission matrix、token persistence、secret redaction、SDK auth transcript、Phase 1〜3 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
+| `precision_closure_result` | auth matrix、permission matrix、token persistence、secret redaction、SDK auth transcript、Phase 1〜3 regression の artifact path、reviewer 再現 command、`P4-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
 
 **Phase 5 完全実装精度固定契約：**
 
@@ -5849,7 +5849,7 @@ Phase 5 は Phase 1〜4 の実装を、構造化ログ、統合テスト、SDK �
 | `coverage_closure_result` | log、SDK、restart、secret、unsupported、Phase 1〜4 regression の gap 0 件 |
 | `review_handoff_result` | 第三者が log parse、SDK CRUD、restart、secret scan、regression を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 5 では API 機能追加はなく、運用ログと互換 regression が完了条件になる release note |
-| `precision_closure_result` | JSONL parser、request log、SDK CRUD、restart persistence、secret scan、unsupported surface、Phase 1〜4 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
+| `precision_closure_result` | JSONL parser、request log、SDK CRUD、restart persistence、secret scan、unsupported surface、Phase 1〜4 regression の artifact path、reviewer 再現 command、`P5-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
 
 **Phase 1〜5 完全実装精度正規化契約：**
 
@@ -5979,7 +5979,7 @@ Phase 6 は Phase 1〜5 の単一 DB HTTP/JWT/SDK 互換を維持したまま、
 | `coverage_closure_result` | route、validation、auth、metadata、isolation、restart、unsupported、regression の gap 0 件 |
 | `review_handoff_result` | 第三者が route、validation、metadata、isolation、restart、unsupported を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 6 で `/{db-name}/v2/pipeline` が追加されるが、DB 作成管理 API はまだ成功応答しない release note |
-| `precision_closure_result` | DB name validation、path routing、default route 後方互換、DB isolation、metadata atomic update、restart restore、Phase 1〜5 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
+| `precision_closure_result` | DB name validation、path routing、default route 後方互換、DB isolation、metadata atomic update、restart restore、Phase 1〜5 regression の artifact path、reviewer 再現 command、`P6-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
 
 **Phase 7 完全実装精度固定契約：**
 
@@ -6077,7 +6077,7 @@ Phase 7 は Phase 6 の multi DB routing に、Adlaire 管理 API、token CRUD�
 | `coverage_closure_result` | admin auth、DB CRUD、token CRUD、scope、revoke、atomicity、concurrency、unsupported、regression の gap 0 件 |
 | `review_handoff_result` | 第三者が admin API、token API、scope、revoke、restart、concurrency を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 7 で `/admin/v1/databases` と `/admin/v1/tokens` が成功応答になり、DB scope JWT が有効になる release note |
-| `precision_closure_result` | Admin auth、DB CRUD、token CRUD、DB scope JWT、revoke immediate effect、metadata/delete consistency、Phase 1〜6 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
+| `precision_closure_result` | Admin auth、DB CRUD、token CRUD、DB scope JWT、revoke immediate effect、metadata/delete consistency、Phase 1〜6 regression の artifact path、reviewer 再現 command、`P7-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
 
 **Phase 8 完全実装精度固定契約：**
 
@@ -6180,7 +6180,7 @@ Phase 8 は Turso Cloud 互換の管理モデルを自己ホスト環境へ導�
 | `coverage_closure_result` | migration、metadata、admin API、Platform API、auth/scope、quota、legacy、unsupported、regression の gap 0 件 |
 | `review_handoff_result` | 第三者が migration、Admin API、Turso API、scope、quota、snapshot、secret scan を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 8 で Turso Cloud 互換の organization/group/location/quota/usage と `/v1/*` が公開される release note |
-| `precision_closure_result` | organization/group/location/quota/usage、`/v1/*` wrapper、legacy metadata migration、scope auth、quota enforcement、Turso snapshot、Phase 1〜7 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
+| `precision_closure_result` | organization/group/location/quota/usage、`/v1/*` wrapper、legacy metadata migration、scope auth、quota enforcement、Turso snapshot、Phase 1〜7 regression の artifact path、reviewer 再現 command、`P8-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
 
 **Phase 9 完全実装精度固定契約：**
 
@@ -6283,7 +6283,7 @@ Phase 9 は hrana-ws v3 WebSocket surface と interactive transaction を完成�
 | `coverage_closure_result` | upgrade、hello、stream、SQL、transaction、store_sql、permission、unsupported、regression の gap 0 件 |
 | `review_handoff_result` | 第三者が WebSocket upgrade、SDK transaction、rollback、store_sql、secret scan を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 9 で hrana-ws v3 `/v3/baton` と `/{db-name}/v3/baton` が公開され、interactive transaction が利用可能になる release note |
-| `precision_closure_result` | WebSocket upgrade、hello/auth、stream/cursor lifecycle、interactive transaction commit/rollback、close cleanup、SDK WS transcript、Phase 1〜8 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
+| `precision_closure_result` | WebSocket upgrade、hello/auth、stream/cursor lifecycle、interactive transaction commit/rollback、close cleanup、SDK WS transcript、Phase 1〜8 regression の artifact path、reviewer 再現 command、`P9-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
 
 **Phase 10 完全実装精度固定契約：**
 
@@ -6379,7 +6379,7 @@ Phase 10 は管理下 DB 間の ATTACH と、Phase 1〜10 の HTTP/WebSocket/DB 
 | `coverage_closure_result` | ATTACH parser、path、policy、protocol、metrics、auth、secret、regression の gap 0 件 |
 | `review_handoff_result` | 第三者が ATTACH allow/deny、任意 path 拒否、metrics counter、secret scan を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 10 で管理下 DB の ATTACH と `GET /admin/v1/metrics` が公開されるが、metrics は再起動で reset される release note |
-| `precision_closure_result` | managed ATTACH allow/deny、arbitrary path reject、metrics counter/gauge、admin auth、secret redaction、Phase 1〜9 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
+| `precision_closure_result` | managed ATTACH allow/deny、arbitrary path reject、metrics counter/gauge、admin auth、secret redaction、Phase 1〜9 regression の artifact path、reviewer 再現 command、`P10-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
 
 **Phase 8〜10 の境界決定：**
 
@@ -6491,7 +6491,7 @@ Phase 11 は primary role の replication 送信側 API を完成させる Phase
 | `coverage_closure_result` | config、auth、SSE、snapshot、heartbeat、status、cleanup、unsupported、regression の gap 0 件 |
 | `review_handoff_result` | 第三者が primary 起動、SSE、snapshot、heartbeat、status、secret scan を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 11 で primary replication API が公開されるが replica apply / redirect はまだ利用不可である release note |
-| `precision_closure_result` | replica registration、WAL stream auth/range/checksum、snapshot consistency、retention、lag metadata、SDK/API compatibility、Phase 1〜10 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
+| `precision_closure_result` | replica registration、WAL stream auth/range/checksum、snapshot consistency、retention、lag metadata、SDK/API compatibility、Phase 1〜10 regression の artifact path、reviewer 再現 command、`P11-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
 
 **Phase 6〜11 完全実装精度正規化契約：**
 
@@ -7001,7 +7001,183 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 | `compatibility_baseline_result` | `P{phase}-COMPAT-*` の artifact をすべて参照する |
 | `secret_redaction_result` | `P{phase}-REDACTION-*` の secret scan をすべて参照する |
 | `regression_result` | `P{phase}-REGRESSION-*` の CI / regression transcript をすべて参照する |
-| `precision_closure_result` | 必ず `P{phase}-PRECISION-CLOSURE` を参照し、coverage gap、open task、open scenario、open decision、known flaky が 0 件であることを示す |
+| `precision_closure_result` | 必ず `P{phase}-PRECISION-CLOSURE` を参照し、coverage gap、open task、open scenario、open decision、known flaky が 0 件であることを示す。さらに `ambiguity_closure_result`、`failure_closure_result`、`review_handoff_result`、`na_closure_result`、`go_no_go_result`、`regression_inheritance_result`、`determinism_result`、`assertion_binding_result`、`negative_surface_result`、`evidence_integrity_result`、`operator_observability_result` の全 field、artifact path、reviewer 再現 command、open count 0 を含める |
+
+**precision_closure_result 標準テンプレート：**
+
+`precision_closure_result` は以下の 11 field をこの名前で持つ。各 field は `status`、`contract_id`、`artifact_path`、`reviewer_command`、`open_count`、`source_section`、`blocking_rule` を必ず含める。field 名、key 名、Contract ID、artifact path、source section のいずれかが本表と一致しない場合は、実装者が意図を推測する余地が残るため Phase 未完了とする。
+
+| field | source_section | artifact_path | blocking_rule |
+|-------|----------------|---------------|---------------|
+| `ambiguity_closure_result` | §9.11.3 | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/ambiguity-closure.json` | open ambiguity 0 件 |
+| `failure_closure_result` | §9.11.4 | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/failure-closure.json` | open failure 0、known flaky 0、unverified 0、missing artifact 0 件 |
+| `review_handoff_result` | §9.11.5 | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/review-handoff.json` | third-party reproduction pass、oral context 0 件 |
+| `na_closure_result` | §9.11.6 | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/na-closure.json` | rootless N/A 0、manual only pass 0、skipped required verification 0 件 |
+| `go_no_go_result` | §9.11.7 | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/go-no-go.json` | entry_go true、exit_go true、blocking item 0 件 |
+| `regression_inheritance_result` | §9.11.8 | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/regression-inheritance.json` | inherited regression failure 0、missing previous Phase regression 0 件 |
+| `determinism_result` | §9.11.9 | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/determinism.json` | flaky 0、nondeterministic artifact 0 件 |
+| `assertion_binding_result` | §9.11.10 | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/assertion-binding.json` | missing assertion 0、oracle binding pass |
+| `negative_surface_result` | §9.11.11 | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/negative-surface.json` | unsupported success 0、denial redaction pass |
+| `evidence_integrity_result` | §9.11.12 | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/evidence-integrity.json` | stale artifact 0、manifest mismatch 0、missing integrity 0 件 |
+| `operator_observability_result` | §9.11.13 | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/operator-observability.json` | operator action gap 0、observability pass、operator secret leak 0 件 |
+
+各 field の `status` は `pass` 固定、`contract_id` は `P{phase}-PRECISION-CLOSURE` 固定、`open_count` は `0` 固定とする。`reviewer_command` は第三者がその field の artifact を生成または検証できる具体 command を記録し、`artifact_path` は上表の標準 path と完全一致させる。`status: pass` だけ、PR description だけ、手元実行ログだけ、または artifact path のない closure field は pass 扱いしてはならない。
+
+**precision_closure_result canonical receipt format：**
+
+Done receipt に記録する `precision_closure_result` は、以下の canonical object を正とする。`closure_fields` は配列ではなく固定 key の object とし、key 漏れ、順序依存、別名、要約だけの pass を禁止する。
+
+| key | 必須値 |
+|-----|--------|
+| `phase` | 対象 Phase 番号。整数のみ |
+| `contract_id` | `P{phase}-PRECISION-CLOSURE` |
+| `summary_status` | `pass`。ただし 11 closure field すべてが `status: pass`、全 `open_count: 0`、artifact path 全件存在、reviewer command 全件再現可能、unsupported / negative / operator observability が pass の場合だけ許可 |
+| `closure_fields` | `ambiguity_closure_result`、`failure_closure_result`、`review_handoff_result`、`na_closure_result`、`go_no_go_result`、`regression_inheritance_result`、`determinism_result`、`assertion_binding_result`、`negative_surface_result`、`evidence_integrity_result`、`operator_observability_result` を固定 key として持つ object |
+| `artifact_manifest` | 11 field の `artifact_path`、生成 command、sha256 または content hash、生成日時の source、secret scan result を列挙する |
+| `reviewer_reproduction` | 11 field の `reviewer_command` と expected exit code、expected artifact path、再現不能時の failure classification を列挙する |
+| `open_counts` | coverage gap、open task、open scenario、open decision、known flaky、open ambiguity、open failure、unverified、missing artifact、rootless N/A、blocking item、regression failure、unsupported success、operator action gap をすべて `0` として列挙する |
+| `generated_at_source` | artifact の生成元を `ci`、`release-check`、`local-docker` のいずれかで示す。時刻だけ、手入力、PR description は不可 |
+
+canonical object は Done receipt 本文にそのまま貼れる Markdown table または JSON object とする。ただし JSON object を使う場合も key 名は本表と完全一致させ、`closure_fields` の 11 key を省略してはならない。
+
+**precision closure artifact manifest schema：**
+
+`artifact_manifest` は 11 closure field と 1:1 で対応する entry を持つ。各 entry は以下の key を必ず持ち、field 名、artifact path、reviewer command が `closure_fields` の同名 field と一致しなければならない。
+
+| key | 必須値 |
+|-----|--------|
+| `field` | 11 closure field のいずれか。別名、短縮名、配列 index は不可 |
+| `artifact_path` | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/{artifact-name}.json` |
+| `producer_command` | artifact を生成した再実行可能 command |
+| `producer_exit_code` | `0` |
+| `content_hash` | 正規化済み artifact 本文の hash |
+| `hash_algorithm` | `sha256` 固定 |
+| `generated_at_source` | `ci`、`release-check`、`local-docker` のいずれか |
+| `secret_scan_result` | `pass`。secret/token/JWT/SQL args/raw path/frame bytes の検出 0 件 |
+| `redaction_policy` | 適用した redaction rule 名、または不要な場合 `none_with_reason` |
+| `reviewer_command` | reviewer が artifact と hash と secret scan を再検証できる command |
+
+`content_hash` の対象は正規化済み artifact 本文だけとする。local absolute path、timestamp、hostname、username、非決定的 temporary path、実行順序で変わる ID は hash 対象から除外し、必要な場合は正規化 rule を artifact 内に記録する。`secret_scan_result` を pass にするには、scan command、対象 path、検出 0 件、redaction policy を manifest entry に残さなければならない。
+
+**precision closure reviewer reproduction schema：**
+
+`reviewer_reproduction` は 11 closure field と 1:1 で対応する entry を持つ。各 entry は以下の key を必ず持ち、artifact と hash の両方を同じ command または連続 command で検証できなければならない。
+
+| key | 必須値 |
+|-----|--------|
+| `field` | 11 closure field のいずれか。`artifact_manifest.field` と一致 |
+| `reviewer_command` | reviewer が artifact existence、content hash、secret scan result を再検証できる command |
+| `working_directory` | repo root 相対または `repo-root`。local absolute path は不可 |
+| `environment_profile` | `ci`、`release-check`、`local-docker` のいずれか |
+| `expected_exit_code` | `0` |
+| `expected_artifact_path` | `artifact_manifest.artifact_path` と完全一致 |
+| `expected_hash_algorithm` | `sha256` |
+| `expected_content_hash` | `artifact_manifest.content_hash` と完全一致 |
+| `timeout_seconds` | 正の整数。未指定、`0`、無制限は不可 |
+| `failure_classification` | `not_run`、`command_failed`、`artifact_missing`、`hash_mismatch`、`secret_scan_failed`、`environment_gap`、`spec_gap` のいずれか |
+
+`environment_profile` が `ci`、`release-check`、`local-docker` 以外の場合、その reproduction entry は無効とする。`failure_classification` は失敗時の分類であり、`summary_status: pass` の場合は全 entry が実行済みで、`failure_classification` に `not_run` または `environment_gap` を含んではならない。
+
+**precision_closure_result review algorithm：**
+
+レビュアーと CI は以下の順序で `precision_closure_result` を評価する。各 step は fail fast とし、失敗した step より後続の step を pass 扱いしてはならない。`summary_status` は最後の step でのみ評価し、途中 step の代替証跡にしてはならない。
+
+| step | 確認内容 | failure `review_result` |
+|------|----------|-------------------------|
+| 1 | `contract_id` が `P{phase}-PRECISION-CLOSURE` と完全一致する | `fail_contract_mismatch` |
+| 2 | canonical key（`phase`、`contract_id`、`summary_status`、`closure_fields`、`artifact_manifest`、`reviewer_reproduction`、`open_counts`、`generated_at_source`）が全て存在する | `fail_missing_key` |
+| 3 | `closure_fields` に 11 closure field が固定 key object として全て存在する | `fail_missing_field` |
+| 4 | 11 field の `artifact_path` が標準 path と完全一致し、Contract ID と Phase 番号を含む | `fail_artifact_path` |
+| 5 | `artifact_manifest` が 11 field の artifact path、生成 command、hash、secret scan result と一致する | `fail_manifest_mismatch` |
+| 6 | `reviewer_reproduction` の各 command が expected exit code で終了し、expected artifact path を生成または検証できる | `fail_reproduction` |
+| 7 | `open_counts` と各 field の `open_count` が全て `0` で一致する | `fail_open_count` |
+| 8 | `summary_status` が `pass` であり、step 1〜7 の失敗が 0 件である | `fail_summary_status` |
+
+`review_result` は `pass`、`fail_contract_mismatch`、`fail_missing_key`、`fail_missing_field`、`fail_artifact_path`、`fail_manifest_mismatch`、`fail_reproduction`、`fail_open_count`、`fail_summary_status` のいずれかだけを許可する。`warning`、`accepted_risk`、`manual pass`、`pass with notes`、空欄は Phase 完了根拠にしてはならない。
+
+**precision closure phase packet freeze checklist：**
+
+実装者は対象 Phase の実装開始前に、Phase packet へ以下の freeze checklist を転記する。freeze checklist は実装 PR の開始境界であり、実装中に closure field 名、artifact path、review command、open count target、summary_status 条件を暗黙変更してはならない。
+
+| freeze key | 必須内容 |
+|------------|----------|
+| `phase` | 対象 Phase 番号 |
+| `contract_id` | `P{phase}-PRECISION-CLOSURE` |
+| `closure_field_set` | 11 closure field 名の完全な一覧 |
+| `artifact_manifest_schema` | `field`、`artifact_path`、`producer_command`、`producer_exit_code`、`content_hash`、`hash_algorithm`、`generated_at_source`、`secret_scan_result`、`redaction_policy`、`reviewer_command` |
+| `reviewer_reproduction_schema` | `field`、`reviewer_command`、`working_directory`、`environment_profile`、`expected_exit_code`、`expected_artifact_path`、`expected_hash_algorithm`、`expected_content_hash`、`timeout_seconds`、`failure_classification` |
+| `review_algorithm_steps` | step 1〜8 と failure `review_result` の対応 |
+| `allowed_review_result_values` | `pass`、`fail_contract_mismatch`、`fail_missing_key`、`fail_missing_field`、`fail_artifact_path`、`fail_manifest_mismatch`、`fail_reproduction`、`fail_open_count`、`fail_summary_status` |
+| `open_count_targets` | coverage gap、open task、open scenario、open decision、known flaky、open ambiguity、open failure、unverified、missing artifact、rootless N/A、blocking item、regression failure、unsupported success、operator action gap がすべて `0` |
+| `forbidden_shortcuts` | `summary_status: pass` だけ、manual only、see CI、配列 `closure_fields`、artifact manifest 省略、reviewer reproduction 省略、open count 省略、freeze 後の暗黙変更 |
+
+freeze 後に closure field 名、artifact path、review command、open count target、review algorithm、allowed review result、`summary_status` 条件を変更する場合は、実装 PR 内の判断で処理せず、仕様修正 PR に戻す。Done receipt は Phase packet の freeze checklist と完全一致しなければならない。
+
+**precision closure done receipt reconciliation gate：**
+
+Phase 完了時の Done receipt は、Phase packet freeze checklist と `precision_closure_result` の実証を以下の gate で照合する。照合対象は Phase packet freeze checklist、canonical receipt format、artifact manifest schema、reviewer reproduction schema、review algorithm result、open count targets とする。Done receipt 側で freeze と違う値へ書き換えること、または実装後に pass 条件を緩めることを禁止する。
+
+| reconciliation field | pass 条件 |
+|----------------------|-----------|
+| `freeze_match_result` | Phase packet の freeze checklist と Done receipt の `phase`、`contract_id`、11 field、schema、review algorithm、allowed review result が完全一致 |
+| `canonical_format_result` | Done receipt が canonical receipt format の全 key を持ち、`closure_fields` が固定 key object である |
+| `manifest_match_result` | `artifact_manifest` が 11 field と 1:1 対応し、path、hash、secret scan、redaction policy が closure field と一致 |
+| `reproduction_match_result` | `reviewer_reproduction` が 11 field と 1:1 対応し、全 command が expected exit code、expected artifact path、expected content hash と一致 |
+| `review_algorithm_result` | step 1〜8 を順序通り実行し、`review_result = pass` である |
+| `open_count_match_result` | Phase packet の `open_count_targets` と Done receipt の `open_counts` がすべて `0` で一致 |
+| `final_reconciliation_result` | 上記 6 field がすべて `pass`。1 件でも `fail`、`missing`、`not_run`、`manual_only` があれば `fail` |
+
+`final_reconciliation_result = pass` の場合だけ Phase 完了候補にできる。`freeze_match_result`、`canonical_format_result`、`manifest_match_result`、`reproduction_match_result`、`review_algorithm_result`、`open_count_match_result` のいずれかを省略した Done receipt は、機能が動作していても Phase 未完了とする。
+
+**precision closure reconciliation failure remediation map：**
+
+reconciliation field が `pass` 以外になった場合、実装者は以下の修正先を先に解消する。失敗 field を `N/A` に逃がすこと、`final_reconciliation_result` だけを pass にすること、artifact だけを差し替えて manifest / hash / reviewer reproduction を更新しないことを禁止する。
+
+| failed field | 修正先 |
+|--------------|--------|
+| `freeze_match_result` | Phase packet freeze checklist、または仕様修正 PR。Done receipt 側だけを書き換えない |
+| `canonical_format_result` | Done receipt の canonical object。key 名、固定 key object、summary 条件を修正 |
+| `manifest_match_result` | artifact manifest、artifact generator、content hash、secret scan、redaction policy を同時修正 |
+| `reproduction_match_result` | reviewer reproduction command、environment profile、expected artifact path、expected content hash、timeout を同時修正 |
+| `review_algorithm_result` | review algorithm の失敗 step と `review_result` を一致させ、fail fast 順序を修正 |
+| `open_count_match_result` | open item closure、failure record、N/A 根拠、regression failure、operator action gap を先に閉じる |
+| `final_reconciliation_result` | 上記 6 field の失敗を先に解消する。final だけ pass にしてはならない |
+
+`reproduction_match_result` の失敗を `environment_gap` のまま pass にしてはならない。環境差分が原因の場合は、`environment_profile`、再現 command、toolchain、Docker / CI / release-check 差分、artifact path を仕様または Phase packet に反映し、再実行で pass するまで Phase 未完了とする。
+
+**precision closure remediation order：**
+
+複数の reconciliation failure が同時に出た場合は、以下の順序で修正する。先順位の失敗が残っている間は、後順位 field を pass にしてはならない。
+
+| order | field | 理由 |
+|-------|-------|------|
+| 1 | `freeze_match_result` | 実装開始前の固定契約が正しくなければ、後続 artifact / review の意味が確定しない |
+| 2 | `canonical_format_result` | Done receipt の構造が固定されなければ、manifest / reproduction を機械照合できない |
+| 3 | `manifest_match_result` | artifact の path、hash、secret scan が確定しなければ、reproduction の期待値が決まらない |
+| 4 | `reproduction_match_result` | reviewer が再現できなければ、review algorithm の pass 根拠にならない |
+| 5 | `review_algorithm_result` | step 順序と failure result が確定しなければ、open count / final を評価できない |
+| 6 | `open_count_match_result` | open item が残る限り final pass は許可しない |
+| 7 | `final_reconciliation_result` | 上記 6 field が pass になった後だけ評価する |
+
+manifest / reproduction を先に直して `freeze_match_result` の失敗を隠すこと、open count が残っている状態で `final_reconciliation_result` を pass にすること、複数失敗を 1 つの `environment_gap` にまとめることを禁止する。
+
+**precision closure cross-reference ledger：**
+
+Phase packet、Done receipt、artifact manifest、reviewer reproduction、review algorithm、reconciliation result は、同じ closure を以下の ledger entry で相互参照する。ledger にない artifact、manifest entry、reproduction entry、review step、reconciliation field は Phase 完了根拠にしてはならない。
+
+| ledger key | 必須値 |
+|------------|--------|
+| `phase` | 対象 Phase 番号 |
+| `contract_id` | `P{phase}-PRECISION-CLOSURE` |
+| `closure_field` | 11 closure field のいずれか |
+| `artifact_path` | 対象 `closure_field` の標準 artifact path |
+| `manifest_entry_id` | `PCR-P{phase}-{closure-field}-manifest` |
+| `reproduction_entry_id` | `PCR-P{phase}-{closure-field}-reproduction` |
+| `review_step` | `artifact_path` は step 4、manifest は step 5、reproduction は step 6、open count は step 7 に対応 |
+| `reconciliation_field` | `manifest_match_result`、`reproduction_match_result`、`review_algorithm_result`、`open_count_match_result` のいずれか |
+| `source_section` | 対応する §9.11.3〜§9.11.13 の節番号 |
+
+`manifest_entry_id` と `reproduction_entry_id` の `{closure-field}` は `ambiguity-closure`、`failure-closure`、`review-handoff`、`na-closure`、`go-no-go`、`regression-inheritance`、`determinism`、`assertion-binding`、`negative-surface`、`evidence-integrity`、`operator-observability` のいずれかとする。別 Phase の Contract ID、別 Phase の artifact path、または `source_section` と `closure_field` の不一致を参照してはならない。
 
 **命名不一致時の判定：**
 
@@ -7010,6 +7186,50 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 | Contract ID、Task ID、Scenario ID、artifact path、Done receipt field のいずれかが相互参照できない | Phase 未完了 |
 | artifact path に Contract ID が含まれない | Phase 未完了 |
 | `precision_closure_result` が `P{phase}-PRECISION-CLOSURE` を参照しない | Phase 未完了 |
+| `precision_closure_result` に §9.11.3〜§9.11.13 に対応する 11 個の closure field が 1 つでも欠ける | Phase 未完了 |
+| closure field 名、key 名、`source_section`、`contract_id` が標準テンプレートと一致しない | Phase 未完了 |
+| closure field の `artifact_path` が `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/...` の標準形でない | Phase 未完了 |
+| closure field が pass でも artifact path、reviewer 再現 command、open count 0 のいずれかを示さない | merge 不可 |
+| closure field が `status: pass` だけで、必須 key、artifact、reviewer command、blocking rule の実証を持たない | merge 不可 |
+| reviewer が同じ command で artifact を再生成または検証できない | merge 不可 |
+| `closure_fields` を配列にして順序依存にする、または固定 key object 以外で表現する | Phase 未完了 |
+| `summary_status: pass` だけで 11 field、artifact manifest、reviewer reproduction、open counts を省略する | merge 不可 |
+| `artifact_manifest` と closure field の `artifact_path` が一致しない | Phase 未完了 |
+| `artifact_manifest` entry が 11 closure field と 1:1 対応しない | Phase 未完了 |
+| manifest entry の `hash_algorithm` が未指定、`sha256` 以外、または `content_hash` の対象が不明 | merge 不可 |
+| `content_hash` に local absolute path、timestamp、hostname、username、非決定的 temporary path が混入している | merge 不可 |
+| `secret_scan_result` が未実行、manual only、抽象記載、または scan command / 対象 path / redaction policy を欠く | merge 不可 |
+| `reviewer_command` が `see CI`、`manual`、`確認済み` など抽象表現だけで、再現可能な command ではない | merge 不可 |
+| `reviewer_reproduction` entry が 11 closure field と 1:1 対応しない | Phase 未完了 |
+| `reviewer_command` が artifact existence と content hash の両方を検証しない | merge 不可 |
+| `timeout_seconds` が未指定、`0`、負数、または無制限である | Phase 未完了 |
+| `environment_profile` が `ci`、`release-check`、`local-docker` 以外である | Phase 未完了 |
+| `failure_classification` が許可値以外、または `environment_gap` を pass 扱いしている | merge 不可 |
+| `not_run` が 1 件でもある状態で `summary_status: pass` とする | merge 不可 |
+| review algorithm の step を飛ばす、順序を入れ替える、fail 後に後続 step で pass 扱いする | merge 不可 |
+| `review_result` が許可値以外、または失敗 step と一致しない | Phase 未完了 |
+| `summary_status` を step 1〜7 の代替証跡として扱う | merge 不可 |
+| Phase packet に precision closure freeze checklist がない | 実装開始禁止 |
+| freeze checklist と Done receipt の `precision_closure_result` が一致しない | Phase 未完了 |
+| freeze 後に closure field 名、artifact path、review command、open count target、review algorithm、allowed review result、`summary_status` 条件を暗黙変更する | merge 不可 |
+| 実装 PR 内で `summary_status` の pass 条件を緩める | merge 不可 |
+| Done receipt に reconciliation field が 1 つでも欠ける | Phase 未完了 |
+| reconciliation field が `pass` 以外、または `fail`、`missing`、`not_run`、`manual_only` を含む | Phase 未完了 |
+| `final_reconciliation_result` が `pass` でない、または 6 field の pass を根拠にしていない | Phase 未完了 |
+| Done receipt 側で freeze checklist と異なる値へ書き換える | merge 不可 |
+| reconciliation failure を `N/A`、`accepted_risk`、`manual_only` で回避する | merge 不可 |
+| failed field を残したまま `final_reconciliation_result` だけを pass にする | merge 不可 |
+| artifact を差し替えて manifest、content hash、reviewer reproduction を更新しない | merge 不可 |
+| reproduction 失敗を `environment_gap` のまま pass 扱いする | merge 不可 |
+| remediation order を飛ばす、または先順位 failure を残したまま後順位 field を pass にする | merge 不可 |
+| manifest / reproduction を先に直して `freeze_match_result` の失敗を隠す | merge 不可 |
+| open count が残っている状態で `final_reconciliation_result` を pass にする | merge 不可 |
+| 複数 failure を 1 つの `environment_gap` にまとめる | merge 不可 |
+| cross-reference ledger にない artifact、manifest entry、reproduction entry、review step、reconciliation field を Phase 完了根拠にする | Phase 未完了 |
+| `manifest_entry_id` または `reproduction_entry_id` が `PCR-P{phase}-{closure-field}-manifest` / `PCR-P{phase}-{closure-field}-reproduction` の形式でない | Phase 未完了 |
+| 別 Phase の Contract ID、artifact path、manifest entry、reproduction entry を参照する | merge 不可 |
+| `source_section` と `closure_field` の組み合わせが §9.11.3〜§9.11.13 の対応と一致しない | Phase 未完了 |
+| `未解決判断 0 件` だけで `precision_closure_result` を pass とする | merge 不可 |
 | Contract ID に timestamp、random ID、local username、host name、absolute path 由来文字列が含まれる | merge 不可 |
 | artifact が生成されていないのに Done receipt で pass とする | merge 不可 |
 | snapshot だけを更新し、対応する Contract ID、oracle、manifest、Done receipt を更新しない | merge 不可 |
@@ -11996,7 +12216,7 @@ Phase 12 は、Phase 11 の primary replication API を replica が消費し、r
 | `secret_redaction_result` | response/log/artifact に replication token、JWT、SQL args、frame bytes が残らない scan |
 | `review_handoff_result` | 第三者が primary + 2 replica、primary down、restart、redirect、checksum mismatch を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 12 で replica read/catch-up/redirect が利用可能になるが archive/PITR/branch/HA は未提供である release note |
-| `precision_closure_result` | replica state、snapshot bootstrap、WAL catch-up、redirect、primary down、checksum mismatch、multi replica、Phase 1〜11 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
+| `precision_closure_result` | replica state、snapshot bootstrap、WAL catch-up、redirect、primary down、checksum mismatch、multi replica、Phase 1〜11 regression の artifact path、reviewer 再現 command、`P12-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
 
 #### 実装詳細
 
@@ -12248,7 +12468,7 @@ Phase 13 は、Phase 11〜12 で生成・消費される WAL frame を、PITR / 
 | `secret_redaction_result` | response/log/artifact に token、JWT、SQL args、frame bytes、backup body が残らない scan |
 | `review_handoff_result` | 第三者が archive write、restart check、corruption、retention cleanup、disabled mode を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 13 で WAL archive と retention が有効化されるが backup/restore/PITR/branch API は未提供である release note |
-| `precision_closure_result` | manifest schema、archive write、snapshot archive、retention cleanup、corruption detection、disabled mode、Phase 1〜12 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
+| `precision_closure_result` | manifest schema、archive write、snapshot archive、retention cleanup、corruption detection、disabled mode、Phase 1〜12 regression の artifact path、reviewer 再現 command、`P13-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
 
 ---
 
@@ -12560,7 +12780,7 @@ Phase 14 は、Phase 13 の WAL archive / manifest を入力として backup、r
 | `secret_redaction_result` | response/log/artifact に token、JWT、SQL args、backup body、uploaded DB bytes が残らない scan |
 | `review_handoff_result` | 第三者が backup、restore rollback、PITR success/corrupt/range outside、startup recovery を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 14 で backup/restore/PITR が公開され、失敗時は rollback または restore-failed marker に収束する release note |
-| `precision_closure_result` | backup consistency、restore rollback、PITR replay、startup recovery、quota/block/auth precedence、Phase 1〜13 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
+| `precision_closure_result` | backup consistency、restore rollback、PITR replay、startup recovery、quota/block/auth precedence、Phase 1〜13 regression の artifact path、reviewer 再現 command、`P14-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
 
 ---
 
@@ -12814,7 +13034,7 @@ Phase 15 は、Phase 14 の backup/PITR 基盤を使い、source DB から独立
 | `secret_redaction_result` | response/log/artifact に token、JWT、SQL args、absolute path、raw branch request body が残らない scan |
 | `review_handoff_result` | 第三者が current/PITR branch、delete/recovery、restart、source delete denial、seed compatibility を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 15 で branch DB が独立 resource として利用可能になり、merge/diff/COW/extension は未提供である release note |
-| `precision_closure_result` | branch metadata、current/timestamp/frame create、delete recovery、routing isolation、seed compatibility、Phase 1〜14 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
+| `precision_closure_result` | branch metadata、current/timestamp/frame create、delete recovery、routing isolation、seed compatibility、Phase 1〜14 regression の artifact path、reviewer 再現 command、`P15-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
 
 ---
 
@@ -12990,7 +13210,7 @@ Phase 16 は、事前配置済み SQLite `.so` extension を Admin API で登録
 | `secret_redaction_result` | response/log/artifact に token、JWT、SQL args、absolute path、env 展開値が残らない scan |
 | `review_handoff_result` | 第三者が register/load/delete/restart/path rejection/SQL rejection を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 16 で事前配置済み `.so` extension の登録/削除が可能になり、upload/Wasm/metrics/HA は未提供である release note |
-| `precision_closure_result` | extension manifest、allowlist、sha256、canonical path/symlink rejection、new connection load、SQL bypass rejection、Phase 1〜15 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
+| `precision_closure_result` | extension manifest、allowlist、sha256、canonical path/symlink rejection、new connection load、SQL bypass rejection、Phase 1〜15 regression の artifact path、reviewer 再現 command、`P16-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
 
 ### Phase 17：メトリクス永続化・外部監視連携
 
@@ -13168,7 +13388,7 @@ Phase 17 は、Phase 10 の in-memory metrics を永続 counter と Prometheus t
 | `secret_redaction_result` | response/log/artifact に token、JWT、SQL args、raw path、absolute path が残らない scan |
 | `review_handoff_result` | 第三者が snapshot restore、Prometheus output、quota boundary、corrupt recovery、redaction を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 17 で永続 metrics と Prometheus text endpoint が利用可能になり、alerting/remote write/HA は未提供である release note |
-| `precision_closure_result` | metrics snapshot persistence、Prometheus format、counter/gauge restore、usage/quota boundary、label redaction、Phase 1〜16 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
+| `precision_closure_result` | metrics snapshot persistence、Prometheus format、counter/gauge restore、usage/quota boundary、label redaction、Phase 1〜16 regression の artifact path、reviewer 再現 command、`P17-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
 
 ### Phase 18：HA・自動フェイルオーバー
 
@@ -13332,7 +13552,7 @@ Phase 18 は、primary/replica 構成で single-leader HA を完成させる Pha
 | `secret_redaction_result` | response/log/artifact に HA token、JWT、SQL args、frame bytes が残らない scan |
 | `review_handoff_result` | 第三者が promote/demote/redirect/split-brain/restart/partition を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 18 で HA status/promote/demote と single-leader failover が利用可能になり、multi-primary/内製化は未提供である release note |
-| `precision_closure_result` | HA state、term monotonic、promote/demote、redirect/no leader、split-brain rejection、restart recovery、Phase 1〜17 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
+| `precision_closure_result` | HA state、term monotonic、promote/demote、redirect/no leader、split-brain rejection、restart recovery、Phase 1〜17 regression の artifact path、reviewer 再現 command、`P18-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
 
 ### Phase 19：libSQL 内部コンポーネント段階的内製化
 
@@ -13468,7 +13688,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.151` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.162` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
@@ -13482,7 +13702,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 | `phase_boundary_result` | Phase 20 以降へ送った項目、Phase 19 で未実装の理由、production path 差分なし |
 | `review_handoff_result` | 第三者が config、shadow、active、rollback、SDK transcript を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 19 で内製 adapter 境界が利用可能になり、外部 API と既定挙動は変わらない release note |
-| `precision_closure_result` | config flags、shadow/active/rollback、adapter boundary、SDK transcript、performance/crash recovery、Phase 1〜18 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
+| `precision_closure_result` | config flags、shadow/active/rollback、adapter boundary、SDK transcript、performance/crash recovery、Phase 1〜18 regression の artifact path、reviewer 再現 command、`P19-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
 
 **Phase 12〜19 完全実装精度正規化契約：**
 
