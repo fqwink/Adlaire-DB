@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.77
+**バージョン：** V.78
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.77` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.78` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.77` の次は `V.78` とし、以後 `V.79`、`V.80` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.78` の次は `V.79` とし、以後 `V.80`、`V.81` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -2554,6 +2554,77 @@ failure closure の追跡表は PR description または `docs/phase-evidence/ph
 
 並行性に関係する仕様変更は、manifest の `Endpoint map`、`Persistence map`、`Regression set`、該当 Contract ID、concurrency artifact を同時更新する。並行性 test がない状態で「単体では動く」ことを Phase 完了根拠にしてはならない。
 
+#### 9.1.17 Observability / audit / redaction 固定契約
+
+各 Phase 実装 PR は、ログ、request id、trace id、監査相当記録、metric、秘匿、運用証跡の扱いを実装開始前に固定しなければならない。状態変更、認証、権限拒否、quota、replication、backup/restore、branch、extension、HA、internal adapter に関係する変更は、観測不能または secret 漏洩の可能性が残る場合、その Phase は未完了である。
+
+**request id / trace id：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| request id 生成 | inbound に `x-request-id` がある場合は安全な長さ・文字種に正規化して使用する。ない場合は server が生成する |
+| trace id | Phase 内で分散 trace を実装しない場合でも、log / artifact では `request_id` で同一 request を追跡できること |
+| response header | public/admin API は `x-request-id` を返す。WebSocket は transcript artifact に connection id と stream id を残す |
+| snapshot 正規化 | request id / trace id / connection id は artifact 上で `<normalized-id>` に置換する |
+| 禁止 | request id に Authorization、JWT、SQL、path の絶対値、user input body 全体を入れてはならない |
+
+**ログ level 固定表：**
+
+| Level | 発火条件 | 禁止内容 |
+|-------|----------|----------|
+| `INFO` | 起動、停止、request 完了、admin 操作成功、migration 完了、backup/restore/branch 成功 | token、SQL args、backup body、secret value |
+| `WARN` | auth disabled、unsupported/stub、非推奨 config、recoverable corruption、retryable replication lag、Phase 前 config 無効化 | request body 全体、secret、絶対 extension path |
+| `ERROR` | 起動失敗、永続化破損、migration/restore rollback 不能、secret scan failure、HA split-brain、unrecoverable adapter error | panic backtrace に secret/raw path/body を含めること |
+| `DEBUG` / `TRACE` | 開発補助。production default では無効 | INFO/WARN/ERROR で禁止された値すべて |
+
+**出力禁止 field：**
+
+| 種別 | 禁止対象 | 代替表現 |
+|------|----------|----------|
+| auth | Authorization header、JWT、Bearer token、admin/platform/replication/HA token | `<redacted-secret>` |
+| SQL | SQL bind args、生 SQL args、user data row value | count、type、statement kind |
+| backup / restore | backup body、uploaded DB body、replication frame bytes | byte length、checksum、frame_no |
+| filesystem | extension 絶対 path、data-dir 絶対 path、local username | logical resource name、`<normalized-path>` |
+| config | secret file contents、env secret value | key name、source type、redacted marker |
+| error | upstream error message 内の secret / path / SQL args | sanitized error code + redacted message |
+
+**audit 相当記録：**
+
+| 操作 | 必須記録 | Phase 対象外の場合 |
+|------|----------|-------------------|
+| token create / revoke | actor scope、target token id、result、request id。secret は記録しない | manifest に対象外理由を記載 |
+| DB create / delete / configuration update | actor scope、organization/group/db、operation、result | Phase 前 route は 501 stub log のみ |
+| quota / usage enforcement | db/org/group、limit、usage、denied/allowed、request id | quota 未実装 Phase は成功応答禁止 |
+| backup / restore / PITR | db、operation、size、checksum、commit/rollback result | backup body は記録禁止 |
+| replication / HA | role、node id、frame_no、term、leader、result | token/frame bytes は記録禁止 |
+| extension load / unload | extension name、version、sha256、state、result | absolute path は記録禁止 |
+| internal adapter switch | flag、adapter name、mode、compat result、rollback result | silent fallback 禁止 |
+
+audit 相当記録は、Phase 8 の `/v1/organizations/{org}/audit-logs` API を実装することを意味しない。audit logs API が unsupported の Phase では、内部 log / artifact として記録し、API は該当 unsupported 固定表に従う。
+
+**必須 evidence：**
+
+| Evidence | 必須内容 |
+|----------|----------|
+| log snapshot | INFO/WARN/ERROR の代表 log、request id、status、duration、result |
+| redaction sample | token、JWT、SQL args、backup body、extension path が redacted されること |
+| secret scan result | log artifact / snapshot / fixture に secret がないこと |
+| audit matrix | 対象操作、記録 field、禁止 field、対象外理由 |
+| failure log | rollback、migration failure、auth denial、quota denial の sanitized log |
+
+**禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| secret / token / SQL args / backup body / absolute extension path が log または artifact に残る | merge 不可 |
+| state-changing operation に request id 付き log / audit 相当記録がない | Phase 未完了 |
+| auth denial / scope denial / quota denial の log redaction test がない | Phase 未完了 |
+| unsupported/stub log に request body、token、upload binary が出る | merge 不可 |
+| DEBUG/TRACE なら secret を出してよい扱いにする | merge 不可 |
+| audit logs API 未実装を理由に内部記録も省略する | Phase 未完了 |
+
+observability に関係する仕様変更は、manifest の `Security map`、`Regression set`、該当 SEC 契約 ID、log artifact、secret scan artifact を同時更新する。ログが「見やすい」だけで、秘匿・追跡・失敗調査の契約を満たさない場合は Phase 完了扱いにしない。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -3189,7 +3260,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Error code | 失敗条件ごとの `code` が §7.3 / §9.7 に存在する | 先に error code を追加する |
 | 永続化 | ファイル名、schema、atomic update、rollback、破損時挙動が §9.6 に明記されている | 書き込み処理を実装しない |
 | 認証/認可 | 必要 token、scope、ro/rw、DB scope の判定順が明記されている | success response を返す API を公開しない |
-| ログ/秘匿 | 出力 field と秘匿対象が §12 / §9.14 に明記されている | request/SQL/token をログに出す実装を入れない |
+| ログ/秘匿 | §9.1.17、§12、§9.14 に従い、出力 field、request id、audit 相当記録、秘匿対象、redaction evidence が明記されている | request/SQL/token をログに出す実装を入れない |
 | 並行性 | §9.1.16 に従い、同時 request、resource lock、idempotency、shutdown、transaction の扱いが定義されている | 並行実行で状態を変更する処理を入れない |
 | 後方互換 | 既存 endpoint/schema/config への影響と migration path が明記されている | 既存契約を変更しない |
 | テスト | §9.8 の該当 Phase 行に正常/異常/認可/永続化/障害系がある | 完了扱いにしない |
