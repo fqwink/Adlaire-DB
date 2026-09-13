@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.111
+**バージョン：** V.112
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.111` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.112` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -4005,6 +4005,7 @@ branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§
 | `rollout_readiness_matrix` | §9.1.46 の起動、停止、再起動、rollback、health、operator action、release 可否 |
 | `compatibility_baseline_matrix` | §9.1.47 の Turso Cloud / libSQL SDK 互換 baseline、refresh trigger、差分分類、証跡 |
 | `security_abuse_matrix` | §9.1.48 の attack surface、untrusted input、bypass attempt、denial、redaction、audit、regression |
+| `ambiguity_closure_matrix` | §9.1.49 の implementation question、推奨決定、却下案、根拠、影響範囲、証跡 |
 | `completion_gate` | merge 前に満たす Done 条件と失敗時の扱い |
 
 **Phase group 粒度：**
@@ -4104,6 +4105,7 @@ Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§
 | `rollout_readiness_result` | §9.1.46 の rollout ID ごとの startup/shutdown/restart/rollback/health/operator/compat/data safety 証跡 |
 | `compatibility_baseline_result` | §9.1.47 の baseline ID ごとの upstream source、snapshot / SDK version、差分分類、refresh 可否、証跡 |
 | `security_abuse_result` | §9.1.48 の security case ID ごとの bypass denial、redaction、audit/log、quota/rate/persistence、証跡 |
+| `ambiguity_closure_result` | §9.1.49 の ambiguity ID ごとの採用決定、却下案、仕様反映、証跡、open ambiguity 0 件 |
 | `reviewer_decision` | `Done`、`Not Done`、`Spec correction required` のいずれか |
 
 **Phase group Done minimum：**
@@ -5152,6 +5154,63 @@ Phase compatibility baseline に関係する仕様変更は、§1.4、§1.5、§
 
 Phase security abuse に関係する仕様変更は、§7.3、§9.1.10、§9.1.11、§9.1.14、§9.1.17、§9.1.18、§9.1.21、§9.1.23、§9.1.24、§9.1.26、§9.1.32、§9.1.33、§9.1.36、§9.1.37、§9.1.39、§9.1.40、§9.1.42、§9.1.43、§9.1.44、§9.1.45、§9.1.46、§9.1.47、§9.2、§9.4、§9.5、§9.6、§9.7、§9.8、§9.14、§9.17、該当 Phase 詳細節を同時更新する。security abuse matrix がない Phase 実装 PR は、攻撃面、bypass、denial、redaction、persistence no-op の根拠が未確定であるため、実装開始不可とする。
 
+#### 9.1.49 Phase ambiguity closure / implementation decision table 固定契約
+
+各 Phase の実装 PR は、実装者が仕様本文を読んだ時点で迷う可能性がある判断を ambiguity closure matrix として実装開始前に閉じなければならない。曖昧なまま実装し、レビュー、テスト失敗、運用投入、後続 Phase で判断を補うことは禁止する。選択肢が複数ある場合は、推奨決定、却下した案、根拠、影響範囲、証跡、再検討条件を仕様本文に固定する。
+
+**Ambiguity closure matrix 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `ambiguity_id` | `AMB-P{phase}-{surface}-{number}` 形式の一意 ID |
+| `phase` | 判断を閉じる Phase |
+| `implementation_question` | 実装者が迷う具体的な問い。例: auth と quota の優先、metadata 欠損時の扱い、retry 可否 |
+| `candidate_options` | 検討した選択肢。最低 2 案。選択肢が 1 つしかない場合は理由 |
+| `selected_decision` | 採用する挙動、status、error code、schema、commit order、log、client action |
+| `rejected_options` | 却下した案と却下理由。Turso Cloud 互換、自己ホスト安全性、後方互換、運用性への影響を含める |
+| `decision_basis` | 参照する仕様節、Turso Cloud / libSQL SDK baseline、既存 invariant、security / persistence 根拠 |
+| `affected_contracts` | 同時更新が必要な API、schema、error、persistence、security、compatibility、test、artifact |
+| `edge_cases` | null、missing、duplicate、race、restart、legacy、unsupported、malformed、large input、permission denied |
+| `not_applicable_rule` | N/A を認める条件。根拠なし N/Aは禁止 |
+| `reopen_trigger` | upstream change、仕様変更、regression、security finding、migration failure など再検討条件 |
+| `evidence` | snapshot、fixture、oracle、decision log、spec diff、review checklist |
+
+**Phase group ambiguity minimum：**
+
+| Phase group | 最低 ambiguity closure |
+|-------------|------------------------|
+| Phase 1〜5 | CLI flag/env/TOML/default 優先、data-dir lock、default DB open failure、JWT missing/invalid/revoked、hrana error status |
+| Phase 6〜8 | DB 名衝突、org/group/location scope、quota/block precedence、legacy metadata migration、Platform API 互換差分 |
+| Phase 9〜10 | WebSocket close 時 tx、stream id 再利用、ATTACH 対象外、read-only token write、metrics counter 更新タイミング |
+| Phase 11〜13 | replication frame ordering、checksum 不一致、snapshot lag、archive retention、replica retry/backoff |
+| Phase 14〜15 | restore/PITR 失敗時 rollback、branch seed source、delete protection、quota before commit、source unavailable |
+| Phase 16〜18 | extension allowlist/signature、Prometheus label、metrics snapshot 破損、HA promote/demote、split-brain handling |
+| Phase 19 | shadow diff 許容範囲、active switch 条件、internal fallback、performance regression 閾値、rollback flag |
+
+**曖昧表現禁止事項：**
+
+| 表現 / 状態 | 判定 |
+|-------------|------|
+| `TBD`、`TODO`、`FIXME`、`未定`、`後で決める` が production path に残る | 実装開始禁止 |
+| `実装判断`、`よしなに`、`必要に応じて`、`適宜`、`可能なら` を完了条件に使う | merge 不可 |
+| 複数の valid behavior があるのに selected decision がない | 実装開始禁止 |
+| 却下案と却下理由がない | review failure |
+| N/A に仕様本文の根拠がない | Phase 未完了 |
+| upstream / SDK / previous Phase と差分があるのに decision basis がない | merge 不可 |
+| error code、status、client action、commit order、redaction のいずれかを実装者判断にする | merge 不可 |
+| ambiguity closure が PR description のみで仕様本文にない | 仕様として扱わない |
+| open ambiguity が 1 件以上ある状態で Done receipt を出す | Phase 未完了 |
+
+**Done receipt への反映：**
+
+| Done receipt field | 必須内容 |
+|--------------------|----------|
+| `ambiguity_closure_result` | ambiguity ID ごとの selected decision、rejected options、decision basis、affected contracts、evidence |
+| `open_ambiguity_count` | `0` 固定。0 以外は Phase 未完了 |
+| `decision_reopen_result` | reopen trigger 該当なし、または該当時の仕様更新と regression 結果 |
+
+Phase ambiguity closure に関係する仕様変更は、§0、§7.3、§9.1.10、§9.1.11、§9.1.12、§9.1.14、§9.1.15、§9.1.18、§9.1.19、§9.1.20、§9.1.21、§9.1.22、§9.1.23、§9.1.24、§9.1.29、§9.1.32、§9.1.33、§9.1.35、§9.1.38、§9.1.39、§9.1.40、§9.1.41、§9.1.42、§9.1.43、§9.1.44、§9.1.45、§9.1.46、§9.1.47、§9.1.48、§9.2、§9.4、§9.5、§9.6、§9.7、§9.8、§9.11、§9.14、§9.17、該当 Phase 詳細節を同時更新する。ambiguity closure matrix がない Phase 実装 PR は、実装判断、N/A、例外、error/status、commit order、互換差分の根拠が未確定であるため、実装開始不可とする。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -5814,6 +5873,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Rollout readiness | §9.1.46 に従い、startup、shutdown、restart、rollback、health、operator action、compatibility、data safety、blocked release reason が固定されている | release / deploy / production enable 禁止。Phase Done だけで rollout ready 扱い、rollback 未検証、operator_required 隠蔽、環境差分未記録の場合は運用投入不可 |
 | Compatibility baseline | §9.1.47 に従い、Turso Cloud、libSQL SDK、hrana、legacy metadata、previous Phase の baseline、snapshot / SDK version、refresh trigger、差分分類、証跡が固定されている | 実装開始禁止。実装都合の snapshot 更新、SDK transcript 欠落、upstream 未確認、自己ホスト差分理由なし、古い baseline のまま Done / rollout ready は不可 |
 | Security abuse / bypass resistance | §9.1.48 に従い、attack surface、untrusted input、required control、bypass attempt、expected denial、redaction、audit/log、quota/rate、persistence no-op が固定されている | 実装開始禁止。auth/scope/quota bypass、secret 漏洩、path traversal、commit 後拒否、replay 二重処理、manual only security case がある場合は Phase 完了扱いにしない |
+| Ambiguity closure / implementation decision | §9.1.49 に従い、implementation question、candidate options、selected decision、rejected options、decision basis、affected contracts、edge cases、reopen trigger が固定されている | 実装開始禁止。TBD、実装判断、根拠なし N/A、open ambiguity、error/status/commit order/redaction の未決定がある場合は Phase 完了扱いにしない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | 仕様内相互参照 | §9.1.29 に従い、Phase 番号、TC ID、Task ID、API 契約 ID、error code、persistence key、evidence 名、manifest 参照が一致している | 仕様修正 PR に戻す |
 | Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
