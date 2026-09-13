@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.107
+**バージョン：** V.108
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.107` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.108` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -4001,6 +4001,7 @@ branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§
 | `schema_registry` | §9.1.42 の field-level schema、required/null/default/migration/compatibility/redaction 契約 |
 | `decision_precedence_matrix` | §9.1.43 の複数条件同時成立時の優先順位、selected behavior、losing behavior、error/status/client action |
 | `coverage_closure_matrix` | §9.1.44 の Contract ID / source matrix / test / artifact / oracle / N/A reason の網羅完了表 |
+| `change_impact_matrix` | §9.1.45 の実装中変更に対する影響範囲、同時更新対象、承認状態、drift closure |
 | `completion_gate` | merge 前に満たす Done 条件と失敗時の扱い |
 
 **Phase group 粒度：**
@@ -4096,6 +4097,7 @@ Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§
 | `schema_registry_result` | §9.1.42 の schema ID ごとの field coverage、unknown/null/default/migration/redaction evidence |
 | `decision_precedence_result` | §9.1.43 の decision ID ごとの precedence 実行結果、selected behavior、error/status snapshot、losing behavior 非発火証跡 |
 | `coverage_closure_result` | §9.1.44 の coverage ID ごとの pass/fail/N/A、gap 0 件、test/artifact/oracle 実在証跡 |
+| `change_impact_result` | §9.1.45 の change ID ごとの affected sections/matrices/tests/artifacts 更新完了、drift 0 件、承認証跡 |
 | `reviewer_decision` | `Done`、`Not Done`、`Spec correction required` のいずれか |
 
 **Phase group Done minimum：**
@@ -4911,6 +4913,66 @@ Phase decision precedence に関係する仕様変更は、§7.3、§9.1.10、§
 
 Phase coverage closure に関係する仕様変更は、§9.1.7、§9.1.8、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.1.24、§9.1.29、§9.1.32、§9.1.33、§9.1.35、§9.1.36、§9.1.38、§9.1.39、§9.1.40、§9.1.41、§9.1.42、§9.1.43、§9.2、§9.4、§9.5、§9.6、§9.7、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。coverage closure matrix がない Phase 実装 PR は、契約定義と実装証跡の未対応、検証漏れ、根拠なし N/A、旧 Phase regression 漏れによる後続バグ修正を防げないため、実装開始不可とする。
 
+#### 9.1.45 Phase change impact / drift control matrix 固定契約
+
+各 Phase の実装 PR は、実装中に scope、API、schema、metadata、error、auth、quota、lifecycle、test、oracle、artifact、compatibility のいずれかを変更する必要が生じた場合、変更前に change impact matrix を更新しなければならない。Phase packet freeze 後の暗黙変更、PR description だけの説明、snapshot だけの更新、または実装都合の仕様 drift を禁止する。
+
+**Change impact matrix 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `change_id` | `CHG-P{phase}-{number}` 形式の一意 ID |
+| `phase` | 変更が発生した Phase |
+| `change_type` | scope / api / request_response / error / persistence_schema / auth_scope_quota / lifecycle_state / compatibility / oracle_snapshot / test_artifact / dependency / operational |
+| `changed_contract` | 変更対象の Contract ID、schema ID、scenario ID、decision ID、coverage ID |
+| `affected_sections` | 同時更新する仕様節番号。最低でも変更対象節、§9.1.32、§9.1.33、§9.17 を含める |
+| `affected_matrices` | dependency、invariant、scenario、resource lifecycle、schema registry、decision precedence、coverage closure のうち影響する表 |
+| `affected_tests` | 追加・変更・再実行する TC、unit、integration、SDK、Turso snapshot、regression command |
+| `affected_artifacts` | 更新する snapshot、fixture、transcript、compat diff、secret scan、CI output、Done receipt |
+| `compatibility_impact` | Turso Cloud、libSQL SDK、legacy metadata、previous Phase への影響。影響なしの場合も根拠を明記 |
+| `migration_impact` | metadata / file / config / JWT claim / artifact schema migration の要否、old/new/corrupt fixture |
+| `rollback_impact` | rollback 手順、rollback flag、復旧 marker、operator_required への影響 |
+| `regression_expansion` | 追加する previous Phase regression、互換 snapshot、failure injection |
+| `approval_state` | `not_required`、`approved`、`spec_pr_required`、`blocked`。仕様変更を伴う場合は承認済みでなければならない |
+| `closure_evidence` | 更新後に drift 0 件を示す cross-reference scan、coverage result、artifact path |
+
+**変更種別別の同時更新表：**
+
+| Change type | 同時更新必須 |
+|-------------|--------------|
+| API route / method / path | §9.5、Phase 詳細節、API Contract ID、error snapshot、scenario matrix、coverage closure、SDK/Turso snapshot |
+| request / response field | schema registry、API snapshot、validation rule、compatibility impact、redaction、coverage closure |
+| error code / status / retry | §7.3、§9.7、decision precedence、error oracle、client action、regression test |
+| metadata / persistence schema | §9.6、migration、rollback、resource lifecycle、invariant、old/new/corrupt fixture |
+| auth / scope / quota / block policy | security contract、decision precedence、scenario matrix、denial snapshot、redaction、compatibility impact |
+| lifecycle / state transition | resource lifecycle、operational state、recovery runbook、forbidden transition test、health snapshot |
+| Turso Cloud / SDK compatibility | compatibility contract、mode boundary、snapshot source、diff reason、regression expansion、migration / rollback impact |
+| test / oracle / snapshot | acceptance oracle、coverage closure、artifact path、normalization rule、snapshot update reason |
+| Phase scope / target surface | Phase packet、manifest、§9.2、§9.4、dependency graph、coverage closure、Done receipt criteria |
+
+**drift control 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| Phase packet freeze 後に scope / API / schema / error / persistence を変更し、change ID がない | 実装開始禁止または Phase 未完了 |
+| 実装都合で仕様外 field、metadata、error、config を追加する | merge 不可 |
+| PR description だけで変更理由を説明し、仕様本文を更新しない | 仕様として扱わない |
+| snapshot / fixture / expected だけを更新し、oracle と仕様本文を更新しない | merge 不可 |
+| compatibility 影響なしと書くだけで SDK / Turso / previous Phase regression を増やさない | Phase 未完了 |
+| migration / rollback 影響を未評価のまま metadata / file schema を変更する | merge 不可 |
+| affected matrices のうち 1 つでも旧 Contract ID / 旧 field / 旧 error を参照する | Phase 未完了 |
+| approval_state が `spec_pr_required` / `blocked` のまま実装を進める | 実装禁止 |
+
+**Done receipt への反映：**
+
+| Done receipt field | 必須内容 |
+|--------------------|----------|
+| `change_impact_result` | change ID ごとの affected sections/matrices/tests/artifacts、更新完了、承認状態、closure evidence |
+| `drift_closure_result` | Phase packet、manifest、仕様本文、test、artifact、Done receipt の drift 0 件を示す scan 結果 |
+| `compatibility_reassessment_result` | change によって再評価した Turso Cloud、libSQL SDK、previous Phase、migration、rollback の結果 |
+
+Phase change impact / drift control に関係する仕様変更は、§0、§7.3、§9.1.10、§9.1.11、§9.1.12、§9.1.13、§9.1.14、§9.1.15、§9.1.23、§9.1.24、§9.1.29、§9.1.32、§9.1.33、§9.1.35、§9.1.38、§9.1.39、§9.1.40、§9.1.41、§9.1.42、§9.1.43、§9.1.44、§9.2、§9.4、§9.5、§9.6、§9.7、§9.8、§9.11、§9.15、§9.17、該当 Phase 詳細節を同時更新する。change impact matrix がない Phase 実装 PR は、実装中の仕様 drift、古い Contract ID、古い snapshot、互換影響見落とし、migration / rollback 漏れによる後続バグ修正を防げないため、実装開始不可とする。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -5569,6 +5631,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Schema registry | §9.1.42 に従い、request、response、metadata、config、JWT claim、WebSocket message、artifact、log/metric の field-level schema、required/null/default/migration/compatibility/redaction が固定されている | 実装開始禁止。field 意味ズレ、根拠なし null/省略、migration 未定義の場合は Phase 完了扱いにしない |
 | Decision precedence | §9.1.43 に従い、複数条件同時成立時の precedence、selected behavior、losing behavior、error/status/client action、compatibility 差分が固定されている | 実装開始禁止。分岐順の実装依存、存在漏洩、commit 後拒否、protocol 間不一致がある場合は Phase 完了扱いにしない |
 | Coverage closure | §9.1.44 に従い、全 Contract ID / schema ID / scenario ID / decision ID が test、artifact、oracle、regression、N/A 理由へ対応している | 実装開始禁止。coverage gap、manual only pass、根拠なし N/A、旧 Phase regression 漏れがある場合は Phase 完了扱いにしない |
+| Change impact / drift control | §9.1.45 に従い、実装中の scope、API、schema、error、metadata、auth、test、oracle、compatibility 変更が change ID、同時更新範囲、承認状態、closure evidence で閉じている | 実装開始禁止。packet freeze 後の暗黙変更、snapshot だけ更新、互換影響未評価、migration / rollback 未評価がある場合は Phase 完了扱いにしない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | 仕様内相互参照 | §9.1.29 に従い、Phase 番号、TC ID、Task ID、API 契約 ID、error code、persistence key、evidence 名、manifest 参照が一致している | 仕様修正 PR に戻す |
 | Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
