@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.182
+**バージョン：** V.183
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.182` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.183` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -4113,7 +4113,7 @@ Phase implementation packet は、実装開始前に以下の canonical key を�
 | `task_ids` | 対象 Phase の atomic task ID 一覧。各 task は入力契約、禁止変更、完了条件、verification command に接続する |
 | `scenario_ids` | 対象 Phase の scenario ID 一覧。各 scenario は expected result、artifact path、oracle に接続する |
 | `artifact_paths` | test、snapshot、fixture、log、manifest、review handoff、secret scan の保存先一覧 |
-| `audit_results` | §9.17 の `phase_packet_result`、`acceptance_manifest_result`、`oracle_result`、`scenario_matrix_result`、`schema_registry_result`、`decision_precedence_result`、`coverage_closure_result`、`artifact_paths_result`、`failure_remediation_result`、`transition_ready_result`、`review_handoff_result`、`operator_delta_result`、`precision_closure_index_result`、`change_impact_closure_result`、`rollout_readiness_closure_result`、`compatibility_baseline_closure_result`、`security_abuse_closure_result`、`configuration_environment_closure_result`、`ambiguity_atomic_task_closure_result`、`review_operator_closure_result`、`merge_readiness_closure_result`、`dependency_provenance_closure_result`、`upgrade_data_compatibility_closure_result`、`performance_capacity_closure_result`、`incident_recovery_closure_result`、`phase_done_final_result`、`readiness_audit_result` を全て含む |
+| `audit_results` | §9.17 の `phase_packet_result`、`acceptance_manifest_result`、`oracle_result`、`scenario_matrix_result`、`schema_registry_result`、`decision_precedence_result`、`coverage_closure_result`、`artifact_paths_result`、`failure_remediation_result`、`transition_ready_result`、`review_handoff_result`、`operator_delta_result`、`precision_closure_index_result`、`change_impact_closure_result`、`rollout_readiness_closure_result`、`compatibility_baseline_closure_result`、`security_abuse_closure_result`、`configuration_environment_closure_result`、`ambiguity_atomic_task_closure_result`、`review_operator_closure_result`、`merge_readiness_closure_result`、`dependency_provenance_closure_result`、`upgrade_data_compatibility_closure_result`、`performance_capacity_closure_result`、`incident_recovery_closure_result`、`contract_versioning_closure_result`、`phase_done_final_result`、`readiness_audit_result` を全て含む |
 | `blocking_items` | 実装開始前に残っている blocker 一覧。実装開始可能な packet では空配列または `none` |
 | `ready_to_implement` | 実装開始を許可する最終 boolean。`true` 以外は実装開始禁止 |
 
@@ -5726,6 +5726,25 @@ incident response / disaster recovery / operator runbook は、障害検出後�
 | `incident_recovery_closure_result` | 上記 field がすべて `pass`。検出不能 incident、RTO/RPO 未定義、runbook 欠落、safe mode 不明、DR drill 未実施、post-incident evidence 欠落がすべて 0 件 | `pass` 以外は Phase 完了禁止 |
 
 `incident_recovery_closure_result` は readiness packet の `audit_results` と Done receipt に必ず含める。incident / DR / operator runbook に影響しない Phase でも `incident_recovery_closure_result = pass` とし、`incident_surface:unchanged`、`detection_signal:unchanged`、`rto_rpo:unchanged`、`operator_runbook:unchanged`、`dr_drill:not_applicable_with_reason`、および非対象理由を `closure_evidence` に記録する。これにより「運用復旧影響なし」の主張も、後続 Phase と reviewer が再現できる状態にする。
+
+**canonical external contract versioning / deprecation / sunset closure audit：**
+
+external contract versioning / deprecation / sunset は、Turso Cloud 互換 mode の API、wire schema、metadata、error、config、SDK client behavior を実装都合で破壊しないための compatibility gate である。対象 Phase の readiness packet と Done receipt は、以下の closure audit field を持ち、`contract_versioning_closure_result = pass` でなければ実装開始、Phase 完了、または merge に進めない。
+
+| Audit field | pass 条件 | fail 時の扱い |
+|-------------|----------|---------------|
+| `contract_surface_inventory_result` | HTTP API、WebSocket wire、Platform API、Admin API、metadata schema、JWT claim、error code、config key、SDK transcript の変更有無が列挙されている | 実装開始禁止 |
+| `versioning_policy_result` | 既存 version 維持、新 version 追加、mode 分離、feature flag、compat shim のどれで扱うかが固定されている | 実装開始禁止 |
+| `deprecation_policy_result` | deprecated field / endpoint / config / error の有無、警告方法、継続期間、代替手段、Turso Cloud 追従理由が固定されている | merge 不可 |
+| `sunset_policy_result` | sunset する場合の対象、条件、最短時期、operator notice、SDK/client impact、rollback 条件が固定されている | merge 不可 |
+| `breaking_change_result` | Turso 互換 mode で breaking change が 0 件である。例外は security / durability 上必須で、自己ホスト差分として mode 分離されている | merge 不可 |
+| `compat_mode_result` | 既定 mode が Turso 互換であり、Adlaire 拡張 mode、experimental flag、internal adapter 差分が既定 response に混入しない | 実装開始禁止 |
+| `sdk_client_impact_result` | TypeScript/Rust/Go SDK、curl、existing client request / response snapshot への影響、migration notice、compat transcript が固定されている | Phase 未完了 |
+| `metadata_error_config_contract_result` | metadata schema、error code、HTTP status、config key/default/precedence の変更有無と互換維持策が固定されている | 実装開始禁止 |
+| `contract_migration_notice_result` | 利用者・運用者向け release note、migration guide、rollback note、deprecated/sunset notice が operator delta と接続されている | rollout ready 不可 |
+| `contract_versioning_closure_result` | 上記 field がすべて `pass`。暗黙 breaking change、deprecated/sunset 未通知、SDK impact 未評価、default compat mode 破壊、metadata/error/config drift がすべて 0 件 | `pass` 以外は実装開始禁止 |
+
+`contract_versioning_closure_result` は readiness packet の `audit_results` と Done receipt に必ず含める。external contract に影響しない Phase でも `contract_versioning_closure_result = pass` とし、`contract_surface:unchanged`、`versioning_policy:unchanged`、`deprecation:none`、`sunset:none`、`breaking_change:none`、および非対象理由を `closure_evidence` に記録する。これにより「外部 contract 影響なし」の主張も、後続 Phase と reviewer が再現できる状態にする。
 
 Phase operator behavior delta に関係する仕様変更は、§1.4、§1.5、§3.5.3、§7.3、§9.1.10、§9.1.11、§9.1.13、§9.1.15、§9.1.17、§9.1.19、§9.1.20、§9.1.22、§9.1.23、§9.1.24、§9.1.29、§9.1.32、§9.1.33、§9.1.37、§9.1.44、§9.1.45、§9.1.46、§9.1.47、§9.1.49、§9.1.50、§9.1.51、§9.2、§9.4、§9.5、§9.6、§9.7、§9.8、§9.11、§9.14、§9.17、該当 Phase 詳細節を同時更新する。operator behavior delta がない Phase 実装 PR は、利用者・運用者から見える変更、互換差分、運用手順、release note、rollback が未確定であるため、Phase 完了扱いにしない。
 
@@ -8423,8 +8442,9 @@ Phase 1〜19 の実装開始前に、実装者は対象 Phase の readiness pack
 | `upgrade_data_compatibility_closure_result` | §9.1.52 の upgrade / downgrade / data compatibility closure に従い、source version inventory、upgrade path、downgrade boundary、data file compatibility、metadata schema compatibility、config compatibility、client request compatibility、failure injection upgrade、rollback after upgrade がすべて閉じている | 実装開始禁止 |
 | `performance_capacity_closure_result` | §9.1.52 の performance / capacity / resource limit closure に従い、workload profile、latency baseline、memory baseline、storage growth、large input limit、concurrency capacity、backpressure timeout、quota capacity、performance regression がすべて閉じている | Phase 完了扱い禁止 |
 | `incident_recovery_closure_result` | §9.1.52 の incident response / disaster recovery / operator runbook closure に従い、incident classification、detection signal、RTO/RPO、operator runbook、safe mode、backup/restore drill、replication/HA recovery、post-incident evidence、customer impact がすべて閉じている | Phase 完了扱い禁止 |
+| `contract_versioning_closure_result` | §9.1.52 の external contract versioning / deprecation / sunset closure に従い、contract surface inventory、versioning policy、deprecation policy、sunset policy、breaking change、compat mode、SDK/client impact、metadata/error/config contract、migration notice がすべて閉じている | 実装開始禁止 |
 | `phase_done_final_result` | §9.1.33 に従い、Done receipt final audit の readiness、manifest、artifact、failure、regression、handoff、operator、precision closure、zero-bug がすべて pass である | Phase 完了扱い禁止 |
-| `readiness_audit_result` | 上記 26 field がすべて `pass`。ただし `phase_done_final_result` は実装完了時に評価する。`missing`、`partial`、`manual_only`、`not_run`、`N/A` 根拠なし、または値不一致が 0 件 | `pass` 以外は実装開始禁止 |
+| `readiness_audit_result` | 上記 27 field がすべて `pass`。ただし `phase_done_final_result` は実装完了時に評価する。`missing`、`partial`、`manual_only`、`not_run`、`N/A` 根拠なし、または値不一致が 0 件 | `pass` 以外は実装開始禁止 |
 
 `readiness_audit_result` は Phase 実装開始の入口 gate であり、実装後の Done receipt で初めて埋めてはならない。実装中に scope、API、schema、error、persistence、auth、compatibility、artifact path、review command、operator behavior のいずれかが変わる場合は、同じ PR で readiness packet、受入 manifest、oracle、scenario matrix、schema registry、precision closure を更新し、再度 `readiness_audit_result = pass` にする。更新しないまま code、test、snapshot、artifact だけを変更した場合は merge 不可とする。
 
@@ -8451,6 +8471,7 @@ Phase 1〜19 の実装開始前に、実装者は対象 Phase の readiness pack
 | upgrade / downgrade / data compatibility の source version inventory、upgrade path、downgrade boundary、data file compatibility、metadata schema compatibility、config compatibility、client request compatibility、failure injection upgrade、rollback after upgrade のいずれかが未確定または artifact 未接続である | 実装開始禁止 |
 | performance / capacity / resource limit の workload profile、latency baseline、memory baseline、storage growth、large input limit、concurrency capacity、backpressure timeout、quota capacity、performance regression のいずれかが未確定または artifact 未接続である | Phase 未完了 |
 | incident response / disaster recovery / operator runbook の incident classification、detection signal、RTO/RPO、operator runbook、safe mode、backup/restore drill、replication/HA recovery、post-incident evidence、customer impact のいずれかが未確定または artifact 未接続である | Phase 未完了 |
+| external contract versioning / deprecation / sunset の contract surface inventory、versioning policy、deprecation policy、sunset policy、breaking change、compat mode、SDK/client impact、metadata/error/config contract、migration notice のいずれかが未確定または artifact 未接続である | 実装開始禁止 |
 | artifact path、hash、secret scan、reviewer command が readiness packet、受入 manifest、Done receipt、artifact manifest、review handoff の間で一致しない | Phase 未完了 |
 | failure が未分類、root cause 未記載、再検証 command 未記載、artifact / regression / secret scan 再実行漏れのまま残る | Phase 未完了 |
 | source Phase の Done receipt、regression、artifact hash、compatibility baseline、operator delta、known blocker が target Phase readiness packet に継承されていない | 実装開始禁止 |
@@ -14140,7 +14161,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.182` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.183` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
