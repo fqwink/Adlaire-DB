@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.103
+**バージョン：** V.104
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.103` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.104` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -3997,6 +3997,7 @@ branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§
 | `dependency_graph` | API、persistence、security、compatibility、oracle、evidence、operational state の prerequisite |
 | `invariant_ledger` | §9.1.39 の invariant ID、scope、before/after 条件、violation signal、regression guard |
 | `scenario_matrix` | §9.1.40 の normal/error/auth/persistence/rollback/concurrency/compatibility/unsupported/redaction/operational scenario |
+| `resource_lifecycle_matrix` | §9.1.41 の resource type、state、allowed/forbidden transition、commit order、recovery behavior |
 | `completion_gate` | merge 前に満たす Done 条件と失敗時の扱い |
 
 **Phase group 粒度：**
@@ -4060,7 +4061,7 @@ branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§
 | cross-reference scan | §9.1.29 の self-check 結果 |
 | redaction scan | packet / artifact / log に secret、token、raw path、SQL args、backup body がないこと |
 
-Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.1.29、§9.1.39、§9.1.40、§9.2、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。Phase 単位で何を実装し、何を実装しないか、何をもって完了とするかが 1 箇所で読めない場合は、実装精度不足として Phase 未完了扱いにする。
+Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.1.29、§9.1.39、§9.1.40、§9.1.41、§9.2、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。Phase 単位で何を実装し、何を実装しないか、何をもって完了とするかが 1 箇所で読めない場合は、実装精度不足として Phase 未完了扱いにする。
 
 #### 9.1.33 Phase completion gate / Done evidence / bug-zero acceptance 固定契約
 
@@ -4088,6 +4089,7 @@ Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§
 | `dependency_graph_result` | §9.1.38 の prerequisite がすべて satisfied である証跡 |
 | `invariant_result` | §9.1.39 の invariant ID ごとの pass/fail、violation 0 件、regression guard、evidence path |
 | `scenario_matrix_result` | §9.1.40 の scenario ID ごとの pass/fail、not_applicable reason、evidence path、manual only 0 件 |
+| `resource_lifecycle_result` | §9.1.41 の state / transition ごとの pass/fail、forbidden transition 0 件、recovery evidence path |
 | `reviewer_decision` | `Done`、`Not Done`、`Spec correction required` のいずれか |
 
 **Phase group Done minimum：**
@@ -4636,6 +4638,73 @@ Phase invariant ledger に関係する仕様変更は、§9.1.7、§9.1.10、§9
 | `implementation_blueprint_closure` | scenario matrix の全 owner Contract ID が packet、manifest、oracle、invariant、test、artifact と一致すること |
 
 Phase scenario matrix に関係する仕様変更は、§9.1.7、§9.1.10、§9.1.11、§9.1.14、§9.1.24、§9.1.32、§9.1.33、§9.1.35、§9.1.36、§9.1.37、§9.1.38、§9.1.39、§9.2、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。scenario matrix がない Phase 実装 PR は、ケース漏れによる後続バグ修正を防げないため、実装開始不可とする。
+
+#### 9.1.41 Phase resource lifecycle / state transition matrix 固定契約
+
+各 Phase の実装 PR は、実装開始前に Phase resource lifecycle matrix を固定しなければならない。resource lifecycle matrix は、対象 resource が持つ state、許可される transition、禁止される transition、API 応答、write policy、永続化 commit 順序、recovery behavior を 1 箇所に固定する正本である。metadata と実ファイル、runtime map、health、operator state が別々の state を示す場合、仕様本文の lifecycle matrix を正として復旧または起動失敗を選ぶ。
+
+**Resource lifecycle matrix 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `resource_type` | server / config / data_dir / database / token / organization / group / location / quota / websocket / transaction / replica / archive / restore_job / branch / extension / metrics_snapshot / ha_node / internal_adapter |
+| `state` | `uninitialized`、`creating`、`active`、`blocked`、`degraded`、`recovering`、`deleting`、`deleted`、`rollback_required`、`operator_required`、`disabled`、`shadow`、`active_internal` など |
+| `allowed_transition` | 許可される `from -> to` と発火条件 |
+| `forbidden_transition` | 禁止される `from -> to` と検出時の判定 |
+| `entry_condition` | state に入る条件。API、job、startup、failure、operator action、config flag を含める |
+| `exit_condition` | state から出る条件。commit marker、fsync、health、oracle、operator action を含める |
+| `api_behavior` | state ごとの HTTP/WebSocket/CLI success、error code、body、retry 可否 |
+| `write_policy` | write 許可 / 拒否、既存 transaction の扱い、read 可否 |
+| `persistence_commit_order` | file、metadata、marker、runtime map、directory fsync、cleanup の順序 |
+| `recovery_behavior` | restart 時、crash 時、corruption 時、partial state 時の挙動 |
+| `evidence` | state fixture、transition test、forbidden transition test、recovery log、health snapshot |
+
+**Phase group lifecycle minimum：**
+
+| Phase group | 最低 lifecycle |
+|-------------|----------------|
+| Phase 1〜5 | server startup/shutdown、config valid/invalid、data-dir locked/open、default DB open/error、token active/revoked、log redaction state |
+| Phase 6〜8 | DB creating/active/deleting/deleted、admin token active/revoked、organization/group/location active/blocked、quota active/exceeded、usage available/unavailable |
+| Phase 9〜10 | WebSocket connecting/hello/active/closing/closed、stream open/closed、transaction open/committed/rolled_back、ATTACH allowed/blocked、metrics active/degraded |
+| Phase 11〜13 | primary active/degraded、replica syncing/caught_up/lagged/unavailable、frame available/missing/corrupt、archive active/retention_cleanup/corrupt |
+| Phase 14〜15 | backup running/completed/failed、restore preparing/verifying/committed/rolled_back/rollback_required、PITR selected/missing/corrupt、branch creating/active/deleting/deleted |
+| Phase 16〜18 | extension registered/loaded/failed/disabled、metrics snapshot active/corrupt/rebuilt、HA node follower/candidate/leader/demoted/operator_required |
+| Phase 19 | internal adapter disabled/shadow/active_internal/rollback/operator_required、shadow diff clean/dirty、performance baseline pass/fail |
+
+**State transition 固定表：**
+
+| Transition type | 必須仕様 | 未定義時の扱い |
+|-----------------|----------|----------------|
+| create | file / runtime 準備後に metadata を commit する。success は durable boundary 後のみ | create API 実装禁止 |
+| activate | integrity、auth、quota、compatibility、oracle が pass してから active にする | success response 禁止 |
+| block | auth、quota、policy、operator action により意図的に blocked にする | 2xx success 禁止 |
+| degrade | read-only / partial / lag など縮退時の health と write policy を固定する | degraded path 実装禁止 |
+| recover | startup / job recovery の entry、exit、timeout、operator_required を固定する | recovery 実装禁止 |
+| delete | route disable、runtime close、file cleanup、metadata commit の順序を固定する | delete API 実装禁止 |
+| rollback | rollback marker、旧状態復元、失敗時 operator_required を固定する | destructive operation 禁止 |
+| internal switch | shadow、active_internal、rollback flag、compatibility oracle を固定する | internal adapter active 禁止 |
+
+**Lifecycle 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| metadata が `active` だが file / directory が存在しない resource に success response を返す | merge 不可 |
+| `creating` / `deleting` / `recovering` / `rollback_required` 中の resource に通常 write を許可する | merge 不可 |
+| unknown state を silent fallback で `active` または `disabled` として扱う | merge 不可 |
+| state transition evidence なしに Done receipt を作成する | Phase 未完了 |
+| forbidden transition を検出しても error / health / log に出さない | Phase 未完了 |
+| runtime map と metadata state が不一致なのに route を成功させる | merge 不可 |
+| rollback_required / operator_required を自動成功扱いにする | merge 不可 |
+
+**Done receipt への反映：**
+
+| Done receipt field | 必須内容 |
+|--------------------|----------|
+| `resource_lifecycle_result` | resource type ごとの state、allowed transition、forbidden transition 0 件、recovery evidence path |
+| `state_transition_coverage` | transition type 別 test、startup/restart fixture、forbidden transition test の実行結果 |
+| `resource_state_closure` | metadata、file、runtime map、health、operator marker が同じ state 判定に収束していること |
+
+Phase resource lifecycle に関係する仕様変更は、§9.1.16、§9.1.21、§9.1.25、§9.1.30、§9.1.31、§9.1.32、§9.1.33、§9.1.37、§9.1.39、§9.1.40、§9.2、§9.4、§9.5、§9.6、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。resource lifecycle matrix がない Phase 実装 PR は、状態不整合による後続バグ修正を防げないため、実装開始不可とする。
 
 ### 9.2 Phase 別完了ゲート
 
@@ -5291,6 +5360,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Dependency graph | §9.1.38 に従い、各 Contract ID の prerequisite、blocks、status、evidence、not_applicable reason が固定され、未完了 prerequisite が 0 件になっている | dependent contract を実装・公開・完了扱いにしない |
 | Invariant ledger | §9.1.39 に従い、durability、metadata/file consistency、auth/scope/quota、compatibility、error surface、operational state、redaction、dependency/prerequisite の invariant と regression guard が固定され、violation が 0 件になっている | 実装開始禁止。違反がある場合は Phase 完了扱いにしない |
 | Scenario matrix | §9.1.40 に従い、normal、invalid request、auth/scope/quota、persistence/restart、rollback/recovery、concurrency/idempotency、compatibility、unsupported、redaction、operational の scenario と evidence が固定され、manual only / not run / 根拠なし N/A が 0 件になっている | 実装開始禁止。ケース漏れがある場合は Phase 完了扱いにしない |
+| Resource lifecycle | §9.1.41 に従い、resource type、state、allowed/forbidden transition、entry/exit condition、API behavior、write policy、commit order、recovery behavior、state evidence が固定されている | 実装開始禁止。状態遷移未定義または forbidden transition 未検証の場合は Phase 完了扱いにしない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | 仕様内相互参照 | §9.1.29 に従い、Phase 番号、TC ID、Task ID、API 契約 ID、error code、persistence key、evidence 名、manifest 参照が一致している | 仕様修正 PR に戻す |
 | Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
