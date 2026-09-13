@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.135
+**バージョン：** V.136
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.135` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.136` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -5913,7 +5913,7 @@ Phase 6 は Phase 1〜5 の単一 DB HTTP/JWT/SDK 互換を維持したまま、
 | isolation | DB A への write は DB B に見えてはならない。default route と path route の DB identity を混ぜてはならない |
 | compatibility | Phase 1〜5 regression と TypeScript SDK CRUD は default route で継続 pass。path route は libSQL SDK 互換の HTTP surface として snapshot を取る |
 
-**Phase 6 atomic task ledger：**
+**Phase 6 原子タスク台帳：**
 
 | Task ID | Goal | Input contracts | Change targets | Forbidden changes | Completion condition | Verification |
 |---------|------|-----------------|----------------|-------------------|----------------------|--------------|
@@ -5927,7 +5927,7 @@ Phase 6 は Phase 1〜5 の単一 DB HTTP/JWT/SDK 互換を維持したまま、
 | `TASK-P6-8` | unsupported surface を固定する | §9.1.10、§9.5 | tests / snapshot | admin/v1/v3 成功応答 | Phase 7+ surface が成功しない | unsupported snapshot |
 | `TASK-P6-9` | Phase 6 Done receipt / handoff / operator delta | §9.1.33、§9.1.51、§9.1.52 | docs / PR artifact | PR description だけの根拠 | 第三者が route/isolation/restart を再現できる | handoff checklist |
 
-**Phase 6 scenario / oracle 固定表：**
+**Phase 6 シナリオマトリクス：**
 
 | Scenario ID | 入力 | 期待結果 | Evidence |
 |-------------|------|----------|----------|
@@ -5962,7 +5962,7 @@ Phase 6 は Phase 1〜5 の単一 DB HTTP/JWT/SDK 互換を維持したまま、
 | Phase 1〜5 regression と TypeScript SDK default CRUD なしで完了扱いにする | Phase 未完了 |
 | DB scope JWT、organization/group/location/quota 判定を Phase 6 完了条件に混ぜる | merge 不可。Phase 7/8 対象 |
 
-**Phase 6 Done receipt 最低 fields：**
+**Phase 6 Done receipt 必須項目：**
 
 | Field | 必須内容 |
 |-------|----------|
@@ -5979,6 +5979,7 @@ Phase 6 は Phase 1〜5 の単一 DB HTTP/JWT/SDK 互換を維持したまま、
 | `coverage_closure_result` | route、validation、auth、metadata、isolation、restart、unsupported、regression の gap 0 件 |
 | `review_handoff_result` | 第三者が route、validation、metadata、isolation、restart、unsupported を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 6 で `/{db-name}/v2/pipeline` が追加されるが、DB 作成管理 API はまだ成功応答しない release note |
+| `precision_closure_result` | DB name validation、path routing、default route 後方互換、DB isolation、metadata atomic update、restart restore、Phase 1〜5 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
 
 **Phase 7 完全実装精度固定契約：**
 
@@ -6005,7 +6006,7 @@ Phase 7 は Phase 6 の multi DB routing に、Adlaire 管理 API、token CRUD�
 | persistence | `databases.json` と `tokens.json` は tmp write + fsync + atomic rename。partial write、JWT 保存、metadata/file 不整合を成功扱いにしない |
 | response time | `created_at`、`expires_at`、`revoked_at` は RFC3339 UTC 秒精度。`null` 可 field 以外は null 禁止 |
 
-**Phase 7 atomic task ledger：**
+**Phase 7 原子タスク台帳：**
 
 | Task ID | Goal | Input contracts | Change targets | Forbidden changes | Completion condition | Verification |
 |---------|------|-----------------|----------------|-------------------|----------------------|--------------|
@@ -6019,7 +6020,7 @@ Phase 7 は Phase 6 の multi DB routing に、Adlaire 管理 API、token CRUD�
 | `TASK-P7-8` | concurrent create/delete/token を固定する | §9.1.16、§9.1.23 | `db/manager.rs`、`token/*` | lost update、二重作成 | race 後 metadata が整合 | concurrency fixture |
 | `TASK-P7-9` | Phase 7 Done receipt / handoff / operator delta | §9.1.33、§9.1.51、§9.1.52 | docs / PR artifact | PR description だけの根拠 | 第三者が admin/scope/revoke を再現できる | handoff checklist |
 
-**Phase 7 scenario / oracle 固定表：**
+**Phase 7 シナリオマトリクス：**
 
 | Scenario ID | 入力 | 期待結果 | Evidence |
 |-------------|------|----------|----------|
@@ -6057,7 +6058,7 @@ Phase 7 は Phase 6 の multi DB routing に、Adlaire 管理 API、token CRUD�
 | DB create/delete の partial metadata/directory 不整合を成功扱いにする | Phase 未完了 |
 | admin auth matrix、DB CRUD、token CRUD、scope matrix、revoke immediate、concurrency の証跡なしで完了扱いにする | Phase 未完了 |
 
-**Phase 7 Done receipt 最低 fields：**
+**Phase 7 Done receipt 必須項目：**
 
 | Field | 必須内容 |
 |-------|----------|
@@ -6076,6 +6077,7 @@ Phase 7 は Phase 6 の multi DB routing に、Adlaire 管理 API、token CRUD�
 | `coverage_closure_result` | admin auth、DB CRUD、token CRUD、scope、revoke、atomicity、concurrency、unsupported、regression の gap 0 件 |
 | `review_handoff_result` | 第三者が admin API、token API、scope、revoke、restart、concurrency を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 7 で `/admin/v1/databases` と `/admin/v1/tokens` が成功応答になり、DB scope JWT が有効になる release note |
+| `precision_closure_result` | Admin auth、DB CRUD、token CRUD、DB scope JWT、revoke immediate effect、metadata/delete consistency、Phase 1〜6 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
 
 **Phase 8 完全実装精度固定契約：**
 
@@ -6101,7 +6103,7 @@ Phase 8 は Turso Cloud 互換の管理モデルを自己ホスト環境へ導�
 | legacy compatibility | Phase 1〜7 の DB/token は rename せず読み取り・接続・削除可能。Phase 8 新規 DB は Turso 互換名 validation を適用する |
 | snapshot | Turso 互換 snapshot は `tests/snapshots/phase8_turso/` に保存し、UUID/timestamp/JWT/request id/host を placeholder 正規化する |
 
-**Phase 8 atomic task ledger：**
+**Phase 8 原子タスク台帳：**
 
 | Task ID | Goal | Input contracts | Change targets | Forbidden changes | Completion condition | Verification |
 |---------|------|-----------------|----------------|-------------------|----------------------|--------------|
@@ -6117,7 +6119,7 @@ Phase 8 は Turso Cloud 互換の管理モデルを自己ホスト環境へ導�
 | `TASK-P8-10` | Turso snapshot artifact / secret scan を固定する | §9.1.33、Phase 8 snapshot 表 | tests / artifact | snapshot 手動改変、secret 混入 | snapshot completeness と scan が pass | snapshot audit |
 | `TASK-P8-11` | Phase 8 Done receipt / handoff / operator delta | §9.1.33、§9.1.51、§9.1.52 | docs / PR artifact | PR description だけの根拠 | 第三者が migration/API/quota/snapshot を再現できる | handoff checklist |
 
-**Phase 8 scenario / oracle 固定表：**
+**Phase 8 シナリオマトリクス：**
 
 | Scenario ID | 入力 | 期待結果 | Evidence |
 |-------------|------|----------|----------|
@@ -6159,7 +6161,7 @@ Phase 8 は Turso Cloud 互換の管理モデルを自己ホスト環境へ導�
 | UUID/timestamp/JWT/host/request id を未正規化のまま snapshot 比較する | Phase 未完了 |
 | Turso snapshot artifact、migration fixture、legacy fallback、secret scan、Phase 1〜7 regression なしで完了扱いにする | Phase 未完了 |
 
-**Phase 8 Done receipt 最低 fields：**
+**Phase 8 Done receipt 必須項目：**
 
 | Field | 必須内容 |
 |-------|----------|
@@ -6178,6 +6180,7 @@ Phase 8 は Turso Cloud 互換の管理モデルを自己ホスト環境へ導�
 | `coverage_closure_result` | migration、metadata、admin API、Platform API、auth/scope、quota、legacy、unsupported、regression の gap 0 件 |
 | `review_handoff_result` | 第三者が migration、Admin API、Turso API、scope、quota、snapshot、secret scan を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 8 で Turso Cloud 互換の organization/group/location/quota/usage と `/v1/*` が公開される release note |
+| `precision_closure_result` | organization/group/location/quota/usage、`/v1/*` wrapper、legacy metadata migration、scope auth、quota enforcement、Turso snapshot、Phase 1〜7 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
 
 **Phase 9 完全実装精度固定契約：**
 
@@ -6204,7 +6207,7 @@ Phase 9 は hrana-ws v3 WebSocket surface と interactive transaction を完成�
 | permission | JWT `a` / `dbs` / org / group / quota / block policy は Phase 8 の precedence を維持し、operation ごとに判定する |
 | persistence | WebSocket session、stream、store_sql は永続化しない。SQL commit 済みデータだけ DB に残る |
 
-**Phase 9 atomic task ledger：**
+**Phase 9 原子タスク台帳：**
 
 | Task ID | Goal | Input contracts | Change targets | Forbidden changes | Completion condition | Verification |
 |---------|------|-----------------|----------------|-------------------|----------------------|--------------|
@@ -6219,7 +6222,7 @@ Phase 9 は hrana-ws v3 WebSocket surface と interactive transaction を完成�
 | `TASK-P9-9` | SDK WebSocket regression を固定する | §9.1.1、§9.8 | tests / artifact | manual transcript のみ | TypeScript SDK transaction が pass | SDK transcript |
 | `TASK-P9-10` | Phase 9 Done receipt / handoff / operator delta | §9.1.33、§9.1.51、§9.1.52 | docs / PR artifact | PR description だけの根拠 | 第三者が WS/tx/rollback を再現できる | handoff checklist |
 
-**Phase 9 scenario / oracle 固定表：**
+**Phase 9 シナリオマトリクス：**
 
 | Scenario ID | 入力 | 期待結果 | Evidence |
 |-------------|------|----------|----------|
@@ -6261,7 +6264,7 @@ Phase 9 は hrana-ws v3 WebSocket surface と interactive transaction を完成�
 | cursor API を Phase 9 で成功応答にする | merge 不可 |
 | WebSocket transcript、transaction rollback fixture、SDK regression、secret scan なしで完了扱いにする | Phase 未完了 |
 
-**Phase 9 Done receipt 最低 fields：**
+**Phase 9 Done receipt 必須項目：**
 
 | Field | 必須内容 |
 |-------|----------|
@@ -6280,6 +6283,7 @@ Phase 9 は hrana-ws v3 WebSocket surface と interactive transaction を完成�
 | `coverage_closure_result` | upgrade、hello、stream、SQL、transaction、store_sql、permission、unsupported、regression の gap 0 件 |
 | `review_handoff_result` | 第三者が WebSocket upgrade、SDK transaction、rollback、store_sql、secret scan を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 9 で hrana-ws v3 `/v3/baton` と `/{db-name}/v3/baton` が公開され、interactive transaction が利用可能になる release note |
+| `precision_closure_result` | WebSocket upgrade、hello/auth、stream/cursor lifecycle、interactive transaction commit/rollback、close cleanup、SDK WS transcript、Phase 1〜8 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
 
 **Phase 10 完全実装精度固定契約：**
 
@@ -6304,7 +6308,7 @@ Phase 10 は管理下 DB 間の ATTACH と、Phase 1〜10 の HTTP/WebSocket/DB 
 | gauge boundary | `size_bytes` / `wal_size_bytes` は response 時に filesystem から取得する。取得失敗は WARN + field `0` |
 | secret | metrics label、log、snapshot に token、JWT、SQL args、生 SQL bind 値、絶対 extension path を含めない |
 
-**Phase 10 atomic task ledger：**
+**Phase 10 原子タスク台帳：**
 
 | Task ID | Goal | Input contracts | Change targets | Forbidden changes | Completion condition | Verification |
 |---------|------|-----------------|----------------|-------------------|----------------------|--------------|
@@ -6318,7 +6322,7 @@ Phase 10 は管理下 DB 間の ATTACH と、Phase 1〜10 の HTTP/WebSocket/DB 
 | `TASK-P10-8` | secret redaction / labels を固定する | §9.1.17、§9.1.18 | metrics / logs / tests | token/SQL args label | secret scan が pass | secret scan artifact |
 | `TASK-P10-9` | Phase 10 Done receipt / handoff / operator delta | §9.1.33、§9.1.51、§9.1.52 | docs / PR artifact | PR description だけの根拠 | 第三者が ATTACH/metrics を再現できる | handoff checklist |
 
-**Phase 10 scenario / oracle 固定表：**
+**Phase 10 シナリオマトリクス：**
 
 | Scenario ID | 入力 | 期待結果 | Evidence |
 |-------------|------|----------|----------|
@@ -6357,7 +6361,7 @@ Phase 10 は管理下 DB 間の ATTACH と、Phase 1〜10 の HTTP/WebSocket/DB 
 | WebSocket close 時に `connections_active` を二重 decrement する、または decrement 漏れする | Phase 未完了 |
 | ATTACH allow/deny、任意 path 拒否、metrics counter snapshot、Phase 1〜9 regression なしで完了扱いにする | Phase 未完了 |
 
-**Phase 10 Done receipt 最低 fields：**
+**Phase 10 Done receipt 必須項目：**
 
 | Field | 必須内容 |
 |-------|----------|
@@ -6375,6 +6379,7 @@ Phase 10 は管理下 DB 間の ATTACH と、Phase 1〜10 の HTTP/WebSocket/DB 
 | `coverage_closure_result` | ATTACH parser、path、policy、protocol、metrics、auth、secret、regression の gap 0 件 |
 | `review_handoff_result` | 第三者が ATTACH allow/deny、任意 path 拒否、metrics counter、secret scan を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 10 で管理下 DB の ATTACH と `GET /admin/v1/metrics` が公開されるが、metrics は再起動で reset される release note |
+| `precision_closure_result` | managed ATTACH allow/deny、arbitrary path reject、metrics counter/gauge、admin auth、secret redaction、Phase 1〜9 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
 
 **Phase 8〜10 の境界決定：**
 
@@ -6417,7 +6422,7 @@ Phase 11 は primary role の replication 送信側 API を完成させる Phase
 | write mode | Phase 11 の `async` は ACK を待たない。`sync` は quorum/ACK semantics 未完成なら起動拒否し、silent async fallback しない |
 | quota/block | replication apply は Phase 12。Phase 11 primary stream は quota/block 判定で frame 提供を止めない |
 
-**Phase 11 atomic task ledger：**
+**Phase 11 原子タスク台帳：**
 
 | Task ID | Goal | Input contracts | Change targets | Forbidden changes | Completion condition | Verification |
 |---------|------|-----------------|----------------|-------------------|----------------------|--------------|
@@ -6431,7 +6436,7 @@ Phase 11 は primary role の replication 送信側 API を完成させる Phase
 | `TASK-P11-8` | long-poll / cleanup / shutdown を固定する | §9.1.25、§9.4.1 | replication runtime | leaked temp snapshot、hung connection | heartbeat/close/cleanup が再現可能 | lifecycle artifact |
 | `TASK-P11-9` | Phase 11 Done receipt / handoff / operator delta | §9.1.33、§9.1.51、§9.1.52 | docs / PR artifact | PR description だけの根拠 | 第三者が replication API を再現できる | handoff checklist |
 
-**Phase 11 scenario / oracle 固定表：**
+**Phase 11 シナリオマトリクス：**
 
 | Scenario ID | 入力 | 期待結果 | Evidence |
 |-------------|------|----------|----------|
@@ -6468,7 +6473,7 @@ Phase 11 は primary role の replication 送信側 API を完成させる Phase
 | replica apply、write redirect、replica health lag を Phase 11 完了条件に混ぜる | merge 不可。Phase 12 対象 |
 | replication API snapshot、frame/checksum transcript、snapshot consistency、secret scan なしで完了扱いにする | Phase 未完了 |
 
-**Phase 11 Done receipt 最低 fields：**
+**Phase 11 Done receipt 必須項目：**
 
 | Field | 必須内容 |
 |-------|----------|
@@ -6486,6 +6491,25 @@ Phase 11 は primary role の replication 送信側 API を完成させる Phase
 | `coverage_closure_result` | config、auth、SSE、snapshot、heartbeat、status、cleanup、unsupported、regression の gap 0 件 |
 | `review_handoff_result` | 第三者が primary 起動、SSE、snapshot、heartbeat、status、secret scan を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 11 で primary replication API が公開されるが replica apply / redirect はまだ利用不可である release note |
+| `precision_closure_result` | replica registration、WAL stream auth/range/checksum、snapshot consistency、retention、lag metadata、SDK/API compatibility、Phase 1〜10 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
+
+**Phase 6〜11 完全実装精度正規化契約：**
+
+Phase 6〜11 は外部 API、metadata、JWT scope、WebSocket state、ATTACH、metrics、replication の境界が広がるため、後続 Phase と同じ Done 判定規則を適用する。実装者は「主要 happy path が動く」ことを完了根拠にしてはならない。各 Phase の Done receipt は、原子タスク、シナリオ、禁止事項、互換 baseline、metadata migration / rollback、secret redaction、review handoff、operator behavior delta、precision closure をすべて埋める。
+
+| 項目 | 固定仕様 | 完了不可条件 |
+|------|----------|--------------|
+| heading normalization | Phase 6〜11 の仕様見出しは `原子タスク台帳`、`シナリオマトリクス`、`Done receipt 必須項目` を正とする | 旧見出しだけを参照して Done 判定する |
+| artifact path | Done receipt の pass/fail は artifact path または再現 command を必ず持つ | 口頭説明、PR description、スクリーンショットのみ |
+| regression chain | Phase 6 は Phase 1〜5、Phase 7 は Phase 1〜6、以後同様に直前 Phase までの regression をすべて通す | 直前 Phase regression skip、影響なし根拠なし |
+| compatibility baseline | libSQL SDK HTTP/WS transcript、Turso Cloud 管理 API snapshot、hrana wire snapshot、legacy metadata fixture のうち該当面を Done receipt に含める | curl smoke のみ、snapshot なし |
+| metadata migration | metadata schema を増やす Phase は legacy fixture、atomic write、restart restore、rollback / failure behavior を artifact 化する | parse 失敗上書き、migration 証跡なし |
+| auth and scope | Admin token、JWT DB scope、organization/group scope、replication token は互いに混線させず、権限 matrix を artifact 化する | token 種別混同、scope bypass |
+| secret redaction | response/stdout/stderr/log/artifact に JWT、Admin token、replication token、SQL args、raw frame bytes が残らない scan を必須にする | scan なし、秘匿値混入 |
+| protocol lifecycle | WebSocket、ATTACH、replication stream は open/close/error/restart/reconnect の lifecycle を scenario に含める | happy path のみ |
+| future boundary | Phase 6〜11 で backup/restore/PITR/branch/extension/HA/内製化を完成扱いにしない | 未来 Phase の成功応答を Done に含める |
+| reviewer reproducibility | 第三者が clean checkout から command で再現できる handoff を必須にする | ローカル状態依存、手順欠落 |
+| bug-zero readiness | Done receipt に coverage gap、未解決判断、仕様未確定、既知 flaky が 0 件であることを明記する | 未解決判断を実装者判断へ先送り |
 
 **Phase 11/12 の境界決定：**
 
@@ -12740,7 +12764,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.135` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.136` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
