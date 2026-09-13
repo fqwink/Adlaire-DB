@@ -2,7 +2,7 @@
 
 ## Status
 
-- `docs/spec/spec.md`, `docs/spec/auth.md`, `docs/spec/api.md`, `docs/spec/testing-policy.md`, and `docs/spec/phase-*.md` are the specification source-of-truth set.
+- `docs/spec/spec.md`, `docs/spec/auth.md`, `docs/spec/api.md`, `docs/spec/testing.md`, and `docs/spec/phase-*.md` are the specification source-of-truth set.
 - Phase 1 through Phase 19 are split under `docs/spec/`.
 - Files outside the specification source-of-truth set are supporting documents.
 - If this index conflicts with the specification source-of-truth set, the specification source-of-truth set takes precedence.
@@ -21,7 +21,7 @@ accident.
 | `docs/spec/spec.md` | Specification charter and implementation contract | Source of truth |
 | `docs/spec/auth.md` | Authentication and authorization specification | Source of truth |
 | `docs/spec/api.md` | API contract specification | Source of truth |
-| `docs/spec/testing-policy.md` | Testing policy | Source of truth |
+| `docs/spec/testing.md` | Testing specification | Source of truth |
 | `docs/spec/phase-01.md` - `docs/spec/phase-19.md` | Phase-specific implementation contracts | Source of truth |
 | `AGENTS.md` | Repository work rules for agents | Work rule |
 | `docs/DOCUMENT_INDEX.md` | Documentation index and split-management reference | Supporting document |
@@ -42,7 +42,7 @@ accident.
 | Runtime, auth, and API responsibilities | `docs/spec/spec.md` section 4, `docs/spec/auth.md`, and `docs/spec/api.md` | Keep runtime contracts linked |
 | Data protection and operations responsibilities | `docs/spec/spec.md` sections 7-8 | Preserve operational safety |
 | Implementation and phase responsibilities | `docs/spec/spec.md` sections 9-10 and `docs/spec/phase-*.md` | Phase detail split is active |
-| Internalization and test responsibilities | `docs/spec/spec.md` section 11 and `docs/spec/testing-policy.md` | Keep future policy and evidence gates clear |
+| Internalization and test responsibilities | `docs/spec/spec.md` section 11 and `docs/spec/testing.md` | Keep future testing and evidence gates clear |
 
 ## Non-Goals
 
