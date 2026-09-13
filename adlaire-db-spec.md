@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.85
+**バージョン：** V.86
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.85` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.86` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.85` の次は `V.86` とし、以後 `V.87`、`V.88` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.86` の次は `V.87` とし、以後 `V.88`、`V.89` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -3220,6 +3220,115 @@ artifact の保存先は §9.1.11 に従い、Contract ID を path に含める�
 
 CI / release-check に関係する仕様変更は、§3.5.5、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.8、manifest の `Regression set`、該当 Contract ID、`environment.txt`、`ci.txt`、`release-check.txt`、`secret-scan.txt` を同時更新する。検証 command が成功していても、環境、toolchain、artifact、secret scan、release-check の再現性が固定されていない場合は Phase 完了扱いにしない。
 
+#### 9.1.25 Long-running operation / job lifecycle 固定契約
+
+各 Phase 実装 PR は、restore、PITR、backup streaming、branch 作成/削除、replication catchup、extension load/unload、HA promote/demote、internal adapter 切替など、長時間・中断・再試行・部分失敗が起こり得る operation について、同期完了 API として扱うか、streaming operation として扱うか、永続 job として扱うかを実装開始前に固定しなければならない。完了していない operation に対して成功応答を返してはならない。
+
+**operation 分類：**
+
+| Classification | 定義 | 成功応答条件 |
+|----------------|------|--------------|
+| `sync` | request 処理中に全副作用が完了し、restart 後にも結果が確定している操作 | commit、fsync、metadata 更新、必要な検証が完了 |
+| `streaming` | response body を返しながら処理するが、metadata や DB state を変更しない操作 | stream header 送信前に source snapshot が固定済み |
+| `async_job` | request は job 作成だけを行い、後続 status endpoint で結果を確認する操作 | job metadata の atomic commit 完了。実処理完了ではない |
+| `background_internal` | 外部 API の成功応答に直結しない内部 loop / maintenance | health / metrics / log に状態を出し、API 成功と混同しない |
+| `stub` | 未来 Phase または unsupported として失敗応答だけ返す操作 | 501/404/400 等の仕様済み error のみ |
+
+operation 分類を変更する場合は、該当 API 節、§9.5、§9.6、§9.7、manifest の Endpoint / Persistence / Error map、snapshot を同じ PR で更新する。
+
+**job schema 必須 field：**
+
+| Field | 必須仕様 |
+|-------|----------|
+| `job_id` | `job_` prefix の opaque id。request id や path を含めない |
+| `type` | `restore`、`pitr_restore`、`branch_create`、`branch_delete`、`replication_catchup`、`extension_load`、`ha_promote`、`internal_adapter_switch` など |
+| `resource` | 対象 DB / branch / node / extension の normalized id。secret や absolute path を含めない |
+| `state` | `queued`、`running`、`verifying`、`committed`、`failed`、`rolled_back`、`cancelled`、`expired` のいずれか |
+| `progress` | 0〜100 の整数または `null`。正確に出せない場合は `null` 固定 |
+| `created_at` / `updated_at` | RFC3339 UTC 秒精度。snapshot では正規化 |
+| `expires_at` | job result を保持する期限。期限なしは禁止 |
+| `result` | 完了時の resource summary。secret、path、backup body は含めない |
+| `error` | 失敗時の `{"error": string, "code": string}`。§9.1.22 に従う |
+| `idempotency_key_hash` | idempotency key を受ける場合のみ保存。raw key は保存しない |
+
+**共通 state machine：**
+
+| From | To | 条件 |
+|------|----|------|
+| `queued` | `running` | worker が lock を取得し、対象 resource が存在する |
+| `running` | `verifying` | 副作用の prepare が完了し、commit 前検証に入る |
+| `verifying` | `committed` | integrity、checksum、quota、metadata consistency、fsync が完了 |
+| `running` / `verifying` | `rolled_back` | 失敗後に旧 state へ戻せた |
+| `running` / `verifying` | `failed` | rollback 不要または rollback 不能 marker を残した |
+| `queued` / `running` | `cancelled` | cancel 可能な段階で operator が cancel した |
+| terminal | `expired` | retention 期限を過ぎ、result summary だけ破棄した |
+
+terminal state は `committed`、`failed`、`rolled_back`、`cancelled`、`expired` とする。terminal state から副作用を再開してはならない。再実行は新しい job または idempotency 契約に従う。
+
+**Phase 別 job 化方針：**
+
+| 対象 | 既定分類 | 例外条件 |
+|------|----------|----------|
+| DB create/delete | `sync` | 大容量 cleanup を後段に回す場合でも metadata commit は sync |
+| backup download | `streaming` | backup body を metadata job として保存する仕様が追加された場合のみ `async_job` |
+| restore / PITR | `sync` | Phase 節で status endpoint と job schema を定義した場合のみ `async_job` |
+| branch create/delete | `sync` | source snapshot が大きく async 化する場合は branch status API を先に仕様化 |
+| replication catchup | `background_internal` | operator-triggered catchup API を追加する場合は `async_job` |
+| extension load/unload | `sync` | 外部検証が長時間化する場合は `async_job` とし、未検証 load 禁止 |
+| HA promote/demote | `sync` | quorum / external consensus を導入する Phase までは `async_job` 禁止 |
+| internal adapter switch | `sync` | shadow comparison を長時間 job にする場合は active 化と分離 |
+
+**timeout / cancel / shutdown：**
+
+| 状態 | 必須挙動 |
+|------|----------|
+| request timeout before commit | 成功応答禁止。rollback 可能なら rollback、不能なら recovery marker |
+| request timeout after commit | commit 済みなら status / retry で完了を確認できるようにする |
+| operator cancel before prepare | `cancelled`。副作用なし |
+| operator cancel after prepare | rollback 成功後のみ `cancelled`。rollback 不能なら `failed` |
+| graceful shutdown while running | lock release 前に rollback または resumable marker を fsync |
+| forced shutdown | restart recovery で `running` / `verifying` job を deterministic に解決 |
+| expired job cleanup | result summary を消してよいが、resource state と audit log は消さない |
+
+cancel API を提供しない Phase では、cancel 不可を該当 API 節に明記し、shutdown/restart recovery だけを固定する。cancel 不可でも process shutdown による中断は必ず検証対象とする。
+
+**retry / idempotency：**
+
+| 状態 | 必須挙動 |
+|------|----------|
+| 同一 idempotency key + 同一 request body | 既存 job/result を返す。副作用を二重実行しない |
+| 同一 idempotency key + 異なる request body | `409 IDEMPOTENCY_CONFLICT` または既存 error code を仕様化 |
+| idempotency key なしの retry | endpoint 固有の重複 error または新規 job。曖昧な再実行禁止 |
+| committed 後の retry | committed result を返すか、resource already exists / not found を返すかを固定 |
+| failed / rolled_back 後の retry | 新規 job を許可するか、operator action を要求するかを固定 |
+
+idempotency key を導入する場合は、header 名、body hash 範囲、retention、conflict response、secret redaction を §9.5 と API 節に明記する。raw idempotency key を metadata、log、artifact に保存してはならない。
+
+**必須 evidence：**
+
+| Evidence | 必須内容 |
+|----------|----------|
+| job state fixture | queued/running/verifying/terminal の metadata sample |
+| shutdown fixture | running/verifying 中 shutdown 後の recovery 結果 |
+| retry matrix | idempotency key あり/なし、same/different body、terminal state retry |
+| timeout snapshot | request timeout 前後の response、job state、resource state |
+| recovery log | interrupted job の検出、rollback、commit 判定、operator action |
+| redaction snapshot | job response/log/artifact に secret、absolute path、raw SQL args、backup body がないこと |
+
+**禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| job metadata が committed でないのに 2xx success として扱う | merge 不可 |
+| async job を作るが status endpoint / schema / retention がない | Phase 未完了 |
+| retry で restore、branch create、quota charge、token revoke が二重適用される | merge 不可 |
+| shutdown 中の running job が再起動後に silent success する | merge 不可 |
+| cancel 後に副作用が残るのに `cancelled` と表示する | merge 不可 |
+| job result に token、raw path、SQL args、backup body を含める | merge 不可 |
+| background_internal の失敗を health / metrics / log に出さない | Phase 未完了 |
+
+long-running operation に関係する仕様変更は、§9.1.16、§9.1.21、§9.1.22、§9.5、§9.6、§9.7、該当 Phase 節、manifest の Endpoint / Persistence / Error / Regression map、job state fixture、shutdown fixture、retry matrix、recovery log を同時更新する。正常系だけが通っても、timeout、cancel、shutdown、restart recovery、retry、idempotency が固定されていない場合は Phase 完了扱いにしない。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -3857,10 +3966,10 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | 永続化 | §9.1.21 に従い、ファイル名、schema、atomic update、fsync、directory sync、rollback、破損時挙動、recovery evidence が §9.6 に明記されている | 書き込み処理を実装しない |
 | 認証/認可 | §9.1.18 に従い、必要 token、scope、ro/rw、org/group、quota、block policy、拒否条件 precedence が明記されている | success response を返す API を公開しない |
 | ログ/秘匿 | §9.1.17、§12、§9.14 に従い、出力 field、request id、audit 相当記録、秘匿対象、redaction evidence が明記されている | request/SQL/token をログに出す実装を入れない |
-| 並行性 | §9.1.16 に従い、同時 request、resource lock、idempotency、shutdown、transaction の扱いが定義されている | 並行実行で状態を変更する処理を入れない |
+| 並行性 / job lifecycle | §9.1.16 / §9.1.25 に従い、同時 request、resource lock、idempotency、shutdown、transaction、long-running operation の扱いが定義されている | 並行実行で状態を変更する処理を入れない |
 | 後方互換 / Turso 追従 | §9.1.23 に従い、既存 endpoint/schema/config への影響、Turso 差分分類、SDK 影響、migration path が明記されている | 既存契約を変更しない |
 | テスト | §9.8 と §9.1.24 に従い、該当 Phase 行に正常/異常/認可/永続化/障害系と CI / release-check / secret scan evidence がある | 完了扱いにしない |
-| 運用 | config、metrics、health、rollback 手順が必要な Phase では明記されている | 運用 API を公開しない |
+| 運用 | config、metrics、health、rollback、job status / recovery 手順が必要な Phase では明記されている | 運用 API を公開しない |
 
 **Phase 間の前倒し実装ルール：**
 
