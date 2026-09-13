@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.141
+**バージョン：** V.142
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.141` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.142` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -7123,6 +7123,66 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 | resume point が不明なまま中断・引継ぎ・再開する | 実装再開禁止 |
 | failure closure と `P{phase}-PRECISION-CLOSURE` の open count が一致しない | Phase 未完了 |
 
+### 9.11.5 Phase 1〜19 review handoff / third-party reproducibility 最低表
+
+本節は Phase 実装 PR を実装者以外が再現レビューするための最低条件を定義する。実装者は対象 Phase の review handoff packet を作成し、第三者レビュアーが仕様本文、Phase packet、artifact、再現 command だけで Done / Not Done / Spec correction required を判定できる状態にしなければならない。PR description、チャット履歴、口頭説明、実装者の記憶、実装者固有のローカル path、未共有 secret を判定材料にしてはならない。
+
+| Phase | third-party reproducibility 最低対象 |
+|-------|--------------------------------------|
+| 1 | clean checkout build、CLI help、invalid flag、config precedence、stub token、no persistence evidence |
+| 2 | data-dir init、process lock、metadata 初期化、default DB open、WAL / integrity、restart、no HTTP evidence |
+| 3 | `GET /v2/health`、`POST /v2/pipeline`、hrana wire snapshot、SQL error、close behavior、restart、SDK smoke |
+| 4 | auth enabled / disabled、Bearer strictness、JWT claim、ro/rw permission、token create、revoke persistence、secret redaction |
+| 5 | JSONL log parse、request_id、SDK CRUD transcript、restart persistence、unsupported future surface、secret scan、Phase 1〜4 regression |
+| 6 | default route、path DB route、DB name validation、isolation、metadata / directory consistency、restart、Phase 1〜5 regression |
+| 7 | Admin auth、DB CRUD、token CRUD、DB scope JWT、revoke immediate effect、metadata concurrency、Phase 1〜6 regression |
+| 8 | legacy metadata migration、organization / group / location、quota / usage、Turso Platform API wrapper、scope precedence、snapshot、secret scan |
+| 9 | WebSocket upgrade、hello ordering、stream lifecycle、interactive transaction、rollback、store_sql scope、SDK WS transcript |
+| 10 | managed ATTACH allow / deny、arbitrary path rejection、source / target scope、metrics counter、WebSocket gauge、secret redaction |
+| 11 | primary role startup、replication auth、SSE log stream、snapshot consistency、heartbeat、status、frame_no / checksum |
+| 12 | primary + 2 replicas、snapshot bootstrap、WAL catch-up、write redirect、primary down、checksum mismatch、restart |
+| 13 | archive manifest、frame write、restart check、retention cleanup、partial write recovery、corrupt / orphan handling、disabled mode |
+| 14 | backup consistency、restore rollback、PITR success、PITR corrupt / outside range、startup recovery、policy precedence |
+| 15 | current branch、PITR branch、branch delete recovery、routing isolation、source delete denial、restart、seed compatibility |
+| 16 | extension register、allowlist / sha256、load / unload / delete、restart、path / symlink rejection、SQL bypass rejection |
+| 17 | metrics snapshot restore、Prometheus output、usage / quota boundary、flush race、corrupt / future snapshot recovery、label redaction |
+| 18 | promote、demote、redirect、leader unknown、split-brain rejection、restart primary state、network partition、Phase 1〜17 regression |
+| 19 | config flags、shadow mode diff、active mode gate、rollback flag、SDK transcript、performance baseline、crash recovery、Phase 1〜18 regression |
+
+**review handoff packet 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `handoff_id` | `HANDOFF-P{phase}-{number}` 形式の一意 ID |
+| `spec_version` | 対象仕様書 version。Phase Done 時点の `V.{累積番号}` と一致させる |
+| `reading_order` | レビュアーが読む順番。最低でも §0、§1.4、§9.1.51、§9.11.1〜§9.11.5、対象 Phase 詳細節、Phase packet、Done receipt |
+| `reproduction_commands` | clean checkout から実行できる command。各 command は working directory、env、fixture、expected exit code を持つ |
+| `expected_artifacts` | command ごとの生成 artifact path、Contract ID、Scenario ID、snapshot / transcript / log の対応 |
+| `decision_criteria` | Done / Not Done / Spec correction required の判定条件。失敗時に参照する仕様節を含める |
+| `failure_classification` | §9.11.4 の `failure_class` と failure record 作成条件 |
+| `oral_context_free_evidence` | PR description、チャット履歴、口頭補足なしで判定できる証跡一覧 |
+| `reviewer_result` | 第三者が実行した command、exit code、artifact、判定、差分有無、再実行要否 |
+
+**review handoff artifact path 固定規則：**
+
+| Artifact | Path | 必須内容 |
+|----------|------|----------|
+| handoff document | `docs/phase-evidence/phase-{phase}/review-handoff.md` | reading order、再現 command、判定基準、禁止事項、artifact index |
+| handoff result | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/review-handoff.json` | handoff ID、実行 command、exit code、artifact、reviewer result、open item count |
+| handoff transcript | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/review-handoff.txt` | 第三者実行ログ、stdout/stderr summary、secret redaction 済み transcript |
+
+**review handoff 判定規則：**
+
+| 状態 | 判定 |
+|------|------|
+| 対象 Phase の review handoff packet が存在しない | Phase 未完了 |
+| 本節の最低対象の一部が `N/A` で、仕様本文に根拠がない | Phase 未完了 |
+| 再現 command に実装者固有の absolute path、未共有 secret、手動 GUI 操作、口頭手順が必要 | merge 不可 |
+| expected exit code、expected artifact path、decision criteria のいずれかが欠けている | Phase 未完了 |
+| reviewer が PR description、チャット履歴、口頭説明を読まないと判定できない | Phase 未完了 |
+| `reviewer_result` に open item、unknown、not reproduced、manual only が残る | merge 不可 |
+| `P{phase}-PRECISION-CLOSURE` が review handoff result を参照しない | Phase 未完了 |
+
 ### 9.12 PR レビュー観点
 
 PR レビューでは以下を必ず確認する。該当しない項目は PR description に `N/A` と理由を書く。
@@ -12978,7 +13038,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.141` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.142` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
