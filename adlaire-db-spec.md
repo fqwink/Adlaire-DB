@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.161
+**バージョン：** V.162
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.161` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.162` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -7161,6 +7161,24 @@ reconciliation field が `pass` 以外になった場合、実装者は以下の
 
 manifest / reproduction を先に直して `freeze_match_result` の失敗を隠すこと、open count が残っている状態で `final_reconciliation_result` を pass にすること、複数失敗を 1 つの `environment_gap` にまとめることを禁止する。
 
+**precision closure cross-reference ledger：**
+
+Phase packet、Done receipt、artifact manifest、reviewer reproduction、review algorithm、reconciliation result は、同じ closure を以下の ledger entry で相互参照する。ledger にない artifact、manifest entry、reproduction entry、review step、reconciliation field は Phase 完了根拠にしてはならない。
+
+| ledger key | 必須値 |
+|------------|--------|
+| `phase` | 対象 Phase 番号 |
+| `contract_id` | `P{phase}-PRECISION-CLOSURE` |
+| `closure_field` | 11 closure field のいずれか |
+| `artifact_path` | 対象 `closure_field` の標準 artifact path |
+| `manifest_entry_id` | `PCR-P{phase}-{closure-field}-manifest` |
+| `reproduction_entry_id` | `PCR-P{phase}-{closure-field}-reproduction` |
+| `review_step` | `artifact_path` は step 4、manifest は step 5、reproduction は step 6、open count は step 7 に対応 |
+| `reconciliation_field` | `manifest_match_result`、`reproduction_match_result`、`review_algorithm_result`、`open_count_match_result` のいずれか |
+| `source_section` | 対応する §9.11.3〜§9.11.13 の節番号 |
+
+`manifest_entry_id` と `reproduction_entry_id` の `{closure-field}` は `ambiguity-closure`、`failure-closure`、`review-handoff`、`na-closure`、`go-no-go`、`regression-inheritance`、`determinism`、`assertion-binding`、`negative-surface`、`evidence-integrity`、`operator-observability` のいずれかとする。別 Phase の Contract ID、別 Phase の artifact path、または `source_section` と `closure_field` の不一致を参照してはならない。
+
 **命名不一致時の判定：**
 
 | 状態 | 判定 |
@@ -7207,6 +7225,10 @@ manifest / reproduction を先に直して `freeze_match_result` の失敗を隠
 | manifest / reproduction を先に直して `freeze_match_result` の失敗を隠す | merge 不可 |
 | open count が残っている状態で `final_reconciliation_result` を pass にする | merge 不可 |
 | 複数 failure を 1 つの `environment_gap` にまとめる | merge 不可 |
+| cross-reference ledger にない artifact、manifest entry、reproduction entry、review step、reconciliation field を Phase 完了根拠にする | Phase 未完了 |
+| `manifest_entry_id` または `reproduction_entry_id` が `PCR-P{phase}-{closure-field}-manifest` / `PCR-P{phase}-{closure-field}-reproduction` の形式でない | Phase 未完了 |
+| 別 Phase の Contract ID、artifact path、manifest entry、reproduction entry を参照する | merge 不可 |
+| `source_section` と `closure_field` の組み合わせが §9.11.3〜§9.11.13 の対応と一致しない | Phase 未完了 |
 | `未解決判断 0 件` だけで `precision_closure_result` を pass とする | merge 不可 |
 | Contract ID に timestamp、random ID、local username、host name、absolute path 由来文字列が含まれる | merge 不可 |
 | artifact が生成されていないのに Done receipt で pass とする | merge 不可 |
@@ -13666,7 +13688,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.161` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.162` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
