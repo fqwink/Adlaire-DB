@@ -4,15 +4,15 @@
 
 - `docs/spec/adlaire-db-spec.md` and `docs/spec/phase-*.md` are the specification source-of-truth set.
 - Phase 1 through Phase 19 are split under `docs/spec/`.
-- Files under `docs/` are supporting documents only.
-- If this index conflicts with `docs/spec/adlaire-db-spec.md`, `docs/spec/adlaire-db-spec.md` takes precedence.
+- Files outside the specification source-of-truth set are supporting documents.
+- If this index conflicts with the specification source-of-truth set, the specification source-of-truth set takes precedence.
 
 ## Purpose
 
-This index prepares for future documentation organization without changing the
-current specification authority. It provides a stable place to collect document
-roles, future split candidates, and reference rules before any actual split is
-performed.
+This index records the current documentation layout and the authority of each
+document. It also provides a stable place to manage future split candidates and
+reference rules without changing the specification source-of-truth set by
+accident.
 
 ## Current Documents
 
@@ -21,9 +21,9 @@ performed.
 | `docs/spec/adlaire-db-spec.md` | Parent specification and implementation contract | Source of truth |
 | `docs/spec/phase-01.md` - `docs/spec/phase-19.md` | Phase-specific implementation contracts | Source of truth |
 | `AGENTS.md` | Repository work rules for agents | Work rule |
-| `docs/DOCUMENT_INDEX.md` | Documentation index and future split preparation | Supporting document |
+| `docs/DOCUMENT_INDEX.md` | Documentation index and split-management reference | Supporting document |
 
-## Future Split Preparation Rules
+## Split Management Rules
 
 1. Phase files under `docs/spec/` are normative specification files.
 2. Do not move additional normative requirements unless the source-of-truth rule is updated first.
