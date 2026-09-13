@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.138
+**バージョン：** V.139
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.138` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.139` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -6953,6 +6953,67 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 | 本索引の必須 regression を実行せず、影響なし理由も Phase packet / Done receipt にない | Phase 未完了 |
 | 索引、Phase 詳細節、§9.2、§9.4、§9.8、§9.11、§9.17 が矛盾する | 仕様修正 PR に戻す |
 
+### 9.11.2 Phase 1〜19 Contract ID / artifact path 固定契約
+
+本節は Phase packet、受入 manifest、原子タスク台帳、シナリオマトリクス、test、artifact、Done receipt を同じ契約 ID で接続するための命名規則である。実装者は対象 Phase のすべての証跡に Contract ID を割り当て、artifact path と Done receipt field を 1 対 1 で対応させる。後付け ID、PR description だけの対応表、環境依存 path は Phase 完了根拠として扱わない。
+
+**Contract ID 標準形式：**
+
+| Contract ID | 用途 | 必須対応先 |
+|-------------|------|------------|
+| `P{phase}-API-{name}` | HTTP / WebSocket / CLI / Admin / Platform / replication / HA endpoint の request/response 契約 | API snapshot、error snapshot、SDK transcript |
+| `P{phase}-PERSIST-{name}` | metadata、DB file、WAL、archive、backup、branch、extension、metrics、HA state、internal adapter state の永続化契約 | persistence fixture、recovery log、restart transcript |
+| `P{phase}-AUTH-{name}` | JWT、Admin token、Platform token、replication token、HA token、scope、quota、block policy の認証認可契約 | auth matrix、permission matrix、redaction scan |
+| `P{phase}-COMPAT-{name}` | Turso Cloud、libSQL SDK、hrana wire、legacy metadata、previous Phase との互換契約 | compatibility diff、SDK transcript、snapshot diff |
+| `P{phase}-RECOVERY-{name}` | crash、rollback、restart、partial failure、operator_required、startup recovery の契約 | recovery log、failure injection artifact |
+| `P{phase}-REDACTION-{name}` | secret、token、SQL args、raw path、frame bytes、backup body、absolute path の秘匿契約 | secret scan result |
+| `P{phase}-REGRESSION-{name}` | 当該 Phase と過去 Phase の regression 契約 | CI output、release-check output、regression transcript |
+| `P{phase}-PRECISION-CLOSURE` | Done receipt の `precision_closure_result` を証明する最終閉鎖契約 | precision closure artifact、review handoff、open decision 0 件 |
+
+`{phase}` は整数だけを使い、`P01` のような 0 padding はしない。`{name}` は ASCII lowercase、数字、hyphen のみを許可し、space、underscore、slash、日本語、timestamp、random ID、local username、host name を含めてはならない。例: `P14-RECOVERY-restore-rollback`、`P19-COMPAT-sdk-transcript`。
+
+**artifact path 標準形：**
+
+| Artifact 種別 | Path | 必須内容 |
+|---------------|------|----------|
+| request fixture | `tests/fixtures/phase-{phase}/{contract-id}/request.json` | method、path、query、header subset、body、normalization rule |
+| response snapshot | `tests/snapshots/phase-{phase}/{contract-id}/response.json` | status、header subset、body、error code、redaction |
+| scenario artifact | `tests/artifacts/phase-{phase}/{contract-id}/scenario-{scenario-id}.json` | scenario ID、input、expected、actual、pass/fail、artifact generator |
+| persistence fixture | `tests/fixtures/phase-{phase}/{contract-id}/persistence.json` | file path、schema version、before/after、fsync、rollback、restart result |
+| recovery log | `tests/artifacts/phase-{phase}/{contract-id}/recovery.log` | failure injection、detected state、rollback/recovery result、operator action |
+| compatibility diff | `tests/artifacts/phase-{phase}/{contract-id}/compat.diff` | Turso / libSQL SDK / hrana / previous Phase の正規化済み差分 |
+| SDK transcript | `tests/artifacts/phase-{phase}/{contract-id}/sdk-transcript.txt` | SDK name/version、command、request/response、exit code |
+| CI output | `tests/artifacts/phase-{phase}/{contract-id}/ci.txt` | command、environment、exit code、pass/fail summary |
+| secret scan | `tests/artifacts/phase-{phase}/{contract-id}/secret-scan.txt` | scan command、対象 path、検出 0 件、redaction rule |
+| performance baseline | `tests/artifacts/phase-{phase}/{contract-id}/performance.json` | p95、RSS、DB size、WAL size、workload、baseline ratio |
+| phase packet | `docs/phase-evidence/phase-{phase}/packet.md` | 本索引、Contract ID、Task ID、Scenario ID、regression、Done gate |
+| Done receipt | `docs/phase-evidence/phase-{phase}/done.md` | Done receipt fields、evidence index、failure closure、precision closure |
+
+**Task / Scenario / Done receipt 対応規則：**
+
+| 対象 | 固定規則 |
+|------|----------|
+| `TASK-P{phase}-{number}` | 1 つ以上の Contract ID を `owner_contracts` として持つ。owner なし task は merge 不可 |
+| `SCN-P{phase}-{number}` | 1 つ以上の Contract ID と artifact path を持つ。artifact なし scenario は pass 扱い禁止 |
+| `atomic_task_result` | 全 task ID、owner Contract ID、verification command、artifact path、pass/fail を列挙する |
+| `scenario_matrix_result` | 全 scenario ID、owner Contract ID、artifact path、pass/fail、N/A reason を列挙する |
+| `compatibility_baseline_result` | `P{phase}-COMPAT-*` の artifact をすべて参照する |
+| `secret_redaction_result` | `P{phase}-REDACTION-*` の secret scan をすべて参照する |
+| `regression_result` | `P{phase}-REGRESSION-*` の CI / regression transcript をすべて参照する |
+| `precision_closure_result` | 必ず `P{phase}-PRECISION-CLOSURE` を参照し、coverage gap、open task、open scenario、open decision、known flaky が 0 件であることを示す |
+
+**命名不一致時の判定：**
+
+| 状態 | 判定 |
+|------|------|
+| Contract ID、Task ID、Scenario ID、artifact path、Done receipt field のいずれかが相互参照できない | Phase 未完了 |
+| artifact path に Contract ID が含まれない | Phase 未完了 |
+| `precision_closure_result` が `P{phase}-PRECISION-CLOSURE` を参照しない | Phase 未完了 |
+| Contract ID に timestamp、random ID、local username、host name、absolute path 由来文字列が含まれる | merge 不可 |
+| artifact が生成されていないのに Done receipt で pass とする | merge 不可 |
+| snapshot だけを更新し、対応する Contract ID、oracle、manifest、Done receipt を更新しない | merge 不可 |
+| 同じ Contract ID が複数の意味を持つ、または同じ意味に複数 ID を割り当てる | 仕様修正 PR に戻す |
+
 ### 9.12 PR レビュー観点
 
 PR レビューでは以下を必ず確認する。該当しない項目は PR description に `N/A` と理由を書く。
@@ -12808,7 +12869,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.138` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.139` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
