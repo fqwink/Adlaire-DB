@@ -1,8 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    convert::Infallible,
-    sync::Arc,
-};
+use std::{collections::HashMap, convert::Infallible, sync::Arc};
 
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
@@ -20,7 +16,10 @@ use tokio_tungstenite::{
 
 use crate::{
     auth::{AccessLevel, Claims},
-    db::{sqld_adapter::SqldAdapter, validate_db_name, DbInfo},
+    db::{
+        sqld_adapter::{from_libsql_value, to_libsql_params, SqlResult, SqldAdapter},
+        validate_db_name, DbInfo,
+    },
     error::AppError,
     hrana::{
         convert::{hrana_to_sql, sql_to_stmt_result},
@@ -362,8 +361,13 @@ struct WsSession {
     db_info: DbInfo,
     claims: Claims,
     quota_exceeded: bool,
-    streams: HashSet<u32>,
+    streams: HashMap<u32, WsStream>,
     stored_sql: HashMap<u32, String>,
+}
+
+struct WsStream {
+    conn: libsql::Connection,
+    tx_open: bool,
 }
 
 impl WsSession {
@@ -378,7 +382,7 @@ impl WsSession {
             db_info,
             claims,
             quota_exceeded,
-            streams: HashSet::new(),
+            streams: HashMap::new(),
             stored_sql: HashMap::new(),
         }
     }
@@ -390,7 +394,7 @@ impl WsSession {
     ) -> Result<ResponseBody, AppError> {
         match body {
             RequestBody::OpenStream => {
-                self.streams.insert(stream_id);
+                self.open_stream(stream_id)?;
                 Ok(ResponseBody::OpenStream)
             }
             RequestBody::CloseStream => {
@@ -400,7 +404,9 @@ impl WsSession {
             RequestBody::Execute { stmt } => {
                 self.require_stream(stream_id)?;
                 let stmt = self.resolve_stmt(stmt)?;
-                let result = self.execute_stmt(&stmt).await?;
+                self.precheck_stmt(&stmt)?;
+                let stream = self.require_stream_mut(stream_id)?;
+                let result = execute_stmt_on_stream(stream, &stmt).await?;
                 Ok(ResponseBody::Execute { result })
             }
             RequestBody::Batch { batch } => {
@@ -412,7 +418,7 @@ impl WsSession {
                         .resolve_stmt(stmt)
                         .and_then(|stmt| self.precheck_stmt(&stmt).map(|_| stmt))
                     {
-                        Ok(stmt) => match self.execute_stmt_unchecked(&stmt).await {
+                        Ok(stmt) => match self.execute_stmt_for_stream(stream_id, &stmt).await {
                             Ok(result) => {
                                 step_results.push(Some(result));
                                 step_errors.push(None);
@@ -445,17 +451,19 @@ impl WsSession {
                 if self.claims.resolve_access(&self.db_info.name) != AccessLevel::Rw {
                     return Err(AppError::PermissionDenied);
                 }
-                self.db.execute_batch(&sql).await?;
+                let stream = self.require_stream_mut(stream_id)?;
+                stream.conn.execute_batch(&sql).await.map_err(libsql_err)?;
+                apply_sequence_transaction_state(stream, &sql);
                 Ok(ResponseBody::Sequence)
             }
             RequestBody::Describe { stmt } => {
                 self.require_stream(stream_id)?;
                 let stmt = self.resolve_stmt(stmt)?;
-                let mut stmt = stmt;
-                stmt.want_rows = true;
-                match self.execute_stmt(&stmt).await {
-                    Ok(result) => Ok(ResponseBody::Describe {
-                        cols: result.cols,
+                self.precheck_stmt(&stmt)?;
+                let stream = self.require_stream_mut(stream_id)?;
+                match describe_stmt_on_stream(stream, &stmt).await {
+                    Ok(cols) => Ok(ResponseBody::Describe {
+                        cols,
                         params: vec![],
                     }),
                     Err(AppError::Sqld(_)) => Ok(ResponseBody::Describe {
@@ -466,6 +474,7 @@ impl WsSession {
                 }
             }
             RequestBody::StoreSql { sql_id, sql } => {
+                self.require_stream(stream_id)?;
                 if self.stored_sql.contains_key(&sql_id) {
                     return Err(AppError::InvalidRequest);
                 }
@@ -473,31 +482,56 @@ impl WsSession {
                 Ok(ResponseBody::StoreSql)
             }
             RequestBody::CloseSql { sql_id } => {
+                self.require_stream(stream_id)?;
                 self.stored_sql.remove(&sql_id);
                 Ok(ResponseBody::CloseSql)
             }
             RequestBody::OpenCursor | RequestBody::FetchCursor | RequestBody::CloseCursor => {
                 Err(AppError::ConfigError("NOT_IMPLEMENTED".to_string()))
             }
+            RequestBody::Unknown => Err(AppError::InvalidRequest),
         }
     }
 
+    fn open_stream(&mut self, stream_id: u32) -> Result<(), AppError> {
+        if self.streams.contains_key(&stream_id) {
+            return Err(AppError::InvalidRequest);
+        }
+        let conn = self.db.connect()?;
+        self.streams.insert(
+            stream_id,
+            WsStream {
+                conn,
+                tx_open: false,
+            },
+        );
+        Ok(())
+    }
+
     async fn close_stream(&mut self, stream_id: u32) {
-        self.streams.remove(&stream_id);
+        if let Some(mut stream) = self.streams.remove(&stream_id) {
+            rollback_stream_if_needed(&mut stream).await;
+        }
     }
 
     async fn rollback_open_streams(&mut self) {
-        for _ in self.streams.drain() {
-            let _ = self.db.execute_batch("ROLLBACK").await;
+        for (_, mut stream) in self.streams.drain() {
+            rollback_stream_if_needed(&mut stream).await;
         }
     }
 
     fn require_stream(&self, stream_id: u32) -> Result<(), AppError> {
-        if self.streams.contains(&stream_id) {
+        if self.streams.contains_key(&stream_id) {
             Ok(())
         } else {
             Err(AppError::InvalidRequest)
         }
+    }
+
+    fn require_stream_mut(&mut self, stream_id: u32) -> Result<&mut WsStream, AppError> {
+        self.streams
+            .get_mut(&stream_id)
+            .ok_or(AppError::InvalidRequest)
     }
 
     fn resolve_stmt(&self, stmt: WsStmt) -> Result<Stmt, AppError> {
@@ -518,18 +552,13 @@ impl WsSession {
         })
     }
 
-    async fn execute_stmt(&self, stmt: &Stmt) -> Result<StmtResult, AppError> {
-        self.precheck_stmt(stmt)?;
-        self.execute_stmt_unchecked(stmt).await
-    }
-
-    async fn execute_stmt_unchecked(&self, stmt: &Stmt) -> Result<StmtResult, AppError> {
-        if !stmt.named_args.is_empty() {
-            return Err(AppError::InvalidRequest);
-        }
-        let args: Result<Vec<_>, _> = stmt.args.iter().map(hrana_to_sql).collect();
-        let result = self.db.execute(&stmt.sql, args?, stmt.want_rows).await?;
-        Ok(sql_to_stmt_result(result))
+    async fn execute_stmt_for_stream(
+        &mut self,
+        stream_id: u32,
+        stmt: &Stmt,
+    ) -> Result<StmtResult, AppError> {
+        let stream = self.require_stream_mut(stream_id)?;
+        execute_stmt_on_stream(stream, stmt).await
     }
 
     fn precheck_stmt(&self, stmt: &Stmt) -> Result<(), AppError> {
@@ -550,10 +579,140 @@ impl WsSession {
     }
 }
 
+async fn execute_stmt_on_stream(
+    stream: &mut WsStream,
+    stmt: &Stmt,
+) -> Result<StmtResult, AppError> {
+    if !stmt.named_args.is_empty() {
+        return Err(AppError::InvalidRequest);
+    }
+    let args: Result<Vec<_>, _> = stmt.args.iter().map(hrana_to_sql).collect();
+    let result = execute_stmt_on_conn(&stream.conn, stmt, args?).await?;
+    apply_stmt_transaction_state(stream, &stmt.sql);
+    Ok(sql_to_stmt_result(result))
+}
+
+async fn describe_stmt_on_stream(
+    stream: &mut WsStream,
+    stmt: &Stmt,
+) -> Result<Vec<crate::hrana::types::Col>, AppError> {
+    if !stmt.named_args.is_empty() {
+        return Err(AppError::InvalidRequest);
+    }
+    let prepared = stream.conn.prepare(&stmt.sql).await.map_err(libsql_err)?;
+    Ok(prepared
+        .columns()
+        .iter()
+        .map(|col| crate::hrana::types::Col {
+            name: Some(col.name().to_string()),
+            decltype: col.decl_type().map(str::to_string),
+        })
+        .collect())
+}
+
+async fn execute_stmt_on_conn(
+    conn: &libsql::Connection,
+    stmt: &Stmt,
+    args: Vec<crate::db::sqld_adapter::SqlValue>,
+) -> Result<SqlResult, AppError> {
+    let params = to_libsql_params(args);
+    if stmt.want_rows {
+        let mut rows = conn.query(&stmt.sql, params).await.map_err(libsql_err)?;
+
+        let col_count = rows.column_count();
+        let cols: Vec<(Option<String>, Option<String>)> = (0..col_count)
+            .map(|i| {
+                let name = rows.column_name(i).map(|s| s.to_string());
+                (name, None)
+            })
+            .collect();
+
+        let mut result_rows = vec![];
+        while let Some(row) = rows.next().await.map_err(libsql_err)? {
+            let cells = (0..col_count)
+                .map(|i| {
+                    let v = row.get_value(i).unwrap_or(libsql::Value::Null);
+                    from_libsql_value(v)
+                })
+                .collect();
+            result_rows.push(cells);
+        }
+
+        Ok(SqlResult {
+            cols,
+            rows: result_rows,
+            rows_affected: 0,
+            last_insert_rowid: None,
+        })
+    } else {
+        let rows_affected = conn.execute(&stmt.sql, params).await.map_err(libsql_err)?;
+        Ok(SqlResult {
+            cols: vec![],
+            rows: vec![],
+            rows_affected,
+            last_insert_rowid: Some(conn.last_insert_rowid()),
+        })
+    }
+}
+
+fn libsql_err(e: libsql::Error) -> AppError {
+    let msg = e.to_string();
+    if msg.contains("locked") || msg.contains("busy") {
+        AppError::StorageBusy
+    } else {
+        AppError::Sqld(msg)
+    }
+}
+
+async fn rollback_stream_if_needed(stream: &mut WsStream) {
+    if stream.tx_open {
+        if stream.conn.execute_batch("ROLLBACK").await.is_ok() {
+            stream.tx_open = false;
+        }
+    }
+}
+
+fn apply_stmt_transaction_state(stream: &mut WsStream, sql: &str) {
+    match transaction_action(sql) {
+        TransactionAction::Begin => stream.tx_open = true,
+        TransactionAction::End => stream.tx_open = false,
+        TransactionAction::None => {}
+    }
+}
+
+fn apply_sequence_transaction_state(stream: &mut WsStream, sql: &str) {
+    apply_stmt_transaction_state(stream, sql);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransactionAction {
+    None,
+    Begin,
+    End,
+}
+
+fn transaction_action(sql: &str) -> TransactionAction {
+    match first_sql_keyword(sql).as_deref() {
+        Some("BEGIN") => TransactionAction::Begin,
+        Some("COMMIT") | Some("END") | Some("ROLLBACK") => TransactionAction::End,
+        _ => TransactionAction::None,
+    }
+}
+
 fn is_write_stmt(sql: &str) -> bool {
-    let upper = sql.trim_start().to_ascii_uppercase();
+    let Some(first) = first_sql_keyword(sql) else {
+        return false;
+    };
+    if first == "BEGIN" {
+        let second = sql
+            .trim_start()
+            .split_whitespace()
+            .nth(1)
+            .map(|s| s.trim_matches(';').to_ascii_uppercase());
+        return matches!(second.as_deref(), Some("IMMEDIATE" | "EXCLUSIVE"));
+    }
     matches!(
-        upper.split_whitespace().next().unwrap_or(""),
+        first.as_str(),
         "INSERT"
             | "UPDATE"
             | "DELETE"
@@ -562,11 +721,17 @@ fn is_write_stmt(sql: &str) -> bool {
             | "ALTER"
             | "REPLACE"
             | "PRAGMA"
-            | "BEGIN"
             | "COMMIT"
             | "ROLLBACK"
             | "ATTACH"
     )
+}
+
+fn first_sql_keyword(sql: &str) -> Option<String> {
+    sql.trim_start()
+        .split_whitespace()
+        .next()
+        .map(|s| s.trim_matches(';').to_ascii_uppercase())
 }
 
 fn hrana_error(error: AppError) -> HranaError {
@@ -643,15 +808,30 @@ enum ClientMessage {
 enum RequestBody {
     OpenStream,
     CloseStream,
-    Execute { stmt: WsStmt },
-    Batch { batch: Vec<WsStmt> },
-    Sequence { sql: String },
-    Describe { stmt: WsStmt },
-    StoreSql { sql_id: u32, sql: String },
-    CloseSql { sql_id: u32 },
+    Execute {
+        stmt: WsStmt,
+    },
+    Batch {
+        batch: Vec<WsStmt>,
+    },
+    Sequence {
+        sql: String,
+    },
+    Describe {
+        stmt: WsStmt,
+    },
+    StoreSql {
+        sql_id: u32,
+        sql: String,
+    },
+    CloseSql {
+        sql_id: u32,
+    },
     OpenCursor,
     FetchCursor,
     CloseCursor,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -714,7 +894,11 @@ struct DescribeParam {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::sqld_adapter::MockSqldAdapter;
+    use crate::{
+        db::sqld_adapter::{MockSqldAdapter, RealSqldAdapter},
+        hrana::types::Value,
+    };
+    use std::path::PathBuf;
 
     fn test_db_info() -> DbInfo {
         DbInfo {
@@ -735,6 +919,63 @@ mod tests {
 
     fn test_claims() -> Claims {
         Claims::unauthenticated()
+    }
+
+    fn temp_db_path(test_name: &str) -> PathBuf {
+        let path = std::env::temp_dir()
+            .join("adlaire-db-phase9-ws")
+            .join(format!("{}-{}.db", test_name, uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        path
+    }
+
+    async fn real_session(test_name: &str) -> (WsSession, PathBuf) {
+        let path = temp_db_path(test_name);
+        let adapter = RealSqldAdapter::open(&path, 5000, false).await.unwrap();
+        (
+            WsSession::new(Arc::new(adapter), test_db_info(), test_claims(), false),
+            path,
+        )
+    }
+
+    async fn open_stream(session: &mut WsSession, stream_id: u32) {
+        assert!(session
+            .handle_request(stream_id, RequestBody::OpenStream)
+            .await
+            .is_ok());
+    }
+
+    async fn execute_sql(
+        session: &mut WsSession,
+        stream_id: u32,
+        sql: &str,
+        want_rows: bool,
+    ) -> ResponseBody {
+        session
+            .handle_request(
+                stream_id,
+                RequestBody::Execute {
+                    stmt: WsStmt {
+                        sql: Some(sql.into()),
+                        sql_id: None,
+                        args: vec![],
+                        named_args: vec![],
+                        want_rows,
+                    },
+                },
+            )
+            .await
+            .unwrap()
+    }
+
+    fn first_integer(response: ResponseBody) -> String {
+        let ResponseBody::Execute { result } = response else {
+            panic!("expected execute response");
+        };
+        let Value::Integer { value } = &result.rows[0][0] else {
+            panic!("expected integer cell");
+        };
+        value.clone()
     }
 
     #[test]
@@ -782,12 +1023,9 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_duplicate_store_sql_id() {
-        let mut session = WsSession::new(
-            Arc::new(MockSqldAdapter),
-            test_db_info(),
-            test_claims(),
-            false,
-        );
+        let (mut session, path) = real_session("duplicate-store-sql").await;
+        open_stream(&mut session, 1).await;
+
         assert!(session
             .handle_request(
                 1,
@@ -808,5 +1046,175 @@ mod tests {
             )
             .await;
         assert!(matches!(result, Err(AppError::InvalidRequest)));
+
+        drop(session);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn rejects_store_sql_before_open_stream() {
+        let mut session = WsSession::new(
+            Arc::new(MockSqldAdapter),
+            test_db_info(),
+            test_claims(),
+            false,
+        );
+        let result = session
+            .handle_request(
+                1,
+                RequestBody::StoreSql {
+                    sql_id: 7,
+                    sql: "SELECT 1".into(),
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(AppError::InvalidRequest)));
+    }
+
+    #[tokio::test]
+    async fn rejects_unknown_request_body_without_closing_session() {
+        let (mut session, path) = real_session("unknown-request").await;
+        open_stream(&mut session, 1).await;
+
+        let result = session.handle_request(1, RequestBody::Unknown).await;
+        assert!(matches!(result, Err(AppError::InvalidRequest)));
+
+        let select = execute_sql(&mut session, 1, "SELECT 1", true).await;
+        assert_eq!(first_integer(select), "1");
+
+        drop(session);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn store_sql_is_connection_local_and_close_invalidates_id() {
+        let (mut session, path) = real_session("store-sql-close").await;
+        open_stream(&mut session, 1).await;
+
+        assert!(session
+            .handle_request(
+                1,
+                RequestBody::StoreSql {
+                    sql_id: 7,
+                    sql: "SELECT 1".into(),
+                },
+            )
+            .await
+            .is_ok());
+
+        let stored = session
+            .handle_request(
+                1,
+                RequestBody::Execute {
+                    stmt: WsStmt {
+                        sql: None,
+                        sql_id: Some(7),
+                        args: vec![],
+                        named_args: vec![],
+                        want_rows: true,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(first_integer(stored), "1");
+
+        assert!(session
+            .handle_request(1, RequestBody::CloseSql { sql_id: 7 })
+            .await
+            .is_ok());
+        let result = session
+            .handle_request(
+                1,
+                RequestBody::Execute {
+                    stmt: WsStmt {
+                        sql: None,
+                        sql_id: Some(7),
+                        args: vec![],
+                        named_args: vec![],
+                        want_rows: true,
+                    },
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(AppError::InvalidRequest)));
+
+        drop(session);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn websocket_stream_commit_persists_rows() {
+        let (mut session, path) = real_session("commit-persists").await;
+        open_stream(&mut session, 1).await;
+
+        execute_sql(
+            &mut session,
+            1,
+            "CREATE TABLE items (id INTEGER PRIMARY KEY)",
+            false,
+        )
+        .await;
+        execute_sql(&mut session, 1, "BEGIN", false).await;
+        execute_sql(&mut session, 1, "INSERT INTO items DEFAULT VALUES", false).await;
+        execute_sql(&mut session, 1, "COMMIT", false).await;
+
+        open_stream(&mut session, 2).await;
+        let count = execute_sql(&mut session, 2, "SELECT COUNT(*) FROM items", true).await;
+        assert_eq!(first_integer(count), "1");
+
+        drop(session);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn websocket_stream_close_rolls_back_open_transaction() {
+        let (mut session, path) = real_session("close-rolls-back").await;
+        open_stream(&mut session, 1).await;
+
+        execute_sql(
+            &mut session,
+            1,
+            "CREATE TABLE items (id INTEGER PRIMARY KEY)",
+            false,
+        )
+        .await;
+        execute_sql(&mut session, 1, "BEGIN", false).await;
+        execute_sql(&mut session, 1, "INSERT INTO items DEFAULT VALUES", false).await;
+        session.close_stream(1).await;
+
+        open_stream(&mut session, 2).await;
+        let count = execute_sql(&mut session, 2, "SELECT COUNT(*) FROM items", true).await;
+        assert_eq!(first_integer(count), "0");
+
+        drop(session);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn websocket_streams_use_independent_connections() {
+        let (mut session, path) = real_session("independent-connections").await;
+        open_stream(&mut session, 1).await;
+        open_stream(&mut session, 2).await;
+
+        execute_sql(
+            &mut session,
+            1,
+            "CREATE TABLE items (id INTEGER PRIMARY KEY)",
+            false,
+        )
+        .await;
+        execute_sql(&mut session, 1, "BEGIN", false).await;
+        execute_sql(&mut session, 1, "INSERT INTO items DEFAULT VALUES", false).await;
+
+        let uncommitted = execute_sql(&mut session, 2, "SELECT COUNT(*) FROM items", true).await;
+        assert_eq!(first_integer(uncommitted), "0");
+
+        execute_sql(&mut session, 1, "COMMIT", false).await;
+        let committed = execute_sql(&mut session, 2, "SELECT COUNT(*) FROM items", true).await;
+        assert_eq!(first_integer(committed), "1");
+
+        drop(session);
+        let _ = std::fs::remove_file(path);
     }
 }

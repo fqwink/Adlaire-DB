@@ -5,7 +5,7 @@ Rust + libsql（embedded SQLite）で実装する。外部 Web フレームワ�
 
 ## 現在の状態
 
-**Phase 9 実装中** — HTTP サーバー・hrana-http v2 パイプライン・JWT 認証・ログ・マルチ DB ルーター・管理 API・Turso Cloud 互換管理モデル・hrana-ws v3 の基本経路が動作する。
+**Phase 9 完了** — HTTP サーバー・hrana-http v2 パイプライン・JWT 認証・ログ・マルチ DB ルーター・管理 API・Turso Cloud 互換管理モデル・hrana-ws v3 のインタラクティブトランザクションが動作する。
 
 | フェーズ | 内容 | 状態 |
 |----------|------|------|
@@ -17,7 +17,7 @@ Rust + libsql（embedded SQLite）で実装する。外部 Web フレームワ�
 | Phase 6 | マルチ DB ルーター | ✅ 完了 |
 | Phase 7 | 管理 API・トークン CRUD・DB スコープ JWT | ✅ 完了 |
 | Phase 8 | Turso Cloud 互換管理モデル | ✅ 完了 |
-| Phase 9 | WebSocket（hrana-ws v3） | 🚧 実装中 |
+| Phase 9 | WebSocket（hrana-ws v3） | ✅ 完了 |
 | Phase 10 | ATTACH DB・メトリクス | 🔲 未実装 |
 | Phase 11 | レプリケーション基盤（WAL ストリーム・スナップショット） | 🔲 未実装 |
 | Phase 12 | レプリカ同期・書き込みリダイレクト | 🔲 未実装 |
@@ -110,9 +110,10 @@ Phase 8 時点では、以下の管理 API が利用できる。
 - `GET /admin/v1/tokens/{id}`
 - `DELETE /admin/v1/tokens/{id}`
 
-## 制約（Phase 9 実装中）
+## 制約（Phase 9 完了時点）
 
-- WebSocket（hrana-ws v3）は Phase 9 で基本経路を実装中
+- WebSocket（hrana-ws v3）は `/v3/baton` と `/{db-name}/v3/baton` で利用可能
+- WebSocket の cursor API と `hrana3-protobuf` は Phase 9 対象外
 - ATTACH DB・メトリクスは Phase 10 以降
 - レプリケーション、バックアップ、ブランチ、HA は Phase 11 以降
 
