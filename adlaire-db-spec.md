@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.97
+**バージョン：** V.98
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.97` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.98` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.97` の次は `V.98` とし、以後 `V.99`、`V.100` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.98` の次は `V.99` とし、以後 `V.100`、`V.101` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -4005,6 +4005,7 @@ Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§
 | `release_check_result` | local / Docker / CI の実行コマンド、環境差分、再実行条件 |
 | `oracle_result` | §9.1.35 の oracle 名、version、path、比較 command、exit code、差分理由 |
 | `defect_classification_result` | §9.1.36 の defect 件数、分類別件数、`open:0`、evidence path |
+| `operational_state_result` | §9.1.37 の state matrix、health snapshot、API behavior、recovery runbook |
 | `reviewer_decision` | `Done`、`Not Done`、`Spec correction required` のいずれか |
 
 **Phase group Done minimum：**
@@ -4277,6 +4278,82 @@ Phase acceptance oracle に関係する仕様変更は、§9.1.3、§9.1.10、§
 | `works for me` / `想定通り` | artifact と oracle がない限り無効 |
 
 Phase defect classification に関係する仕様変更は、§9.1.1、§9.1.1a、§9.1.3、§9.1.10、§9.1.11、§9.1.14、§9.1.23、§9.1.24、§9.1.33、§9.1.35、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。defect classification がない失敗を残したまま Phase を完了扱いにしてはならない。
+
+#### 9.1.37 Phase operational state / recovery runbook 固定契約
+
+各 Phase は、実装対象 resource が正常時、劣化時、復旧中、rollback 必須時、operator 判断必須時にどの API 応答、health、log、write 可否、retry 可否を示すかを固定しなければならない。壊れた状態を `ok` と表示すること、operator 判断が必要な状態を自動成功扱いにすること、recovery 中に成功応答を返すことは禁止する。
+
+**Operational state 固定表：**
+
+| State | 定義 | API success | Write | Health | Log | Operator action |
+|-------|------|-------------|-------|--------|-----|-----------------|
+| `healthy` | 対象 resource が仕様通り利用可能 | 許可 | 許可 | `ok` | `INFO` | 不要 |
+| `degraded` | read または一部機能は可能だが lag、retry、再取得、縮退がある | read は Phase 節で許可可。write は Phase 節で明記した場合のみ | 原則禁止。許可する場合は data loss なしを証明 | `degraded` | `WARN` | 状態確認または復旧判断 |
+| `unavailable` | 対象 resource を安全に利用できない | 禁止。規定 error を返す | 禁止 | `unavailable` | `ERROR` | 必要 |
+| `recovering` | 起動時または job recovery が進行中 | 対象 resource は成功応答禁止 | 禁止 | `recovering` | `INFO` / `WARN` | 原則不要。ただし timeout 時は必要 |
+| `rollback_required` | 旧状態へ戻す必要があるが未完了 | 禁止 | 禁止 | `degraded` または `unavailable` | `ERROR` | 自動 rollback 可否を runbook で判定 |
+| `operator_required` | 自動復旧が安全でない、または外部判断が必要 | 禁止 | 禁止 | `degraded` または `unavailable` | `ERROR` | 必須 |
+| `blocked` | auth、quota、config、scope、policy により意図的に拒否 | 規定 error のみ | 禁止 | 原則 `ok`。system 健全性は壊れていない | `WARN` または audit 相当 | 設定変更または権限変更 |
+
+**Runbook 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `state` | 上記 operational state のいずれか |
+| `detection_condition` | state を検出する条件。file marker、checksum、health probe、job status、error code、fixture を含める |
+| `affected_resource` | DB、branch、metadata file、replica、archive、extension、HA node、internal adapter など |
+| `api_behavior` | 対象 API の status、body、error code、retry header、partial response 可否 |
+| `write_policy` | write 許可 / 拒否、拒否 error、既存 transaction の扱い |
+| `health_response` | `GET /v2/health` または該当 health/status endpoint の response field |
+| `automatic_recovery` | 自動 recovery が許可される条件、禁止される条件、timeout |
+| `operator_action` | 必要な手動操作、承認、復旧手順。不要な場合は `none` |
+| `retry_condition` | client retry 可否、server retry 可否、backoff、再実行 idempotency |
+| `evidence_artifact` | recovery log、health snapshot、error snapshot、restart fixture、operator marker |
+
+**Phase group operational minimum：**
+
+| Phase group | 必須 state / runbook |
+|-------------|----------------------|
+| Phase 1〜5 | 起動失敗、config invalid、DB open failure、lock held、health `ok` / `unavailable` |
+| Phase 6〜8 | metadata migration failure、legacy fallback failure、quota blocked、scope denial、usage unavailable |
+| Phase 9〜10 | WebSocket tx rollback、disconnect recovery、ATTACH blocked、metrics read degraded |
+| Phase 11〜13 | replica lag degraded、primary unavailable、checksum mismatch、archive manifest corruption、retention cleanup failure |
+| Phase 14〜15 | restore rollback、`restore-failed.json`、PITR archive missing、branch delete recovery、source unavailable |
+| Phase 16〜18 | extension load failure、metrics snapshot corruption、HA no leader、candidate state、split-brain operator_required |
+| Phase 19 | adapter shadow diff、active failure、rollback flag、performance blocked、internal path unavailable |
+
+**自動 recovery 許可 / 禁止：**
+
+| 状態 | 自動 recovery |
+|------|---------------|
+| temp file のみ残存し target が正常 | 許可。temp cleanup と WARN log |
+| commit marker 前の interrupted migration | rollback または起動失敗。仕様にない推測 migration 禁止 |
+| checksum mismatch | 対象 artifact を使用禁止にし、再取得または operator_required |
+| `restore-failed.json` 存在 | 自動復旧禁止。対象 DB は write 禁止、operator_required |
+| HA split-brain | 自動 primary 昇格禁止。operator_required |
+| extension signature mismatch | 自動許可禁止。extension unavailable |
+| internal adapter active failure | silent fallback 禁止。rollback flag または operator_required |
+
+**API / health 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| `degraded` / `unavailable` / `recovering` を health `ok` のみで返す | merge 不可 |
+| rollback 未完了 resource に 2xx success を返す | merge 不可 |
+| operator_required を自動修復して成功扱いにする | merge 不可 |
+| blocked と degraded を同じ error code で返す | Phase 未完了 |
+| recovery 中に partial list / partial metadata を返す | Phase 未完了 |
+| recovery log に secret、token、raw path、SQL args、backup body を出す | merge 不可 |
+
+**Done receipt への反映：**
+
+| Done receipt field | 必須内容 |
+|--------------------|----------|
+| `operational_state_result` | state matrix、health snapshot、API behavior snapshot、write policy evidence |
+| `recovery_runbook_result` | runbook fields、automatic recovery 可否、operator action、restart fixture |
+| `operator_required_result` | operator_required がある場合の marker、health、manual action、解除条件。なければ `none` |
+
+Phase operational state に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.21、§9.1.22、§9.1.25、§9.1.30、§9.1.31、§9.1.33、§9.1.36、§9.5、§9.6、§9.7、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。operational state と recovery runbook が固定されていない failure path は、実装が正常系で動いていても Phase 完了扱いにしない。
 
 ### 9.2 Phase 別完了ゲート
 
@@ -4914,6 +4991,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Phase execution state | §9.1.34 に従い、current step、completed/open contracts、last command、allowed/forbidden changes、next command、blocking decision が明記されている | 中断・引継ぎ・再開を行わない |
 | Acceptance oracle | §9.1.35 に従い、API/error/persistence/migration/SDK/unsupported/security/compatibility/regression の正解 artifact、正規化、更新条件が固定されている | snapshot / fixture / expected を更新しない |
 | Defect classification | §9.1.36 に従い、spec gap、implementation bug、regression bug、compatibility diff、oracle gap、environment gap、security gap、persistence gap が分類され、`open:0` になっている | Phase 完了扱いにしない |
+| Operational state / recovery runbook | §9.1.37 に従い、healthy、degraded、unavailable、recovering、rollback_required、operator_required、blocked の API / write / health / log / operator action が固定されている | failure path を実装しない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | 仕様内相互参照 | §9.1.29 に従い、Phase 番号、TC ID、Task ID、API 契約 ID、error code、persistence key、evidence 名、manifest 参照が一致している | 仕様修正 PR に戻す |
 | Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
