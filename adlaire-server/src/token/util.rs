@@ -1,6 +1,8 @@
 use std::{collections::HashMap, fs::OpenOptions, io::Write, path::Path};
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Duration, Utc};
+use ring::digest;
 use uuid::Uuid;
 
 use crate::auth::AccessLevel;
@@ -10,6 +12,20 @@ pub struct TokenRecord {
     pub id:         String,
     pub access:     AccessLevel,
     pub dbs:        Option<HashMap<String, AccessLevel>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
+    #[serde(default)]
+    pub platform_token: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_hash: Option<String>,
     pub created_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
     pub revoked:    bool,
@@ -23,6 +39,14 @@ pub struct TokensMeta {
 
 pub fn generate_token_id() -> String {
     format!("tok_{}", Uuid::new_v4().simple())
+}
+
+pub fn generate_platform_token_secret() -> String {
+    format!("adlpt_{}", Uuid::new_v4().simple())
+}
+
+pub fn platform_token_hash(token: &str) -> String {
+    URL_SAFE_NO_PAD.encode(digest::digest(&digest::SHA256, token.as_bytes()).as_ref())
 }
 
 pub fn parse_expiry(s: Option<&str>, now: DateTime<Utc>) -> anyhow::Result<Option<DateTime<Utc>>> {

@@ -5,7 +5,7 @@ use hyper::{body::Incoming, Request};
 
 use crate::{
     auth::{middleware::extract_claims, AccessLevel, Claims},
-    db::{sqld_adapter::SqldAdapter, validate_db_name},
+    db::{sqld_adapter::SqldAdapter, validate_db_name, DbInfo},
     error::AppError,
     hrana::{
         convert::{hrana_to_sql, sql_to_stmt_result},
@@ -36,7 +36,25 @@ pub async fn handle(
         Some(db) => db,
         None => return Ok(AppError::DbNotFound(db_name.to_string()).into_response()),
     };
-    match execute_pipeline(&db, &claims, &req.requests, db_name).await {
+    let db_info = match state.db_mgr.get_info(db_name).await {
+        Ok(info) => info,
+        Err(e) => return Ok(e.into_response()),
+    };
+    if let Some(org) = claims.org.as_deref() {
+        if org != db_info.organization {
+            return Ok(AppError::OrgScopeDenied.into_response());
+        }
+    }
+    if let Some(group) = claims.grp.as_deref() {
+        if group != db_info.group {
+            return Ok(AppError::OrgScopeDenied.into_response());
+        }
+    }
+    let quota_exceeded = match state.db_mgr.quota_exceeded_for_db(db_name).await {
+        Ok(value) => value,
+        Err(e) => return Ok(e.into_response()),
+    };
+    match execute_pipeline(&db, &claims, &req.requests, &db_info, quota_exceeded).await {
         Ok(results) => Ok(crate::http::json_ok(&PipelineResponse {
             baton: None,
             base_url: None,
@@ -62,13 +80,24 @@ async fn execute_pipeline(
     db:       &Arc<dyn SqldAdapter>,
     claims:   &Claims,
     requests: &[StreamRequest],
-    db_name:  &str,
+    db_info:  &DbInfo,
+    quota_exceeded: bool,
 ) -> Result<Vec<StreamResult>, AppError> {
     let mut results = Vec::with_capacity(requests.len());
 
     for req in requests {
         match req {
             StreamRequest::Execute { stmt } => {
+                let is_write = is_write_stmt(&stmt.sql);
+                if is_write && db_info.block_writes {
+                    return Err(AppError::PermissionDenied);
+                }
+                if !is_write && db_info.block_reads {
+                    return Err(AppError::PermissionDenied);
+                }
+                if is_write && quota_exceeded {
+                    return Err(AppError::QuotaExceeded);
+                }
                 if !stmt.named_args.is_empty() {
                     results.push(StreamResult::Error {
                         error: HranaError {
@@ -79,9 +108,7 @@ async fn execute_pipeline(
                     continue;
                 }
 
-                if is_write_stmt(&stmt.sql)
-                    && claims.resolve_access(db_name) != AccessLevel::Rw
-                {
+                if is_write && claims.resolve_access(&db_info.name) != AccessLevel::Rw {
                     return Err(AppError::PermissionDenied);
                 }
 
@@ -115,7 +142,13 @@ async fn execute_pipeline(
             }
 
             StreamRequest::Sequence { sql } => {
-                if claims.resolve_access(db_name) != AccessLevel::Rw {
+                if db_info.block_writes {
+                    return Err(AppError::PermissionDenied);
+                }
+                if quota_exceeded {
+                    return Err(AppError::QuotaExceeded);
+                }
+                if claims.resolve_access(&db_info.name) != AccessLevel::Rw {
                     return Err(AppError::PermissionDenied);
                 }
                 match db.execute_batch(sql).await {

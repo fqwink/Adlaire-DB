@@ -8,7 +8,7 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{body::Incoming, Request, Response};
 
-use crate::state::SharedState;
+use crate::{state::SharedState, token::util};
 
 pub type HttpResponse = Response<Full<Bytes>>;
 
@@ -44,24 +44,9 @@ pub async fn admin_route(
     let path = req.uri().path().to_string();
     let started = Instant::now();
 
-    if let Some(expected) = &state.config.admin_auth_token {
-        let authorization = req
-            .headers()
-            .get(::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok());
-
-        let auth_error = match authorization {
-            Some(value) => match value.strip_prefix("Bearer ") {
-                Some(token) if token == expected.as_str() => None,
-                _ => Some(("AUTH_INVALID", "invalid or revoked token")),
-            },
-            None => Some(("AUTH_REQUIRED", "authentication required")),
-        };
-        if let Some((code, message)) = auth_error {
-            let response = Ok(json_error(::http::StatusCode::UNAUTHORIZED, code, message));
-            log_request(method.as_str(), &path, started, &response);
-            return response;
-        }
+    if let Some(response) = authenticate_admin_request(&req, &state, &path) {
+        log_request(method.as_str(), &path, started, &response);
+        return response;
     }
 
     let response = match (method.as_str(), path.as_str()) {
@@ -84,6 +69,8 @@ pub async fn admin_route(
         ("PUT", p) if is_quota_path(p) => admin::quotas::put(req, state).await,
         ("GET", "/admin/v1/usage") => admin::usage::list(req, state).await,
         ("GET", "/v1/auth/validate") => admin::platform::auth_validate(req, state).await,
+        ("POST", p) if is_turso_api_token_path(p) => admin::platform::create_api_token(req, state).await,
+        ("DELETE", p) if is_turso_api_token_path(p) => admin::platform::revoke_api_token(req, state).await,
         ("GET", "/v1/locations") => admin::platform::locations(req, state).await,
         ("GET", "/v1/organizations") => admin::platform::organizations(req, state).await,
         ("PATCH", p) if is_turso_org_path(p) => admin::platform::patch_organization(req, state).await,
@@ -123,6 +110,78 @@ pub async fn admin_route(
     response
 }
 
+fn authenticate_admin_request(
+    req: &Request<Incoming>,
+    state: &SharedState,
+    path: &str,
+) -> Option<Result<HttpResponse, Infallible>> {
+    let expected = state.config.admin_auth_token.as_ref()?;
+    let authorization = req
+        .headers()
+        .get(::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    let Some(value) = authorization else {
+        return Some(Ok(json_error(
+            ::http::StatusCode::UNAUTHORIZED,
+            "AUTH_REQUIRED",
+            "authentication required",
+        )));
+    };
+    let Some(token) = value.strip_prefix("Bearer ") else {
+        return Some(Ok(json_error(
+            ::http::StatusCode::UNAUTHORIZED,
+            "AUTH_INVALID",
+            "invalid or revoked token",
+        )));
+    };
+    if token == expected.as_str() {
+        return None;
+    }
+    if path.starts_with("/v1/") {
+        if let Some(organization_scope) = platform_token_scope(&state.config.data_dir, token) {
+            if let Some(scope) = organization_scope {
+                if let Some(org) = turso_organization_from_path(path) {
+                    if scope != org {
+                        return Some(Ok(json_error(
+                            ::http::StatusCode::FORBIDDEN,
+                            "ORG_SCOPE_DENIED",
+                            "organization scope denied",
+                        )));
+                    }
+                }
+            }
+            return None;
+        }
+    }
+    Some(Ok(json_error(
+        ::http::StatusCode::UNAUTHORIZED,
+        "AUTH_INVALID",
+        "invalid or revoked token",
+    )))
+}
+
+fn platform_token_scope(data_dir: &std::path::Path, raw_token: &str) -> Option<Option<String>> {
+    let Ok(meta) = util::load_tokens(data_dir) else {
+        return None;
+    };
+    let hash = util::platform_token_hash(raw_token);
+    let now = chrono::Utc::now();
+    meta.tokens.iter().find_map(|token| {
+        let valid = token.platform_token
+            && !token.revoked
+            && token.token_hash.as_deref() == Some(hash.as_str())
+            && token.expires_at.map(|exp| exp > now).unwrap_or(true);
+        valid.then(|| token.organization_scope.clone())
+    })
+}
+
+fn turso_organization_from_path(path: &str) -> Option<String> {
+    match segments(path).as_slice() {
+        ["v1", "organizations", org, ..] => Some((*org).to_string()),
+        _ => None,
+    }
+}
+
 fn extract_db_name(path: &str) -> Option<&str> {
     let mut segs = path.trim_start_matches('/').split('/');
     match (segs.next(), segs.next(), segs.next(), segs.next()) {
@@ -153,6 +212,10 @@ fn is_quota_path(path: &str) -> bool {
 
 fn is_turso_org_path(path: &str) -> bool {
     matches!(segments(path).as_slice(), ["v1", "organizations", _])
+}
+
+fn is_turso_api_token_path(path: &str) -> bool {
+    matches!(segments(path).as_slice(), ["v1", "auth", "api-tokens", _])
 }
 
 fn is_turso_usage_path(path: &str) -> bool {

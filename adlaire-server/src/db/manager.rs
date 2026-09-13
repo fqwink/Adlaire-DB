@@ -393,6 +393,27 @@ impl DbManager {
         usage
     }
 
+    pub async fn quota_exceeded_for_db(&self, name: &str) -> Result<bool, AppError> {
+        let info = self.get_info(name).await?;
+        let quotas = self.management.read().await.quotas.clone();
+        for quota in quotas {
+            let applies = match quota.scope_type.as_str() {
+                "organization" => quota.scope == info.organization,
+                "group" => quota.scope == info.group,
+                "database" => quota.scope == info.name,
+                _ => false,
+            };
+            if applies {
+                if let Some(limit) = quota.storage_bytes {
+                    if info.size_bytes >= limit {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+
     pub async fn get_info(&self, name: &str) -> Result<DbInfo, AppError> {
         let meta = self.meta.read().await;
         let info = meta
