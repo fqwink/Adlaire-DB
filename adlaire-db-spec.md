@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.122
+**バージョン：** V.123
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.122` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.123` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -6054,6 +6054,108 @@ Phase 7 は Phase 6 の multi DB routing に、Adlaire 管理 API、token CRUD�
 | `coverage_closure_result` | admin auth、DB CRUD、token CRUD、scope、revoke、atomicity、concurrency、unsupported、regression の gap 0 件 |
 | `review_handoff_result` | 第三者が admin API、token API、scope、revoke、restart、concurrency を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 7 で `/admin/v1/databases` と `/admin/v1/tokens` が成功応答になり、DB scope JWT が有効になる release note |
+
+**Phase 8 完全実装精度固定契約：**
+
+Phase 8 は Turso Cloud 互換の管理モデルを自己ホスト環境へ導入する Phase である。Phase 8 は organization、group、location、quota、usage、Turso Platform API `/v1/*`、既存 `/admin/v1/*` の scope 拡張、Phase 7 metadata migration を同時に完成させる。Phase 8 で WebSocket、ATTACH、metrics API、replication、backup/restore、branch、extension、HA を成功応答にしてはならない。Phase 8 実装者は下表を Phase packet、atomic task ledger、scenario matrix、Done receipt、review handoff、operator behavior delta に転記してから実装する。
+
+| 項目 | Phase 8 固定仕様 |
+|------|------------------|
+| 実装範囲 | organization / group / location / quota / usage metadata、Admin API 拡張、Turso Platform API `/v1/*`、Platform token、metadata migration、scope/quota 判定 |
+| default scope | 初回 Phase 8 起動時に `default` organization、`default` group、`default` location、無制限 quota を作成する |
+| migration | Phase 7 `databases.json` / `tokens.json` を preflight 検証し、全 DB/token に default scope を付与する。preflight 失敗時は書き込み前に起動失敗 |
+| rollback | migration 中断後に partial metadata を成功扱いしない。rollback marker または未完了 marker がある場合は起動失敗し、operator 手動復旧を要求する |
+| `/admin/v1/*` | Adlaire 管理 API schema を維持し、organization/group/location/quota/usage を追加する。unknown field は `INVALID_REQUEST` |
+| `/v1/*` | Turso Platform API 互換 surface。path、method、query、主要 wrapper、field casing、status を snapshot で固定する |
+| wrapper boundary | `/admin/v1/*` と `/v1/*` の response wrapper を混同しない。片方の実装都合で他方の body shape を変更しない |
+| Platform auth | `/v1/*` は Platform token または Phase 8 の Admin token 代用 Bearer 完全一致。欠落は `AUTH_REQUIRED`、不一致/形式不正は `AUTH_INVALID` |
+| Platform token | `POST /v1/auth/api-tokens/{tokenName}` は `adlpt_` prefix の不透明 token を作成し、secret は作成時のみ返す |
+| DB token | `/v1/organizations/{org}/databases/{db}/auth/tokens` は Turso 互換 query `expiration` / `authorization` を受け、response は `{"jwt":string}` 固定 |
+| auth rotate | DB/group auth rotate は該当 scope の DB token / group scope token を失効する。Platform API token 自体は失効しない |
+| scope precedence | `org` claim、`grp` claim、`dbs` claim、`a` claim、block/quota を §9.1.18 の順序で評価する。`dbs` は DB 単位の最終制限として維持する |
+| quota | organization、group、database の順に評価し、usage 取得不能時は `USAGE_UNAVAILABLE`。quota 超過 write は `/v1/*` では 402、admin/hrana では 403 `QUOTA_EXCEEDED` |
+| block policy | `block_reads`、`block_writes`、`delete_protection`、`allow_attach` を metadata として保存し、対象 operation の前に判定する |
+| metadata files | `organizations.json`、`groups.json`、`locations.json`、`quotas.json`、`usage.json` を §9.6 の atomic update 契約で管理する |
+| legacy compatibility | Phase 1〜7 の DB/token は rename せず読み取り・接続・削除可能。Phase 8 新規 DB は Turso 互換名 validation を適用する |
+| snapshot | Turso 互換 snapshot は `tests/snapshots/phase8_turso/` に保存し、UUID/timestamp/JWT/request id/host を placeholder 正規化する |
+
+**Phase 8 atomic task ledger：**
+
+| Task ID | Goal | Input contracts | Change targets | Forbidden changes | Completion condition | Verification |
+|---------|------|-----------------|----------------|-------------------|----------------------|--------------|
+| `TASK-P8-1` | metadata schema と default scope を固定する | §2.4、§9.6 | `org/*`、`location/*`、`quota/*` | default scope 欠落、単一 JSON 統合 | default org/group/location/quota が作成される | metadata fixture |
+| `TASK-P8-2` | Phase 7 migration / rollback を固定する | §9.1.23、§9.6 | migration / metadata | partial migration success | preflight、migration、rollback marker が固定 | migration fixture |
+| `TASK-P8-3` | Admin API scope 拡張を固定する | §6.4、§9.5 | `http/admin/*` | `/admin` wrapper 破壊 | org/group/location/quota/usage API が admin schema で動く | admin snapshots |
+| `TASK-P8-4` | Turso Platform API `/v1/*` を固定する | §6.4、§9.5、Phase 8 詳細 | `http/platform/*` | `/admin` body 流用 | Turso wrapper / casing / status が snapshot 一致 | Turso snapshots |
+| `TASK-P8-5` | Platform token を固定する | §6.4、§9.1.18 | `auth/*`、`token/*` | JWT と混同、secret 再表示 | create/validate/revoke が規定通り | platform token transcript |
+| `TASK-P8-6` | DB token / auth rotate を固定する | Phase 8 詳細、§5.4 | `http/platform/*`、`token/*` | rotate が Platform token を失効 | DB/group token 発行・rotate が固定 | auth rotate snapshots |
+| `TASK-P8-7` | scope precedence を固定する | §9.1.18 | `auth/*`、`http/*` | org/grp/dbs 順序揺れ | scope denial matrix が pass | scope matrix |
+| `TASK-P8-8` | quota / usage / block policy を固定する | §9.1.18、Phase 8 詳細 | `quota/*`、`usage/*` | usage 不明で成功、status 混同 | quota/block precedence が固定 | quota matrix |
+| `TASK-P8-9` | legacy fallback と unique 制約を固定する | §6.4、§9.6 | metadata / validation | legacy rename、重複許可 | legacy 接続と新規 validation が両立 | legacy fixture |
+| `TASK-P8-10` | Turso snapshot artifact / secret scan を固定する | §9.1.33、Phase 8 snapshot 表 | tests / artifact | snapshot 手動改変、secret 混入 | snapshot completeness と scan が pass | snapshot audit |
+| `TASK-P8-11` | Phase 8 Done receipt / handoff / operator delta | §9.1.33、§9.1.51、§9.1.52 | docs / PR artifact | PR description だけの根拠 | 第三者が migration/API/quota/snapshot を再現できる | handoff checklist |
+
+**Phase 8 scenario / oracle 固定表：**
+
+| Scenario ID | 入力 | 期待結果 | Evidence |
+|-------------|------|----------|----------|
+| `SCN-P8-1` | Phase 7 data-dir で Phase 8 起動 | default scope 付与、legacy DB/token 維持 | migration transcript |
+| `SCN-P8-2` | migration preflight で壊れた metadata | 書き込み前に起動失敗 | preflight failure fixture |
+| `SCN-P8-3` | migration 中断 marker あり | 起動失敗。自動上書きしない | rollback marker fixture |
+| `SCN-P8-4` | `POST /admin/v1/organizations` / list/detail/delete | Admin schema、201/200/204、unique 制約 | admin org snapshot |
+| `SCN-P8-5` | `POST /admin/v1/locations`、`POST /admin/v1/groups` | location/group 関連と not found が固定 | admin group/location snapshot |
+| `SCN-P8-6` | Phase 7 互換 `POST /admin/v1/databases {"name":"db2"}` | default org/group/location が付与され成功 | legacy admin DB snapshot |
+| `SCN-P8-7` | Phase 8 新規 DB 名 uppercase / underscore / 64 超過 | HTTP 400 `INVALID_DB_NAME` | name validation snapshot |
+| `SCN-P8-8` | `/admin/v1/quotas` / `/admin/v1/usage` | quota/usage schema、scope query、usage unavailable が固定 | quota/usage snapshot |
+| `SCN-P8-9` | org/grp/dbs scope が衝突 | precedence 通り allow/deny。存在漏洩なし | scope precedence matrix |
+| `SCN-P8-10` | quota exceeded write | `/v1/*` は 402、admin/hrana は 403、code は `QUOTA_EXCEEDED` | quota status snapshot |
+| `SCN-P8-11` | block_reads / block_writes / delete_protection | operation 前に拒否し metadata/DB を変更しない | block policy matrix |
+| `SCN-P8-12` | `GET /v1/locations` | 200 Turso 互換 locations wrapper | Turso snapshot |
+| `SCN-P8-13` | `/v1/organizations/{org}/groups` create/list/detail/config | Turso wrapper / field casing が一致 | Turso group snapshots |
+| `SCN-P8-14` | `/v1/organizations/{org}/databases` create/list/detail/delete/config | Turso wrapper / field casing / status が一致 | Turso DB snapshots |
+| `SCN-P8-15` | `/v1/organizations/{org}/databases/{db}/auth/tokens` | 200 `{"jwt":string}`、secret は作成時のみ | DB token snapshot |
+| `SCN-P8-16` | DB/group auth rotate | 対象 DB/group token は失効、Platform token は有効 | rotate transcript |
+| `SCN-P8-17` | `/v1/auth/api-tokens/{tokenName}` create/validate/delete | `adlpt_` token、作成時のみ secret、revoke 後 invalid | platform token transcript |
+| `SCN-P8-18` | route priority: auth/tokens、configuration、detail | 詳細 route と特殊 route を取り違えない | route priority snapshot |
+| `SCN-P8-19` | unknown field/query/null/duplicate query | `INVALID_REQUEST` | request validation snapshots |
+| `SCN-P8-20` | unsupported Turso API audit logs / transfer / branch seed | 501 / 405 / 400 が固定 | unsupported snapshots |
+| `SCN-P8-21` | snapshot directory secret scan | JWT、Bearer、adlpt_、admin token 生値なし | secret scan result |
+| `SCN-P8-22` | Phase 1〜7 regression + SDK CRUD | すべて pass | regression transcript |
+
+**Phase 8 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| Turso 互換 `/v1/*` の wrapper / field casing を `/admin/v1/*` と混同する | merge 不可 |
+| Phase 7 legacy DB/token を rename または削除して migration する | merge 不可 |
+| migration preflight 失敗後に partial metadata を書く | merge 不可 |
+| Platform token を JWT として扱う、または `adlpt_` secret を再表示する | merge 不可 |
+| DB/group auth rotate で Platform API token を失効する | merge 不可 |
+| usage unavailable を quota allow として成功扱いにする | merge 不可 |
+| `/v1/*` quota 超過 status と admin/hrana quota 超過 status を混同する | merge 不可 |
+| org/grp/dbs/a/scope precedence を endpoint ごとに変える | merge 不可 |
+| UUID/timestamp/JWT/host/request id を未正規化のまま snapshot 比較する | Phase 未完了 |
+| Turso snapshot artifact、migration fixture、legacy fallback、secret scan、Phase 1〜7 regression なしで完了扱いにする | Phase 未完了 |
+
+**Phase 8 Done receipt 最低 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `implemented_scope` | organization/group/location/quota/usage、Admin API 拡張、Turso Platform API `/v1/*`、Platform token、DB token/rotate、metadata migration、scope/quota 判定 |
+| `excluded_scope` | WebSocket、ATTACH、metrics API、replication、backup/restore、branch、extension、HA、内製化 |
+| `atomic_task_result` | `TASK-P8-1`〜`TASK-P8-11` がすべて pass、open task 0 件 |
+| `scenario_matrix_result` | `SCN-P8-1`〜`SCN-P8-22` の pass/fail、artifact path |
+| `migration_result` | Phase 7 metadata preflight、migration、rollback marker、legacy fallback、restart 復元 |
+| `metadata_result` | organizations/groups/locations/quotas/usage/databases/tokens の schema、unique、atomic update、破損時挙動 |
+| `admin_api_result` | `/admin/v1/*` organization/group/location/quota/usage と既存 DB/token 拡張の snapshot |
+| `turso_platform_result` | `/v1/*` wrapper、field casing、status、route priority、unsupported API、snapshot completeness |
+| `auth_scope_result` | Platform token、DB token、org/grp/dbs/a precedence、auth rotate、scope denial matrix |
+| `quota_usage_result` | quota exceeded、usage unavailable、block_reads、block_writes、delete_protection、allow_attach の precedence |
+| `compatibility_baseline_result` | Phase 1〜7 regression、TypeScript SDK default/path CRUD、Turso snapshot diff、legacy metadata fallback |
+| `secret_redaction_result` | response/log/snapshot/artifact に admin token、Platform token、JWT、secret、raw claim、SQL args が残らない scan |
+| `coverage_closure_result` | migration、metadata、admin API、Platform API、auth/scope、quota、legacy、unsupported、regression の gap 0 件 |
+| `review_handoff_result` | 第三者が migration、Admin API、Turso API、scope、quota、snapshot、secret scan を再現できる command と artifact |
+| `operator_behavior_delta_result` | Phase 8 で Turso Cloud 互換の organization/group/location/quota/usage と `/v1/*` が公開される release note |
 
 **Phase 8〜10 の境界決定：**
 
