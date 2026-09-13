@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.118
+**バージョン：** V.119
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.118` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.119` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -5666,6 +5666,98 @@ Phase 3 は libSQL client SDK が HTTP 経由で最小 SQL 実行できる hrana
 | `coverage_closure_result` | health、pipeline success/error、malformed JSON、SQL error、close、restart、SDK smoke の gap 0 件 |
 | `review_handoff_result` | 第三者が health/pipeline/error/restart/SDK smoke を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 3 で HTTP API `/v2/health` と `/v2/pipeline` が初公開され、auth はまだ無効である release note |
+
+**Phase 4 完全実装精度固定契約：**
+
+Phase 4 は Phase 3 の hrana-http v2 surface に JWT HS256 認証と `token create` CLI を追加し、認証有効 mode の最小互換境界を完成させる Phase である。Phase 4 で公開してよい外部 API は Phase 3 と同じ `GET /v2/health` と `POST /v2/pipeline` のみであり、管理 API、DB scope JWT、Platform API、WebSocket、multi DB routing は実装してはならない。Phase 4 実装者は下表を Phase packet、atomic task ledger、scenario matrix、Done receipt、review handoff、operator behavior delta に転記してから実装する。
+
+| 項目 | Phase 4 固定仕様 |
+|------|------------------|
+| 実装範囲 | JWT HS256 検証、Authorization Bearer 抽出、`a` claim による ro/rw 判定、`tokens.json` revoke 照合、`token create` CLI、secret redaction |
+| API surface | Phase 3 と同じ `GET /v2/health` と `POST /v2/pipeline` のみ。新規 HTTP route は追加しない |
+| health auth | `GET /v2/health` は認証不要のまま。JWT secret 設定後も 200 `{"status":"ok"}` 固定 |
+| pipeline auth | JWT secret 設定時の `POST /v2/pipeline` は `Authorization: Bearer <JWT>` 必須 |
+| auth disabled | JWT secret 未設定時は Phase 3 互換として unauthenticated `rw` claims を使い、WARN log を 1 回以上出す |
+| secret source | `--auth-jwt-secret-file` > `--auth-jwt-secret` > `ADLAIRE_JWT_SECRET` > TOML `[auth] jwt_secret_file` > TOML `[auth] jwt_secret` > auth disabled |
+| secret length | 解決後 secret は 32 bytes 以上必須。32 bytes 未満は起動拒否し、secret 生値を response/log に出さない |
+| header format | `Authorization` は `Bearer ` + token の完全一致。prefix の大小文字補正、token trim、空白補正は禁止 |
+| JWT alg | HS256 のみ許可。`alg:none`、HS384/HS512、`kid` による key lookup は拒否 |
+| claims | Phase 4 の必須 claim は `sub` と `a`。`iss`、`iat`、`exp` は受け付ける。`dbs`、`org`、`grp` は Phase 7/8 まで権限判定に使わない |
+| access value | `a` は `ro` または `rw` のみ。欠落、不正値、大文字値は `AUTH_INVALID` |
+| expiry | `exp` が存在し現在時刻より過去なら `AUTH_EXPIRED`。`exp` 省略は無期限 token |
+| revoke | `sub` が `tokens.json` に存在し `revoked=true` なら `AUTH_INVALID`。未登録 token の扱いは Phase 4 では拒否し `AUTH_INVALID` とする |
+| ro/rw | `ro` token は read-only SQL のみ許可。write SQL、DDL、PRAGMA 書き込み相当は `PERMISSION_DENIED` |
+| token create | `adlaire-db token create --secret <VALUE> [--expiry <DURATION>] [--access ro|rw]` は JWT を stdout に 1 回だけ出し、`tokens.json` に token metadata を atomic 追記する |
+| token id | `sub` は `tok_` prefix + 128 bit 以上のランダム識別子。重複時は再生成する |
+| tokens.json | `{data-dir}/meta/tokens.json` を `0600` 相当で作成し、atomic rename で更新する。JWT 文字列と secret 生値は保存しない |
+| error precedence | malformed JSON / method / content-type 判定後に auth 判定を行う。auth header なしは `AUTH_REQUIRED`、形式不正/署名不正/revoked/未登録は `AUTH_INVALID`、期限切れは `AUTH_EXPIRED` |
+| logging | Authorization header、JWT、secret、raw claim、SQL args は log に出さず `<redacted-secret>` または `<redacted>` に正規化する |
+
+**Phase 4 atomic task ledger：**
+
+| Task ID | Goal | Input contracts | Change targets | Forbidden changes | Completion condition | Verification |
+|---------|------|-----------------|----------------|-------------------|----------------------|--------------|
+| `TASK-P4-1` | JWT secret 解決と起動 validation を固定する | §4.1、§5.1、§10.1 | `config.rs`、`main.rs` | 32 bytes 未満 secret 起動、secret log | precedence と起動拒否が固定 | config/auth startup tests |
+| `TASK-P4-2` | Authorization Bearer 抽出を固定する | §5.1、§9.1.18 | `auth/middleware.rs` | trim / 大小文字補正 | header なし/不正形式が規定 error | auth header matrix |
+| `TASK-P4-3` | JWT HS256 検証を実装する | §5.2、§5.6、§7.3 | `auth/mod.rs` | alg none、HS256 以外、kid key lookup | valid/invalid/expired が固定 | JWT unit tests |
+| `TASK-P4-4` | `tokens.json` revoke 照合を実装する | §5.6、§9.6、§10.2 | `auth/mod.rs`、`token/*` | 未登録 token 許可、JWT 保存 | revoked/unknown token が拒否される | tokens fixture tests |
+| `TASK-P4-5` | `a` claim ro/rw 判定を pipeline に適用する | §5.3、§9.1.18 | `http/pipeline.rs`、`sql/*` | ro write 成功、SQL args log | read は許可、write/DDL は拒否 | permission matrix |
+| `TASK-P4-6` | `token create` CLI を実装する | §4.1、§5.5 | `cli.rs`、`token/*` | stdout 以外へ JWT 再表示、弱い token id | JWT 発行と metadata atomic 追記 | CLI transcript |
+| `TASK-P4-7` | auth error response を固定する | §7.3、§9.1.18 | `error.rs`、`http/*` | SQL error と auth error 混同 | 401/403 code/body が snapshot 一致 | error snapshots |
+| `TASK-P4-8` | secret redaction と artifact scan を固定する | §9.1.17、§9.1.18、§10.1 | logging / tests | JWT/secret/claim raw 出力 | log と artifact に secret が残らない | secret scan artifact |
+| `TASK-P4-9` | Phase 4 Done receipt / handoff / operator delta | §9.1.33、§9.1.51、§9.1.52 | docs / PR artifact | 手動確認のみで完了 | 第三者が auth matrix を再現できる | handoff checklist |
+
+**Phase 4 scenario / oracle 固定表：**
+
+| Scenario ID | 入力 | 期待結果 | Evidence |
+|-------------|------|----------|----------|
+| `SCN-P4-1` | JWT secret 未設定で `POST /v2/pipeline` SELECT | HTTP 200、Phase 3 と同じ成功、auth disabled WARN | disabled auth transcript |
+| `SCN-P4-2` | JWT secret 設定、Authorization なし | HTTP 401 `AUTH_REQUIRED` | no auth snapshot |
+| `SCN-P4-3` | `Authorization: Bearer <valid rw JWT>` で SELECT/INSERT | HTTP 200、read/write 成功 | rw token transcript |
+| `SCN-P4-4` | `Authorization: Bearer <valid ro JWT>` で SELECT | HTTP 200、read 成功 | ro read snapshot |
+| `SCN-P4-5` | `Authorization: Bearer <valid ro JWT>` で INSERT/CREATE/UPDATE/DELETE | HTTP 403 `PERMISSION_DENIED` | ro write denial matrix |
+| `SCN-P4-6` | Bearer prefix 欠落、小文字 bearer、余分な空白 | HTTP 401 `AUTH_INVALID` または `AUTH_REQUIRED`。補正しない | header strictness snapshot |
+| `SCN-P4-7` | 署名不正 JWT | HTTP 401 `AUTH_INVALID` | bad signature snapshot |
+| `SCN-P4-8` | `exp` 過去 JWT | HTTP 401 `AUTH_EXPIRED` | expired snapshot |
+| `SCN-P4-9` | `a` 欠落 / `a:"admin"` / `a:"RW"` | HTTP 401 `AUTH_INVALID` | claim validation snapshot |
+| `SCN-P4-10` | `tokens.json` で `revoked=true` の `sub` | HTTP 401 `AUTH_INVALID` | revoked snapshot |
+| `SCN-P4-11` | `tokens.json` に存在しない `sub` | HTTP 401 `AUTH_INVALID` | unknown token snapshot |
+| `SCN-P4-12` | `token create --secret ... --expiry 30d --access ro` | stdout に JWT 1 回、`tokens.json` に metadata、JWT 文字列は保存しない | CLI + file transcript |
+| `SCN-P4-13` | 32 bytes 未満 secret で起動 | 起動失敗、secret 生値なし | startup failure log |
+| `SCN-P4-14` | auth failure と malformed JSON が同時に成立 | request parsing precedence に従い `INVALID_REQUEST` | precedence snapshot |
+| `SCN-P4-15` | auth failure log / test artifact scan | JWT、Bearer、secret 生値、raw claim が残らない | secret scan result |
+
+**Phase 4 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| 管理 API、Platform API、WebSocket、multi DB route を追加する | merge 不可。Phase 4 の外部 API は Phase 3 と同じ |
+| JWT secret 設定時に認証なし pipeline を通す | merge 不可 |
+| Bearer prefix の大小文字・空白・token 値を補正する | merge 不可 |
+| `alg:none` または HS256 以外を受け付ける | merge 不可 |
+| 32 bytes 未満 secret で起動する | merge 不可 |
+| `ro` token の write/DDL を成功させる | merge 不可 |
+| JWT 文字列、secret 生値、Authorization header、raw claim を log / artifact / `tokens.json` に保存する | merge 不可 |
+| revoked token または未登録 `sub` を成功扱いにする | merge 不可 |
+| auth matrix / permission matrix / secret scan なしで完了扱いにする | Phase 未完了 |
+| CLI 手動確認だけで Phase 4 完了扱いにする | Phase 未完了。自動検証と再現可能 artifact が必須 |
+
+**Phase 4 Done receipt 最低 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `implemented_scope` | JWT HS256、Bearer 抽出、`a` claim ro/rw、`tokens.json` revoke/unknown token 拒否、`token create` CLI、secret redaction |
+| `excluded_scope` | DB scope JWT、管理 API、Platform API、WebSocket、multi DB route、organization/group/quota |
+| `atomic_task_result` | `TASK-P4-1`〜`TASK-P4-9` がすべて pass、open task 0 件 |
+| `scenario_matrix_result` | `SCN-P4-1`〜`SCN-P4-15` の pass/fail、artifact path |
+| `auth_matrix_result` | no auth、bad format、bad signature、expired、revoked、unknown、valid ro、valid rw の status/code |
+| `permission_matrix_result` | ro read allow、ro write deny、rw read/write allow、SQL 分類根拠 |
+| `persistence_result` | `tokens.json` 作成・atomic update・restart 後 revoke 反映・JWT 非保存 |
+| `secret_redaction_result` | response/log/artifact に secret、JWT、Bearer、raw claim、SQL args が残らない scan 結果 |
+| `compatibility_baseline_result` | libSQL SDK auth header 接続 transcript、Turso 差分分類 |
+| `coverage_closure_result` | startup、auth、permission、token CLI、revoke、redaction、Phase 1〜3 regression の gap 0 件 |
+| `review_handoff_result` | 第三者が auth matrix、permission matrix、token create、restart、secret scan を再現できる command と artifact |
+| `operator_behavior_delta_result` | Phase 4 で JWT secret 設定時に `/v2/pipeline` が認証必須になり、未設定時は開発用 auth disabled として動く release note |
 
 **Phase 1〜5 の境界決定：**
 
