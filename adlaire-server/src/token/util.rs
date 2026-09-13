@@ -12,9 +12,9 @@ pub struct TokenRecord {
     pub id:         String,
     pub access:     AccessLevel,
     pub dbs:        Option<HashMap<String, AccessLevel>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub organization_scope: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub group_scope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -103,5 +103,10 @@ pub fn save_tokens(data_dir: &Path, meta: &TokensMeta) -> anyhow::Result<()> {
 pub fn append_token(data_dir: &Path, record: TokenRecord) -> anyhow::Result<()> {
     let mut meta = load_tokens(data_dir)?;
     meta.tokens.push(record);
+    save_tokens(data_dir, &meta)
+}
+
+pub fn ensure_phase8_token_metadata(data_dir: &Path) -> anyhow::Result<()> {
+    let meta = load_tokens(data_dir)?;
     save_tokens(data_dir, &meta)
 }
