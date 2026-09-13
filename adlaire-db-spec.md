@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.139
+**バージョン：** V.140
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.139` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.140` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -7014,6 +7014,55 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 | snapshot だけを更新し、対応する Contract ID、oracle、manifest、Done receipt を更新しない | merge 不可 |
 | 同じ Contract ID が複数の意味を持つ、または同じ意味に複数 ID を割り当てる | 仕様修正 PR に戻す |
 
+### 9.11.3 Phase 1〜19 ambiguity closure 最低判断表
+
+本節は Phase 実装前に閉じるべき最低判断を定義する。§9.1.49 の ambiguity closure matrix は本表を下限とし、対象 Phase の Phase packet に `AMB-P{phase}-{surface}-{number}` 形式の ambiguity ID として転記する。`P{phase}-PRECISION-CLOSURE` は open ambiguity 0 件を証明しなければならない。
+
+| Phase | ambiguity closure 最低判断 |
+|-------|----------------------------|
+| 1 | CLI command 名、必須 flag、config precedence、stub token create の出力、no persistence の確認方法 |
+| 2 | data-dir layout、metadata 初期値、lock 競合、integrity_check failure、restart 時の既存 file 扱い |
+| 3 | hrana request body validation、SQL error の HTTP status、baton/base_url、named_args 非対応、close 後処理 |
+| 4 | secret source precedence、Bearer header strictness、JWT claim required/optional、revoked/unknown token、ro/rw SQL 分類 |
+| 5 | JSON Lines field、request_id、SDK version、secret redaction、restart persistence、unsupported future surface |
+| 6 | DB name validation、default route と path route の優先順位、存在しない DB、metadata/directory 不整合、DB isolation |
+| 7 | Admin token strictness、DB CRUD status/body、token JWT 再表示禁止、revoke 即時反映、DB scope precedence |
+| 8 | Turso wrapper field casing、organization/group/location/quota precedence、legacy metadata migration、usage unavailable、Platform token redaction |
+| 9 | WebSocket subprotocol、hello 前 request、stream lifecycle、transaction rollback、store_sql scope、cursor unsupported |
+| 10 | ATTACH parser 境界、任意 path 拒否、source/target scope、metrics counter 加算点、WebSocket close gauge |
+| 11 | primary role 起動条件、replication token required、from_frame validation、frame_no/checksum、snapshot consistency、sync mode 未定義時挙動 |
+| 12 | replica state schema、snapshot bootstrap、WAL gap/duplicate/checksum mismatch、redirect status、primary down、multi replica state |
+| 13 | archive manifest schema、frame naming、retention cleanup order、partial write recovery、corrupt/orphan file、disabled mode |
+| 14 | backup consistency、restore temp layout、commit/rollback order、PITR selector 解決、corrupt frame、startup recovery marker |
+| 15 | branch name/internal name、source selector、create/delete rollback、runtime map、source delete denial、Turso seed compatibility |
+| 16 | extension allowlist、canonical path、symlink rejection、sha256 mismatch、existing connection 非 retroactive、SQL bypass rejection |
+| 17 | metrics snapshot schema、flush race、corrupt/future snapshot、Prometheus Accept、label redaction、usage/quota source |
+| 18 | HA token/Admin token 境界、term monotonic、promote precondition、demote failure、leader unknown、split-brain、restart primary state |
+| 19 | internal flag precedence、shadow diff handling、active mode gate、rollback no migration、performance threshold、adapter boundary、SDK transcript |
+
+**ambiguity ID / 証跡規則：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| ambiguity ID | `AMB-P{phase}-{surface}-{number}`。例: `AMB-P14-restore-1` |
+| selected decision | 採用した判断を 1 つだけ記録する。複数案併記のまま実装してはならない |
+| rejected options | 却下案と却下理由を記録する。理由なし却下は禁止 |
+| decision basis | 参照する仕様節、Turso Cloud / libSQL SDK baseline、security / durability / compatibility 根拠 |
+| affected contracts | 関連する Contract ID、Task ID、Scenario ID、artifact path |
+| reopen trigger | upstream Turso 変更、SDK 変更、schema 変更、error code 変更、operator behavior 変更など再検討条件 |
+| evidence | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/ambiguity-{ambiguity-id}.json` |
+
+**ambiguity closure 判定規則：**
+
+| 状態 | 判定 |
+|------|------|
+| `TBD`、`TODO`、`FIXME`、`未定`、`後で決める` が Phase packet / Done receipt / artifact に残る | 実装開始禁止 |
+| `実装者判断`、`必要に応じて`、`適宜`、`可能なら` を完了条件に使う | merge 不可 |
+| 本表の最低判断に対応する ambiguity ID が Phase packet に存在しない | 実装開始禁止 |
+| ambiguity ID に selected decision、rejected options、decision basis、affected contracts、evidence が揃っていない | Phase 未完了 |
+| open ambiguity が 1 件以上ある状態で `precision_closure_result` を pass にする | merge 不可 |
+| ambiguity closure が PR description のみで仕様本文または phase evidence に存在しない | 仕様として扱わない |
+
 ### 9.12 PR レビュー観点
 
 PR レビューでは以下を必ず確認する。該当しない項目は PR description に `N/A` と理由を書く。
@@ -12869,7 +12918,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.139` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.140` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
