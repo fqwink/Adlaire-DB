@@ -351,7 +351,7 @@ PAGE = f'''<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Adlaire DB プロジェクト憲章 / 仕様正本</title>
+<title>Adlaire DB プロジェクト憲章 / 仕様正本入口</title>
 <style>
 /* ══ ADLAIRE DESIGN SYSTEM TOKENS ══════════════════════════════════════════
    Conforms to: https://github.com/fqwink/Adlaire-Design-System  (Tokens/)
@@ -792,8 +792,8 @@ a:focus-visible {{
   </button>
   <span class="hdr-title">Adlaire DB</span>
   <span class="hdr-sep">/</span>
-  <span class="hdr-title" style="color:rgba(255,255,255,.7);font-weight:400">プロジェクト憲章 / 仕様正本</span>
-  <span class="hdr-ver">V.213</span>
+  <span class="hdr-title" style="color:rgba(255,255,255,.7);font-weight:400">プロジェクト憲章 / 仕様正本入口</span>
+  <span class="hdr-ver">V.216</span>
 </header>
 
 <div id="lay">

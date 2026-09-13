@@ -2,9 +2,9 @@
 
 ## 仕様書の位置づけ
 
-- `docs/PROJECT_CHARTER.md`、`docs/spec/auth.md`、`docs/spec/api.md`、`docs/spec/testing.md`、`docs/spec/phase-*.md` は**仕様正本群**（single source of truth）である
-- `docs/PROJECT_CHARTER.md` はプロジェクト憲章であり、仕様正本の入口も兼ねる
-- 認証・認可仕様、API契約仕様、テスト仕様、Phase 1〜19 の詳細は `docs/spec/` に分割して管理する
+- `docs/PROJECT_CHARTER.md` は**プロジェクト憲章正本**であり、仕様正本群の入口も兼ねる
+- `docs/spec/core.md`、`docs/spec/auth.md`、`docs/spec/api.md`、`docs/spec/internalization.md`、`docs/spec/testing.md`、`docs/spec/phase-*.md` は**仕様正本群**（single source of truth）である
+- 中核仕様、認証・認可仕様、API契約仕様、内製化仕様、テスト仕様、Phase 1〜19 の詳細は `docs/spec/` に分割して管理する
 - `docs/POLICY.md` はポリシー文書であり、仕様ではない
 - 方針、ポリシーを実装根拠にする場合は、先に仕様正本へ落とし込むこと
 - `docs/Adlaire-db-spec.html` は `docs/PROJECT_CHARTER.md` から生成された閲覧用 HTML であり、正本ではない
@@ -14,7 +14,7 @@
 
 ## 仕様書 HTML 更新ルール
 
-`docs/PROJECT_CHARTER.md`、`docs/spec/auth.md`、`docs/spec/api.md`、`docs/spec/testing.md`、`docs/spec/phase-*.md` を改訂した場合は、`docs/build-scripts/build_spec_v3.py` 経由で `docs/Adlaire-db-spec.html` を更新すること。
+`docs/PROJECT_CHARTER.md`、`docs/spec/core.md`、`docs/spec/auth.md`、`docs/spec/api.md`、`docs/spec/internalization.md`、`docs/spec/testing.md`、`docs/spec/phase-*.md` を改訂した場合は、`docs/build-scripts/build_spec_v3.py` 経由で `docs/Adlaire-db-spec.html` を更新すること。
 
 - 仕様書改訂 PR では、Markdown 正本と HTML 生成物の整合性を確認する
 - HTML 生成物だけを正として仕様判断してはならない
@@ -28,7 +28,7 @@
 - `docs/build-scripts/build_spec_v3_spec.md`
 - `docs/build-scripts/DESIGN.md`
 
-Adlaire DB の仕様正本群は、上記ツールではなく `docs/PROJECT_CHARTER.md`、`docs/spec/auth.md`、`docs/spec/api.md`、`docs/spec/testing.md`、`docs/spec/phase-*.md` である。
+Adlaire DB のプロジェクト憲章正本は `docs/PROJECT_CHARTER.md` である。仕様正本群は、上記ツールではなく `docs/spec/core.md`、`docs/spec/auth.md`、`docs/spec/api.md`、`docs/spec/internalization.md`、`docs/spec/testing.md`、`docs/spec/phase-*.md` である。
 
 ## 作業開始時の確認
 
