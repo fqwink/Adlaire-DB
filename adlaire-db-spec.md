@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.123
+**バージョン：** V.124
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.123` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.124` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -6156,6 +6156,108 @@ Phase 8 は Turso Cloud 互換の管理モデルを自己ホスト環境へ導�
 | `coverage_closure_result` | migration、metadata、admin API、Platform API、auth/scope、quota、legacy、unsupported、regression の gap 0 件 |
 | `review_handoff_result` | 第三者が migration、Admin API、Turso API、scope、quota、snapshot、secret scan を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 8 で Turso Cloud 互換の organization/group/location/quota/usage と `/v1/*` が公開される release note |
+
+**Phase 9 完全実装精度固定契約：**
+
+Phase 9 は hrana-ws v3 WebSocket surface と interactive transaction を完成させる Phase である。Phase 9 で成功応答してよい新規外部 API は `GET /v3/baton` と `GET /{db-name}/v3/baton` の WebSocket upgrade のみであり、ATTACH、metrics API、replication、backup/restore、branch、extension、HA を実装してはならない。Phase 9 実装者は下表を Phase packet、atomic task ledger、scenario matrix、Done receipt、review handoff、operator behavior delta に転記してから実装する。
+
+| 項目 | Phase 9 固定仕様 |
+|------|------------------|
+| 実装範囲 | WebSocket upgrade、subprotocol、hello auth、stream lifecycle、execute/batch/sequence/describe、store_sql/close_sql、interactive transaction、disconnect rollback |
+| endpoint | `GET /v3/baton` は `default` DB、`GET /{db-name}/v3/baton` は path DB。unknown DB は upgrade 前に HTTP 404 `DB_NOT_FOUND` |
+| upgrade validation | `Connection: upgrade`、`Upgrade: websocket`、`Sec-WebSocket-Key`、`Sec-WebSocket-Version: 13` 必須。不正は HTTP 400 |
+| subprotocol | client 提示順を保持し、`hrana3`、`hrana2`、`hrana1` の最初に一致した値を選択する。`hrana3-protobuf` は Phase 9 では選択しない |
+| auth | upgrade 後の `hello` で JWT 認証する。hello 失敗時は `hello_error` を返し、未処理 request へ response を返さず close |
+| hello pipeline | client は hello 応答前に request を送ってよい。server は hello 認証成功後、受信順で処理する |
+| message size | 1 frame 最大 1 MiB。超過は close code 1009 |
+| unknown field | hrana wire object の unknown field は互換のため無視する。管理 API の unknown field 拒否方針を適用しない |
+| request_id | connection 内で response と 1:1 対応する。重複 request_id は許可するが、response は該当 request の順序と body に対応させる |
+| stream lifecycle | `open_stream` 後だけ execute/batch/sequence/describe/store_sql/close_sql を処理する。close 後 stream_id 再利用は新規 open_stream まで不可 |
+| transaction | stream ごとに dedicated connection または同等 isolation を持つ。BEGIN/COMMIT/ROLLBACK は同一 stream に閉じる |
+| rollback | close_stream、connection close、server shutdown で open transaction がある場合は rollback を試行する。COMMIT 成功応答前の切断は success と扱わない |
+| batch/sequence | `batch` は step 順序を保持して結果/エラーを返す。`sequence` は SQL text 全体を execute_batch に渡し、自前 semicolon split 禁止 |
+| describe | SQL を実行せず parameter/column metadata を返す。prepare error は `response_error` |
+| store_sql | `sql_id` は connection 内だけ有効。未登録 id 参照、二重登録、close 後参照は `INVALID_REQUEST` |
+| cursor API | `open_cursor` / `fetch_cursor` / `close_cursor` は Phase 9 では `NOT_IMPLEMENTED` の `response_error` とし、connection は維持する |
+| permission | JWT `a` / `dbs` / org / group / quota / block policy は Phase 8 の precedence を維持し、operation ごとに判定する |
+| persistence | WebSocket session、stream、store_sql は永続化しない。SQL commit 済みデータだけ DB に残る |
+
+**Phase 9 atomic task ledger：**
+
+| Task ID | Goal | Input contracts | Change targets | Forbidden changes | Completion condition | Verification |
+|---------|------|-----------------|----------------|-------------------|----------------------|--------------|
+| `TASK-P9-1` | WebSocket upgrade / route を固定する | §6.3、§9.5 | `ws/*`、`http/mod.rs` | HTTP route 破壊、unknown DB upgrade | default/path upgrade が規定通り | upgrade snapshots |
+| `TASK-P9-2` | subprotocol / frame validation を固定する | §9.4.2 Phase 9 | `ws/*` | protobuf 選択、size 無制限 | subprotocol と close code が固定 | subprotocol transcript |
+| `TASK-P9-3` | hello auth と message ordering を固定する | §6.3、§9.1.18 | `ws/session.rs` | hello 前 request 実行、auth leak | hello_ok/error と pipelined request が固定 | hello transcript |
+| `TASK-P9-4` | stream lifecycle を固定する | §9.1.28、§9.4.1 | `ws/stream.rs` | open 前 execute、close 後実行 | stream state 禁止遷移が error | stream matrix |
+| `TASK-P9-5` | execute/batch/sequence/describe を固定する | §9.1.28、§6.3 | `ws/requests.rs`、`hrana/*` | result order 破壊、自前 split | SQL result/error mapping が互換 | result snapshots |
+| `TASK-P9-6` | interactive transaction を固定する | §9.1.28 | `ws/stream.rs`、`db/*` | stream 間 tx 混線、commit 前 success | commit/rollback/disconnect が固定 | transaction fixture |
+| `TASK-P9-7` | store_sql / close_sql を固定する | §6.3、§9.4.1 | `ws/sql_cache.rs` | global cache、close 後参照成功 | connection-local SQL cache が固定 | store_sql snapshot |
+| `TASK-P9-8` | cursor / unknown request を固定する | §9.4.2 Phase 9 | `ws/requests.rs` | cursor success、connection 強制 close | cursor は NOT_IMPLEMENTED、unknown は INVALID_REQUEST | unsupported snapshot |
+| `TASK-P9-9` | SDK WebSocket regression を固定する | §9.1.1、§9.8 | tests / artifact | manual transcript のみ | TypeScript SDK transaction が pass | SDK transcript |
+| `TASK-P9-10` | Phase 9 Done receipt / handoff / operator delta | §9.1.33、§9.1.51、§9.1.52 | docs / PR artifact | PR description だけの根拠 | 第三者が WS/tx/rollback を再現できる | handoff checklist |
+
+**Phase 9 scenario / oracle 固定表：**
+
+| Scenario ID | 入力 | 期待結果 | Evidence |
+|-------------|------|----------|----------|
+| `SCN-P9-1` | `GET /v3/baton` valid upgrade | HTTP 101、default DB WebSocket session | upgrade transcript |
+| `SCN-P9-2` | `GET /{db-name}/v3/baton` valid / unknown DB | valid は 101、unknown は upgrade 前 404 `DB_NOT_FOUND` | path upgrade snapshot |
+| `SCN-P9-3` | invalid upgrade headers / version | HTTP 400。WebSocket session を開始しない | invalid upgrade snapshot |
+| `SCN-P9-4` | subprotocol `hrana3-protobuf, hrana3, hrana2` | `hrana3` を選択。protobuf は選択しない | subprotocol snapshot |
+| `SCN-P9-5` | valid JWT hello | `hello_ok` | hello ok transcript |
+| `SCN-P9-6` | invalid / expired / revoked JWT hello | `hello_error` + close、未処理 request response なし | hello error transcript |
+| `SCN-P9-7` | hello 前に request を送る | hello 成功後に受信順で処理。hello 失敗時は response なし | pipelined hello transcript |
+| `SCN-P9-8` | open_stream 前 execute | `response_error` `INVALID_REQUEST` | stream validation snapshot |
+| `SCN-P9-9` | execute SELECT / INSERT on open stream | hrana-ws result mapping が snapshot 一致 | execute snapshot |
+| `SCN-P9-10` | batch with mixed success/error | step 順序維持、connection 維持 | batch snapshot |
+| `SCN-P9-11` | sequence with semicolon in string literal | execute_batch 境界を維持し自前 split しない | sequence snapshot |
+| `SCN-P9-12` | describe valid / invalid SQL | 実行せず metadata または `response_error` | describe snapshot |
+| `SCN-P9-13` | TypeScript SDK transaction commit | commit 後 SELECT で反映 | SDK tx commit transcript |
+| `SCN-P9-14` | transaction rollback | rollback 後 SELECT で未反映 | tx rollback transcript |
+| `SCN-P9-15` | open tx 中に connection close | rollback され、再接続後に未反映 | disconnect rollback transcript |
+| `SCN-P9-16` | multi stream transaction + read | stream 間 state が混線しない | multi stream transcript |
+| `SCN-P9-17` | store_sql、execute by sql_id、close_sql、再参照 | close 後再参照は `INVALID_REQUEST` | store_sql transcript |
+| `SCN-P9-18` | cursor request | `response_error` `NOT_IMPLEMENTED`、connection 維持 | cursor snapshot |
+| `SCN-P9-19` | 1 MiB 超過 frame | close code 1009 | frame size transcript |
+| `SCN-P9-20` | ro token write / block_writes / quota exceeded | Phase 8 precedence 通り拒否 | permission matrix |
+| `SCN-P9-21` | unknown field in hrana message | 互換のため無視し、既知 field で処理 | forward compatibility snapshot |
+| `SCN-P9-22` | Phase 1〜8 regression + WS SDK regression | すべて pass | regression transcript |
+
+**Phase 9 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| `hrana3-protobuf` を選択または protobuf schema なしで実装する | merge 不可 |
+| hello 認証前に SQL request を実行する | merge 不可 |
+| hello 失敗時に未処理 request へ response を返す | merge 不可 |
+| stream 間で transaction state / connection state を共有して混線させる | merge 不可 |
+| close_stream / disconnect 後に open transaction を残す | merge 不可 |
+| COMMIT 成功応答前の切断を success と扱う | merge 不可 |
+| `sequence` を ad hoc semicolon split する | merge 不可 |
+| store_sql cache を connection 外へ永続化または共有する | merge 不可 |
+| cursor API を Phase 9 で成功応答にする | merge 不可 |
+| WebSocket transcript、transaction rollback fixture、SDK regression、secret scan なしで完了扱いにする | Phase 未完了 |
+
+**Phase 9 Done receipt 最低 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `implemented_scope` | WebSocket upgrade、subprotocol、hello auth、stream lifecycle、execute/batch/sequence/describe、store_sql/close_sql、interactive transaction、disconnect rollback |
+| `excluded_scope` | ATTACH、metrics API、replication、backup/restore、branch、extension、HA、protobuf WebSocket |
+| `atomic_task_result` | `TASK-P9-1`〜`TASK-P9-10` がすべて pass、open task 0 件 |
+| `scenario_matrix_result` | `SCN-P9-1`〜`SCN-P9-22` の pass/fail、artifact path |
+| `upgrade_result` | default/path upgrade、invalid headers、unknown DB、subprotocol、frame size close code |
+| `hello_auth_result` | valid/invalid/expired/revoked JWT、pipelined hello、hello failure close の transcript |
+| `stream_result` | open/close、open 前 request、close 後 request、multi stream isolation |
+| `sql_result_mapping_result` | execute、batch、sequence、describe、SQL error、unknown field の wire snapshot |
+| `transaction_result` | commit、rollback、disconnect rollback、close_stream rollback、COMMIT 前切断 |
+| `store_sql_result` | store_sql、sql_id execute、close_sql、unknown id、double register、connection-local boundary |
+| `compatibility_baseline_result` | TypeScript SDK WebSocket transaction、Phase 1〜8 regression、HTTP SDK regression |
+| `secret_redaction_result` | WebSocket transcript/log/artifact に JWT、Bearer、Platform/admin token、SQL args 生値が残らない scan |
+| `coverage_closure_result` | upgrade、hello、stream、SQL、transaction、store_sql、permission、unsupported、regression の gap 0 件 |
+| `review_handoff_result` | 第三者が WebSocket upgrade、SDK transaction、rollback、store_sql、secret scan を再現できる command と artifact |
+| `operator_behavior_delta_result` | Phase 9 で hrana-ws v3 `/v3/baton` と `/{db-name}/v3/baton` が公開され、interactive transaction が利用可能になる release note |
 
 **Phase 8〜10 の境界決定：**
 
