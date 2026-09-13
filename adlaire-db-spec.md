@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.79
+**バージョン：** V.80
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.79` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.80` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.79` の次は `V.80` とし、以後 `V.81`、`V.82` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.80` の次は `V.81` とし、以後 `V.82`、`V.83` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -2698,6 +2698,82 @@ observability に関係する仕様変更は、manifest の `Security map`、`Re
 
 認証・認可に関係する仕様変更は、manifest の `Security map`、§9.14 security boundary、該当 SEC 契約 ID、auth/scope/quota evidence、redaction artifact を同時更新する。正常系だけが通っても、拒否条件の precedence が固定されていない場合は Phase 完了扱いにしない。
 
+#### 9.1.19 Configuration resolution / validation 固定契約
+
+各 Phase 実装 PR は、追加・変更する CLI flag、環境変数、TOML key、default、secret file、対象 Phase 前 config の扱いを実装開始前に固定しなければならない。設定解決が実行環境や実装者の判断で変わる場合、その Phase は未完了である。
+
+**設定解決の必須項目：**
+
+| 項目 | 必須内容 |
+|------|----------|
+| config key | CLI flag、env name、TOML section/key、内部 field 名 |
+| type / unit | string、bool、integer、duration、bytes、path、enum。ms/sec/bytes など単位も固定 |
+| default | 省略時の値。default なしの場合は必須扱いか対象 Phase 前無効を明記 |
+| precedence | CLI > env > TOML > default など、全 source の順位 |
+| invalid value | 範囲外、型違い、空文字、未知 enum、存在しない file/path の扱い |
+| target Phase before behavior | 対象 Phase 前に指定された時、起動失敗か WARN 無効化か |
+| redaction | log / stderr / artifact に値を出してよいか、redacted marker |
+| evidence | config fixture、env fixture、stderr snapshot、redaction sample、priority test |
+
+**既定 precedence：**
+
+| 種別 | 既定順位 |
+|------|----------|
+| 通常設定 | CLI flag > env > TOML > default |
+| `jwt_secret` | `--auth-jwt-secret-file` > `--auth-jwt-secret` > `ADLAIRE_JWT_SECRET` > TOML `[auth] jwt_secret_file` > TOML `[auth] jwt_secret` > auth disabled |
+| admin token | `--admin-auth-token` > `ADLAIRE_ADMIN_TOKEN` > TOML `[admin] auth_token` > admin auth disabled |
+| replication token | `--replication-auth-token` > `ADLAIRE_REPLICATION_TOKEN` > TOML `[replication] auth_token` > replication auth disabled only if Phase 節で許可 |
+| HA token | `--ha-auth-token` > `ADLAIRE_HA_TOKEN` > TOML `[ha] auth_token` > HA API 起動不可 |
+| data dir | `--data` > TOML `[storage] data_dir`。本番では CLI 指定を推奨し、未指定は起動失敗 |
+
+既定順位と異なる設定は、§4、§8.4、§9.13、該当 Phase 節、manifest の `Config map` に差分理由を明記する。差分理由なしに順位を変更してはならない。
+
+**secret / path validation：**
+
+| 設定 | 必須 validation |
+|------|-----------------|
+| secret value | 最小長、空文字の扱い、前後空白禁止、log/stderr/artifact redaction |
+| secret file | 存在、通常 file、readable、directory 禁止、symlink 方針、permission warning/error、内容末尾改行の扱い |
+| data dir | create 可否、permission、absolute/canonical path、既存 file 衝突、lock 取得 |
+| extension path | data-dir 配下固定、absolute path log 禁止、symlink 拒否 |
+| primary URL | scheme、host、port、path、TLS 方針、secret を URL に含めることの禁止 |
+| duration / timeout | 0、負数、上限、単位、省略時 default |
+| bytes / size limit | suffix、整数 overflow、負数、0 の意味 |
+| enum | 大小文字、未知値、deprecated value、fallback 禁止 |
+
+**未実装 config の扱い：**
+
+| 状態 | 必須挙動 |
+|------|----------|
+| 対象 Phase 前の key が指定された | §9.13.1 に従い、起動失敗または明示 WARN。silent ignore 禁止 |
+| sample config に commented key がある | 実装許可ではない。対象 Phase 前に有効値として扱わない |
+| unknown TOML key | 互換のため許可するか、起動失敗にするかを section 単位で固定。未定義なら起動失敗 |
+| unknown env | 無視可。ただし Adlaire prefix の unknown env を warning するかは仕様化する |
+| CLI unknown flag | clap 標準 error で非 0 終了 |
+
+**必須 evidence：**
+
+| Evidence | 必須内容 |
+|----------|----------|
+| config priority fixture | CLI/env/TOML/default の上書き順を示す fixture |
+| invalid config stderr | 型違い、範囲外、unknown enum、存在しない secret file の stderr snapshot |
+| target Phase before fixture | 対象 Phase 前 config 指定時の起動失敗または WARN |
+| redaction sample | secret、secret file contents、absolute path が log/stderr/artifact に出ないこと |
+| restart fixture | config 変更後の起動成功/失敗が deterministic であること |
+
+**禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| 未実装 config を silent ignore する | Phase 未完了 |
+| invalid value を default に fallback する | merge 不可。ただし仕様本文に fallback 可と明記された場合のみ可 |
+| secret value を stderr/log/artifact に出す | merge 不可 |
+| CLI/env/TOML の優先順位 test がない | Phase 未完了 |
+| sample config の comment だけで実装契約を代替する | review failure |
+| Phase ごとに同じ key の意味や単位が変わる | merge 不可。migration / compatibility 契約がある場合のみ可 |
+
+設定に関係する仕様変更は、§4、§8.4、§9.13、manifest の `Config map`、CFG 契約 ID、config fixture、stderr snapshot、redaction artifact を同時更新する。設定の正常系だけが通っても、不正値、優先順位、対象 Phase 前挙動、秘匿が固定されていない場合は Phase 完了扱いにしない。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -3329,6 +3405,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Verification command | §9.1.13 の command 分類、順序、exit code、artifact が固定されている | 検証完了扱いにしない |
 | Failure closure | §9.1.14 の失敗、flaky、未検証、artifact 欠落、secret 混入が同一 PR で閉じている | merge 不可 |
 | 後方互換 / migration | §9.1.15 の互換影響、migration plan、rollback、旧形式 fixture が固定されている | 既存契約を変更しない |
+| 設定解決 / validation | §9.1.19 に従い、CLI/env/TOML/default/secret file の優先順位、不正値、対象 Phase 前挙動、秘匿が固定されている | config 実装を開始しない |
 | API 契約 | method/path/auth/request/success/error が §9.5 または各 API 節に明記されている | route を追加しない |
 | Error code | 失敗条件ごとの `code` が §7.3 / §9.7 に存在する | 先に error code を追加する |
 | 永続化 | ファイル名、schema、atomic update、rollback、破損時挙動が §9.6 に明記されている | 書き込み処理を実装しない |
