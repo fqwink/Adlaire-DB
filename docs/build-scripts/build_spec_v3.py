@@ -793,7 +793,7 @@ a:focus-visible {{
   <span class="hdr-title">Adlaire DB</span>
   <span class="hdr-sep">/</span>
   <span class="hdr-title" style="color:rgba(255,255,255,.7);font-weight:400">仕様憲章</span>
-  <span class="hdr-ver">V.209</span>
+  <span class="hdr-ver">V.210</span>
 </header>
 
 <div id="lay">

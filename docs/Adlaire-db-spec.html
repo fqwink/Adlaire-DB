@@ -445,7 +445,7 @@ a:focus-visible {
   <span class="hdr-title">Adlaire DB</span>
   <span class="hdr-sep">/</span>
   <span class="hdr-title" style="color:rgba(255,255,255,.7);font-weight:400">仕様憲章</span>
-  <span class="hdr-ver">V.209</span>
+  <span class="hdr-ver">V.210</span>
 </header>
 
 <div id="lay">
@@ -618,12 +618,12 @@ a:focus-visible {
   <main id="ct">
     <div class="ci">
       <h1 id="Adlaire-DB-仕様憲章" class="mh h1">Adlaire DB 仕様憲章</h1>
-<p class="mp"><strong>バージョン：</strong> V.209 <strong>ステータス：</strong> 設計中 <strong>最終更新：</strong> 2026-09-13</p>
+<p class="mp"><strong>バージョン：</strong> V.210 <strong>ステータス：</strong> 設計中 <strong>最終更新：</strong> 2026-09-13</p>
 <hr class="mr">
 <h2 id="0-仕様憲章の責務" class="mh h2">0. 仕様憲章の責務</h2>
 <p class="mp">本仕様憲章は、Adlaire DB の実装・運用・互換性判断における最上位の仕様責務を固定する。<code class="ic">docs/spec/spec.md</code> は全体方針、共通契約、API、運用、実装統制、Phase include 順を定め、<code class="ic">docs/spec/phase-*.md</code> は Phase 別の実装契約を定める。仕様憲章と Phase 仕様が乖離する場合は、仕様矛盾として扱い、実装判断ではなく仕様改訂で解消する。</p>
 <h3 id="0-1-仕様バージョン管理責務" class="mh h3">0.1 仕様バージョン管理責務</h3>
-<p class="mp">本仕様書のバージョンは <code class="ic">V.{累積番号}</code> 形式で表記する。現在の仕様書バージョンは <code class="ic">V.209</code> である。</p>
+<p class="mp">本仕様書のバージョンは <code class="ic">V.{累積番号}</code> 形式で表記する。現在の仕様書バージョンは <code class="ic">V.210</code> である。</p>
 <p class="mp">仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、<code class="ic">V.1</code>、<code class="ic">0.x</code>、日付ベース、Phase 番号ベースへ戻してはならない。</p>
 <p class="mp">仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。<code class="ic">V.99</code> の次は <code class="ic">V.100</code> とし、以後 <code class="ic">V.101</code>、<code class="ic">V.102</code> のように 1 ずつ増加させる。</p>
 <p class="mp"><strong>禁止事項：</strong></p>
@@ -13647,7 +13647,7 @@ T6-7: 統合テスト
 <p class="mp"><strong>Phase 19 Done receipt 必須項目：</strong></p>
 <div class="tw"><table class="mt">
 <tr><th>項目</th><th>内容</th></tr>
-<tr><td><code class="ic">version_result</code></td><td>仕様書 <code class="ic">V.209</code> 準拠、Phase 19 contract ID、commit SHA</td></tr>
+<tr><td><code class="ic">version_result</code></td><td>仕様書 <code class="ic">V.210</code> 準拠、Phase 19 contract ID、commit SHA</td></tr>
 <tr><td><code class="ic">config_result</code></td><td><code class="ic">TASK-P19-1</code>、<code class="ic">SCN-P19-1</code>〜<code class="ic">SCN-P19-5</code> の pass/fail と artifact path</td></tr>
 <tr><td><code class="ic">adapter_result</code></td><td>WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path</td></tr>
 <tr><td><code class="ic">shadow<em>diff</em>result</code></td><td>差分ゼロまたは差分理由、ERROR log、test failure の証跡</td></tr>

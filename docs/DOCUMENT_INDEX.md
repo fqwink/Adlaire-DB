@@ -2,7 +2,8 @@
 
 ## Status
 
-- `docs/spec/spec.md`, `docs/spec/auth.md`, `docs/spec/api.md`, `docs/spec/testing.md`, and `docs/spec/phase-*.md` are the specification source-of-truth set.
+- `docs/spec/spec.md`, `docs/spec/project-charter.md`, `docs/spec/auth.md`, `docs/spec/api.md`, `docs/spec/testing.md`, and `docs/spec/phase-*.md` are the specification source-of-truth set.
+- `docs/spec/project-charter.md` contains the full content of `docs/spec/spec.md`; these files must be kept synchronized.
 - Phase 1 through Phase 19 are split under `docs/spec/`.
 - Files outside the specification source-of-truth set are supporting documents.
 - If this index conflicts with the specification source-of-truth set, the specification source-of-truth set takes precedence.
@@ -19,6 +20,7 @@ accident.
 | Path | Role | Authority |
 |------|------|-----------|
 | `docs/spec/spec.md` | Specification charter and implementation contract | Source of truth |
+| `docs/spec/project-charter.md` | Project charter containing the full `docs/spec/spec.md` content | Source of truth |
 | `docs/spec/auth.md` | Authentication and authorization specification | Source of truth |
 | `docs/spec/api.md` | API contract specification | Source of truth |
 | `docs/spec/testing.md` | Testing specification | Source of truth |
@@ -33,6 +35,7 @@ accident.
 3. Prefer stable section IDs, Contract IDs, Phase IDs, API paths, and artifact paths over line-number references.
 4. Any future split must preserve implementation clarity by phase, API surface, persistence contract, error contract, and verification gate.
 5. A future split must include a migration map from the original section to the new document path.
+6. `docs/spec/spec.md` and `docs/spec/project-charter.md` must be updated together; one-sided edits are documentation drift.
 
 ## Future Split Candidate Areas
 
