@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.87
+**バージョン：** V.88
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.87` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.88` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.87` の次は `V.88` とし、以後 `V.89`、`V.90` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.88` の次は `V.89` とし、以後 `V.90`、`V.91` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -3425,6 +3425,105 @@ filesystem path は API response、log、artifact では logical resource 名ま
 
 resource identity に関係する仕様変更は、§6、§8、§9.1.18、§9.1.20、§9.1.21、§9.5、§9.6、§9.14、該当 Phase 節、manifest の Endpoint / Persistence / Security / Compatibility map、name validation matrix、path traversal fixture、legacy fixture、metadata/path consistency snapshot を同時更新する。正常系だけが通っても、decode、case、legacy、collision、path traversal、scope lookup が固定されていない場合は Phase 完了扱いにしない。
 
+#### 9.1.27 List / pagination / cursor / filtering 固定契約
+
+一覧 API を追加・変更する Phase は、実装開始前に並び順、limit、cursor、filter、snapshot 正規化、ページ跨ぎの mutation 挙動を固定しなければならない。`limit` と `cursor` の存在だけを endpoint 表に書くことは十分条件ではない。Turso Cloud 互換 endpoint と Adlaire 管理 endpoint が同じ resource を返す場合、wrapper / field casing を除き、対象集合、順序、cursor 境界、filter 結果は一致させる。
+
+**共通 pagination 入力契約：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| `limit` 未指定 | 100 |
+| `limit` 最小 / 最大 | 1〜500。範囲外、非整数、浮動小数、指数表記、符号付き表記、空文字は `INVALID_REQUEST` |
+| `cursor` 未指定 | 先頭ページ |
+| `cursor` 空文字 | `INVALID_REQUEST`。空文字を先頭ページ扱いしない |
+| duplicate query | 同一 key の複数指定は `INVALID_REQUEST` |
+| unknown query | endpoint 固有表に明記されていない key は `INVALID_REQUEST` |
+| offset pagination | `offset`、`page`、`per_page` は endpoint 固有表に明記しない限り禁止 |
+| body | `GET` 一覧 API は body 禁止。body がある場合は `INVALID_REQUEST` |
+
+**cursor 形式と検証：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| wire format | base64url without padding の opaque string。client は内容を解釈してはならない |
+| payload | `version`、`endpoint_id`、`resource_kind`、`filters_hash`、`sort_key`、`last_seen_key`、`issued_at` を含む |
+| 署名 / 改ざん検知 | HMAC または同等の改ざん検知を必須とする。復号不能、署名不一致、必須 field 欠落は `INVALID_REQUEST` |
+| scope binding | endpoint、resource kind、organization/group/database scope、filter、sort が一致しない cursor は `INVALID_REQUEST` |
+| version | 実装が解釈できない cursor version は `INVALID_REQUEST`。silent reset 禁止 |
+| expiry | endpoint が expiry を明記しない限り無期限。ただし metadata format 変更で解釈不能になった cursor は `INVALID_REQUEST` |
+| secret | cursor payload に token、raw path、SQL、local username、quota 値の秘匿情報を入れない |
+
+**共通 list 順序：**
+
+| Resource 種別 | 既定順序 |
+|---------------|----------|
+| metadata resource | `created_at` 昇順、同値は stable identity 昇順 |
+| usage / quota 集計 | scope 種別順 `organization` → `group` → `database`、scope identity 昇順 |
+| location | `primary` true を先頭、その後 `created_at` 昇順、同値は location code 昇順 |
+| token 一覧 | `created_at` 昇順、同値は token id 昇順。raw token は返さない |
+| log / audit / event | `created_at` 昇順、同値は monotonic sequence 昇順。降順を採用する場合は endpoint 表に明記 |
+
+endpoint が上表と異なる順序を必要とする場合は、endpoint 表、snapshot、cursor payload の `sort_key` を同じ PR で更新する。実装言語の map iteration order、filesystem order、JSON object key order、database engine の未指定順序に依存してはならない。
+
+**filter 固定契約：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| filter key | endpoint 表に明記された key のみ許可 |
+| filter value | identity 系 value は §9.1.26 の validation 後に scope 解決する。trim / lowercase 補正は禁止 |
+| 複数 filter | AND 条件。OR、部分一致、prefix match は endpoint 表に明記しない限り禁止 |
+| 空結果 | 200 と空配列、`next_cursor:null`。対象 scope 自体が存在しない場合は対応する `*_NOT_FOUND` |
+| 権限外 scope | §9.1.18 の precedence に従い、存在漏洩しない error を返す |
+| cursor 併用 | cursor 発行時と同じ filter set だけ許可。filter 変更時は新規先頭ページとして cursor なしで要求する |
+
+**ページ跨ぎ mutation 挙動：**
+
+| 状態 | 必須挙動 |
+|------|----------|
+| 前ページ返却後に resource が追加された | 追加 resource が cursor の sort key より後なら後続ページに出てもよい。前なら今回の traversal には出なくてよい |
+| 前ページ返却後に未返却 resource が削除された | 削除済み resource は返さない。穴埋めのために既返却 resource を重複返却しない |
+| 前ページ返却後に既返却 resource が削除された | 後続ページで再返却しない |
+| sort key が変更された | identity rename が禁止されている resource では発生させない。変更可能 resource は endpoint 節で cursor invalidation を明記 |
+| metadata 破損 / migration 中 | partial list を返さず、該当 error と recovery evidence を残す |
+
+`next_cursor` は次ページが存在する場合だけ non-null とする。最終ページ、空結果、`limit` より少ない結果しかない場合は `null` とする。`next_cursor` が non-null の場合でも、次 request までに resource が削除されて空ページになることは許容するが、その場合も 200 空配列 `next_cursor:null` とし、cursor を巻き戻してはならない。
+
+**response / snapshot 正規化：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| array order | API 契約の list 順序通りに比較する。snapshot 比較前に sort し直さない |
+| object key order | snapshot 比較前に辞書順へ正規化する |
+| timestamp | format、timezone、precision を endpoint / DTO 節に明記し、fixture では固定値を使う |
+| wrapper | `/v1/*` は Turso 互換 wrapper / field casing、`/admin/v1/*` は Adlaire wrapper を維持する |
+| empty list | 空配列と `next_cursor:null` を必ず含め、省略しない |
+| redaction | cursor、token id、scope は snapshot に含めてよいが、raw token / raw path / local username は含めない |
+
+**必須 evidence：**
+
+| Evidence | 必須内容 |
+|----------|----------|
+| pagination matrix | limit 未指定、1、500、0、501、非整数、空、duplicate、unknown query |
+| cursor fixture | valid、改ざん、別 endpoint、別 filter、別 scope、unknown version、空 cursor |
+| order snapshot | created_at 同値、identity 同値不可、filesystem / map order 非依存 |
+| mutation fixture | page 取得間の追加、削除、空ページ、最終ページ |
+| filter matrix | scope 存在、scope 不存在、権限外、複数 filter、空結果 |
+| Turso compatibility snapshot | `/v1/*` と `/admin/v1/*` の対象集合、順序、cursor 境界の差分分類 |
+
+**禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| cursor を単なる array index / offset として実装する | merge 不可 |
+| filter 変更後も古い cursor を受理する | merge 不可 |
+| map iteration / filesystem order に依存した list を返す | merge 不可 |
+| duplicate query key を最後勝ち / 先勝ちで黙認する | merge 不可 |
+| page 間削除で既返却 resource を再返却する | merge 不可 |
+| snapshot 比較時に array を test 側で任意 sort する | Phase 未完了 |
+
+list / pagination に関係する仕様変更は、§9.1.18、§9.1.20、§9.1.22、§9.1.23、§9.1.26、§9.5、該当 Phase 節、manifest の Endpoint / Compatibility / Regression map、pagination matrix、cursor fixture、order snapshot、mutation fixture、filter matrix を同時更新する。正常系だけが通っても、cursor scope、filter binding、stable order、page mutation、snapshot order が固定されていない場合は Phase 完了扱いにしない。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -4057,14 +4156,14 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Failure closure | §9.1.14 の失敗、flaky、未検証、artifact 欠落、secret 混入が同一 PR で閉じている | merge 不可 |
 | 後方互換 / migration | §9.1.15 の互換影響、migration plan、rollback、旧形式 fixture が固定されている | 既存契約を変更しない |
 | 設定解決 / validation | §9.1.19 に従い、CLI/env/TOML/default/secret file の優先順位、不正値、対象 Phase 前挙動、秘匿が固定されている | config 実装を開始しない |
-| API 契約 | §9.1.20 に従い、method/path/auth/request/success/error/schema/validation/serialization が §9.5 または各 API 節に明記されている | route を追加しない |
+| API 契約 | §9.1.20 / §9.1.27 に従い、method/path/auth/request/success/error/schema/validation/serialization/list order/pagination/cursor/filtering が §9.5 または各 API 節に明記されている | route を追加しない |
 | Error code | §9.1.22 に従い、失敗条件ごとの `code`、status、wire surface、retry、client action、precedence が §7.3 / §9.7 に存在する | 先に error code と retry 契約を追加する |
 | 永続化 | §9.1.21 / §9.1.26 に従い、ファイル名、schema、atomic update、fsync、directory sync、rollback、破損時挙動、path normalization、recovery evidence が §9.6 に明記されている | 書き込み処理を実装しない |
 | 認証/認可 | §9.1.18 に従い、必要 token、scope、ro/rw、org/group、quota、block policy、拒否条件 precedence が明記されている | success response を返す API を公開しない |
 | ログ/秘匿 | §9.1.17、§12、§9.14 に従い、出力 field、request id、audit 相当記録、秘匿対象、redaction evidence が明記されている | request/SQL/token をログに出す実装を入れない |
 | 並行性 / job lifecycle | §9.1.16 / §9.1.25 に従い、同時 request、resource lock、idempotency、shutdown、transaction、long-running operation の扱いが定義されている | 並行実行で状態を変更する処理を入れない |
 | 後方互換 / Turso 追従 | §9.1.23 に従い、既存 endpoint/schema/config への影響、Turso 差分分類、SDK 影響、migration path が明記されている | 既存契約を変更しない |
-| テスト | §9.8 と §9.1.24 に従い、該当 Phase 行に正常/異常/認可/永続化/障害系と CI / release-check / secret scan evidence がある | 完了扱いにしない |
+| テスト | §9.8 と §9.1.24 / §9.1.27 に従い、該当 Phase 行に正常/異常/認可/永続化/障害系、list/pagination/cursor/filter evidence、CI / release-check / secret scan evidence がある | 完了扱いにしない |
 | 運用 | config、metrics、health、rollback、job status / recovery 手順が必要な Phase では明記されている | 運用 API を公開しない |
 
 **Phase 間の前倒し実装ルール：**
@@ -6652,7 +6751,7 @@ Phase 8 は Turso Cloud 互換を優先するための前倒しフェーズで�
 
 **Phase 8 API 契約：**
 
-Phase 8 で公開する API は §9.5 の Phase 8 行を正とする。`/admin/v1/*` は Admin token 必須、`/v1/*` は Platform token 必須とし、unknown field は `INVALID_REQUEST` とする。一覧 API は `limit`（既定 100、最大 500）と `cursor` を受け付ける。Phase 8 では `cursor` は opaque string とし、未指定時は先頭ページを返す。filter query は `organization`、`group`、`database` のみ許可し、不明 query は `INVALID_REQUEST` とする。
+Phase 8 で公開する API は §9.5 の Phase 8 行を正とする。`/admin/v1/*` は Admin token 必須、`/v1/*` は Platform token 必須とし、unknown field は `INVALID_REQUEST` とする。一覧 API は §9.1.27 に従い、`limit`（既定 100、最大 500）と `cursor` を受け付ける。Phase 8 では `cursor` は base64url without padding の opaque string とし、endpoint、resource kind、scope、filter、sort に binding する。filter query は `organization`、`group`、`database` のみ許可し、不明 query は `INVALID_REQUEST` とする。
 
 `PUT /admin/v1/quotas/{scope}` の `{scope}` は URL encode 済みの `organization:{id}`、`group:{id}`、`database:{name}` のいずれかとする。scope type が不明な場合は `INVALID_REQUEST`、scope が存在しない場合は対応する `ORG_NOT_FOUND`、`GROUP_NOT_FOUND`、`DB_NOT_FOUND` を返す。
 
