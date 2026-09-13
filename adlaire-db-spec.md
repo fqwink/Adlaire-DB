@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.121
+**バージョン：** V.122
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.121` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.122` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -5957,6 +5957,103 @@ Phase 6 は Phase 1〜5 の単一 DB HTTP/JWT/SDK 互換を維持したまま、
 | `coverage_closure_result` | route、validation、auth、metadata、isolation、restart、unsupported、regression の gap 0 件 |
 | `review_handoff_result` | 第三者が route、validation、metadata、isolation、restart、unsupported を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 6 で `/{db-name}/v2/pipeline` が追加されるが、DB 作成管理 API はまだ成功応答しない release note |
+
+**Phase 7 完全実装精度固定契約：**
+
+Phase 7 は Phase 6 の multi DB routing に、Adlaire 管理 API、token CRUD、DB scope JWT を追加する Phase である。Phase 7 で成功応答してよい新規外部 API は `/admin/v1/databases`、`/admin/v1/databases/{name}`、`/admin/v1/tokens`、`/admin/v1/tokens/{id}` のみであり、Turso Platform API `/v1/*`、organization/group/location/quota、WebSocket、backup/restore、branch は実装してはならない。Phase 7 実装者は下表を Phase packet、atomic task ledger、scenario matrix、Done receipt、review handoff、operator behavior delta に転記してから実装する。
+
+| 項目 | Phase 7 固定仕様 |
+|------|------------------|
+| 実装範囲 | Admin token 認証、DB CRUD 管理 API、token CRUD 管理 API、DB scope JWT `dbs`、revoke 即時反映、metadata atomic update |
+| API surface | `GET/POST /admin/v1/databases`、`GET/DELETE /admin/v1/databases/{name}`、`GET/POST /admin/v1/tokens`、`GET/DELETE /admin/v1/tokens/{id}` のみ追加 |
+| admin auth | `[admin] auth_token` / `--admin-auth-token` / `ADLAIRE_ADMIN_TOKEN` が設定されている場合は `Authorization: Bearer <token>` 完全一致必須 |
+| admin auth disabled | admin token 未設定時は開発用 auth disabled。WARN log を出すが、本番推奨ではないことを operator delta に明記する |
+| Bearer strictness | prefix、大小文字、前後空白、token 値を補正しない。Authorization なしは `AUTH_REQUIRED`、形式不正/不一致は `AUTH_INVALID` |
+| DB create | `POST /admin/v1/databases {"name":string}` は 201 `DbInfo`。DB directory 作成、libsql open、integrity_check、manager 登録、`databases.json` commit の順に成功させる |
+| DB list/detail | list は `{"databases":[DbInfo...]}`、detail は `DbInfo`。`size_bytes` は `data.db` 実ファイルサイズ。JWT/secret を返さない |
+| DB delete | `DELETE /admin/v1/databases/{name}` は 204 body なし。削除後の detail/path pipeline は `DB_NOT_FOUND` |
+| DB create conflict | 同名 active DB は `409 DB_ALREADY_EXISTS`。delete 中/作成中の race は `409 STORAGE_BUSY` または `DB_ALREADY_EXISTS` を固定 snapshot に残す |
+| token create | `POST /admin/v1/tokens` は 201 で JWT を 1 回だけ `token` field に返す。以降の GET/list では JWT 文字列を返さない |
+| token metadata | `tokens.json` には `id`、`access`、`dbs`、`created_at`、`expires_at`、`revoked`、`revoked_at` を保存し、JWT 文字列と secret 生値は保存しない |
+| token list/detail | list/detail は token metadata のみ返す。`revoked` と `revoked_at` を必ず含める |
+| token revoke | `DELETE /admin/v1/tokens/{id}` は 204 body なし。存在する token は即時に memory state と `tokens.json` の両方へ反映する。既に revoked は 204 |
+| unknown token revoke | 存在しない token id は `404 TOKEN_NOT_FOUND`。別 token の revoke と混同しない |
+| DB scope JWT | `dbs` がある場合は対象 DB 名の値を優先し、存在しない場合は global `a` を使う。`dbs` 値は `ro` / `rw` のみ |
+| scope application | `dbs` 判定は `/v2/pipeline` の `default` と `/{db-name}/v2/pipeline` の path DB の両方へ適用する |
+| persistence | `databases.json` と `tokens.json` は tmp write + fsync + atomic rename。partial write、JWT 保存、metadata/file 不整合を成功扱いにしない |
+| response time | `created_at`、`expires_at`、`revoked_at` は RFC3339 UTC 秒精度。`null` 可 field 以外は null 禁止 |
+
+**Phase 7 atomic task ledger：**
+
+| Task ID | Goal | Input contracts | Change targets | Forbidden changes | Completion condition | Verification |
+|---------|------|-----------------|----------------|-------------------|----------------------|--------------|
+| `TASK-P7-1` | Admin token 認証境界を固定する | §6.4、§9.1.18 | `http/admin/*`、`config.rs` | Bearer 補正、token log | auth matrix が規定 status/code | admin auth matrix |
+| `TASK-P7-2` | DB CRUD API contract を固定する | §6.4、§9.5 | `http/admin/databases.rs` | wrapper 変更、body あり DELETE | status/body/error が snapshot 一致 | DB API snapshots |
+| `TASK-P7-3` | DB create/delete atomicity を固定する | §3.4、§9.1.16、§9.6 | `db/manager.rs`、`db/meta.rs` | partial create/delete 成功 | metadata/directory/manager が整合 | atomicity fixture |
+| `TASK-P7-4` | token CRUD API contract を固定する | §5.5、§5.6、§6.4 | `http/admin/tokens.rs`、`token/*` | GET で JWT 返却、JWT 保存 | create/list/detail/revoke が固定 | token API snapshots |
+| `TASK-P7-5` | revoke 即時反映を固定する | §5.6、§9.1.18 | `auth/*`、`token/*` | 再起動まで revoke 未反映 | revoke 後同一 token が即 401 | revoke race test |
+| `TASK-P7-6` | DB scope JWT `dbs` を固定する | §5.4、§9.1.18 | `auth/*`、`http/pipeline.rs` | dbs 無視、scope 漏れ | default/path DB で ro/rw が規定通り | scope matrix |
+| `TASK-P7-7` | admin request validation を固定する | §6.4、§9.1.2、§9.5 | `http/admin/*` | unknown/null/body 黙認 | invalid request が `INVALID_REQUEST` | validation snapshots |
+| `TASK-P7-8` | concurrent create/delete/token を固定する | §9.1.16、§9.1.23 | `db/manager.rs`、`token/*` | lost update、二重作成 | race 後 metadata が整合 | concurrency fixture |
+| `TASK-P7-9` | Phase 7 Done receipt / handoff / operator delta | §9.1.33、§9.1.51、§9.1.52 | docs / PR artifact | PR description だけの根拠 | 第三者が admin/scope/revoke を再現できる | handoff checklist |
+
+**Phase 7 scenario / oracle 固定表：**
+
+| Scenario ID | 入力 | 期待結果 | Evidence |
+|-------------|------|----------|----------|
+| `SCN-P7-1` | admin token 設定、Authorization なし | HTTP 401 `AUTH_REQUIRED` | admin no auth snapshot |
+| `SCN-P7-2` | admin token 設定、不一致 / Bearer 形式不正 | HTTP 401 `AUTH_INVALID` | admin invalid auth snapshot |
+| `SCN-P7-3` | `GET /admin/v1/databases` 初期状態 | HTTP 200 `{"databases":[]}` または default 以外空の固定結果 | DB list snapshot |
+| `SCN-P7-4` | `POST /admin/v1/databases {"name":"db_a"}` | HTTP 201 `DbInfo`、directory と metadata 作成 | DB create transcript |
+| `SCN-P7-5` | 同名 DB 再作成 | HTTP 409 `DB_ALREADY_EXISTS` | duplicate snapshot |
+| `SCN-P7-6` | invalid / reserved DB name | `INVALID_DB_NAME` / `DB_RESERVED_NAME` | validation matrix |
+| `SCN-P7-7` | DB detail/list/delete lifecycle | detail 200、delete 204、削除後 detail/path route 404 | DB lifecycle transcript |
+| `SCN-P7-8` | DB create 中失敗注入 | partial metadata/directory が成功扱いにならない | DB atomicity fixture |
+| `SCN-P7-9` | `POST /admin/v1/tokens {"access":"rw","expiry":"30d"}` | HTTP 201、JWT は create response だけ、metadata 保存 | token create transcript |
+| `SCN-P7-10` | token list/detail | HTTP 200、JWT 文字列なし、revoked fields あり | token list/detail snapshot |
+| `SCN-P7-11` | token revoke 後に同 token で pipeline | revoke 直後から HTTP 401 `AUTH_INVALID` | revoke immediate transcript |
+| `SCN-P7-12` | 存在しない token revoke | HTTP 404 `TOKEN_NOT_FOUND` | token not found snapshot |
+| `SCN-P7-13` | `dbs {"db_a":"rw"}` + global `ro` で db_a write | HTTP 200 | db scope allow snapshot |
+| `SCN-P7-14` | 同 token で db_b write / read | write は 403 `PERMISSION_DENIED`、read は 200 | db scope deny/read snapshot |
+| `SCN-P7-15` | `dbs` 不正値、unknown field、null、空 body | HTTP 400 `INVALID_REQUEST` | admin validation snapshots |
+| `SCN-P7-16` | DB/token 作成後 restart | DB と token metadata、revoke state、scope が復元 | restart transcript |
+| `SCN-P7-17` | concurrent DB create/delete、token create/revoke | metadata lost update なし、規定 conflict error | concurrency transcript |
+| `SCN-P7-18` | `/v1/*`、WebSocket、backup/restore/branch API | Phase 7 では成功応答なし | unsupported snapshot |
+
+**Phase 7 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| `/v1/*` Turso Platform API、organization/group/location/quota を成功応答にする | merge 不可。Phase 8 対象 |
+| WebSocket、backup/restore、branch、metrics API を成功応答にする | merge 不可。未来 Phase 対象 |
+| Admin token の Bearer 値を trim / lowercase / 補正して受け付ける | merge 不可 |
+| 管理 API の unknown field、body あり DELETE、null 不正を黙って無視する | merge 不可 |
+| GET/list token response に JWT 文字列を返す | merge 不可 |
+| `tokens.json` に JWT 文字列または secret 生値を保存する | merge 不可 |
+| token revoke が再起動まで反映されない | merge 不可 |
+| `dbs` claim を無視する、または path DB と default DB で異なる規則にする | merge 不可 |
+| DB create/delete の partial metadata/directory 不整合を成功扱いにする | Phase 未完了 |
+| admin auth matrix、DB CRUD、token CRUD、scope matrix、revoke immediate、concurrency の証跡なしで完了扱いにする | Phase 未完了 |
+
+**Phase 7 Done receipt 最低 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `implemented_scope` | Admin token 認証、DB CRUD API、token CRUD API、DB scope JWT、revoke 即時反映、metadata atomic update |
+| `excluded_scope` | `/v1/*` Turso Platform API、organization/group/location/quota、WebSocket、backup/restore、branch、metrics |
+| `atomic_task_result` | `TASK-P7-1`〜`TASK-P7-9` がすべて pass、open task 0 件 |
+| `scenario_matrix_result` | `SCN-P7-1`〜`SCN-P7-18` の pass/fail、artifact path |
+| `admin_auth_result` | no auth、bad format、不一致、valid、auth disabled、secret redaction の matrix |
+| `db_crud_result` | create/list/detail/delete、duplicate、invalid/reserved、deleted route、size_bytes、restart の snapshot |
+| `token_crud_result` | create/list/detail/revoke、JWT 一回限り返却、JWT 非保存、TOKEN_NOT_FOUND、restart の snapshot |
+| `scope_result` | global `a`、`dbs` override、default route、path route、ro/rw read/write matrix |
+| `atomicity_concurrency_result` | DB/token metadata atomic update、失敗注入、concurrent create/delete/revoke の整合性 |
+| `secret_redaction_result` | response/log/artifact に admin token、JWT、secret、raw claim、SQL args が残らない scan 結果 |
+| `unsupported_surface_result` | `/v1/*`、WebSocket、backup/restore、branch、future admin API が成功応答しない snapshot |
+| `compatibility_baseline_result` | Phase 1〜6 regression、TypeScript SDK default/path CRUD、hrana auth/scope transcript |
+| `coverage_closure_result` | admin auth、DB CRUD、token CRUD、scope、revoke、atomicity、concurrency、unsupported、regression の gap 0 件 |
+| `review_handoff_result` | 第三者が admin API、token API、scope、revoke、restart、concurrency を再現できる command と artifact |
+| `operator_behavior_delta_result` | Phase 7 で `/admin/v1/databases` と `/admin/v1/tokens` が成功応答になり、DB scope JWT が有効になる release note |
 
 **Phase 8〜10 の境界決定：**
 
