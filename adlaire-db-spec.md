@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.82
+**バージョン：** V.83
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.82` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.83` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.82` の次は `V.83` とし、以後 `V.84`、`V.85` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.83` の次は `V.84` とし、以後 `V.85`、`V.86` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -2936,6 +2936,100 @@ SQLite DB、WAL、backup binary のように library が内部で durability を
 
 永続化に関係する仕様変更は、§9.6、§9.15、manifest の `Persistence map`、該当 Phase の storage 契約 ID、atomic trace、crash fixture、corrupt fixture、restart fixture を同時更新する。正常系の書き込みだけが通っても、fsync、rename、directory sync、破損検出、recovery 失敗時挙動が固定されていない場合は Phase 完了扱いにしない。
 
+#### 9.1.22 Error taxonomy / retry / client action 固定契約
+
+各 Phase 実装 PR は、追加・変更する失敗条件について、error category、HTTP status、wire surface、`code`、message 粒度、retry 可否、client action、redaction、evidence を実装開始前に固定しなければならない。未分類の失敗を `INTERNAL_ERROR` に丸めて Phase 完了扱いにしてはならない。
+
+**error category 既定表：**
+
+| Category | 代表条件 | HTTP status / wire | Retry | Client action |
+|----------|----------|--------------------|-------|---------------|
+| request validation | JSON 不正、未知 field、型違い、body limit、bad query | 400 / 413 / 406 / 405 | No | request を修正 |
+| auth required / invalid | token 欠落、不正形式、署名不一致、期限切れ、失効済み | 401 | No | token を再取得または設定修正 |
+| permission denied | scope 不足、ro token write、block_reads / block_writes | 403 | No | 権限または設定を変更 |
+| not found | DB、token、backup、branch、frame が存在しない | 404 | No | resource 名または selector を修正 |
+| conflict | duplicate name、generation mismatch、同時更新競合、delete protection | 409 | Conditional | 最新 state を再取得して再試行 |
+| locked / busy | SQLite busy、resource lock timeout、process lock 競合 | 423 または 503 | Yes | backoff retry。process lock は運用者対応 |
+| quota / limit | quota 超過、usage unavailable、rate / size limit | 402 / 403 / 429 / 503 | Conditional | quota 調整、時間経過、usage 確認 |
+| unavailable | replica lag、leader unavailable、primary 到達不能、maintenance | 503 / 307 | Yes | redirect follow または backoff retry |
+| corruption / integrity | checksum 不一致、metadata parse 失敗、integrity_check 失敗 | 500 / 503 | No | recovery / restore / operator action |
+| unsupported / not implemented | 未来 Phase、自己ホスト未対応、Turso 互換外 endpoint | 501 / 404 | No | feature availability を確認 |
+| internal bug | 仕様上分類済みでない invariant violation | 500 | No | bug として扱い、redacted log を添付 |
+
+上表と §9.7 が衝突する場合は、§9.7、該当 API 節、snapshot 期待値を同じ PR で更新し、差分理由を明記する。Turso Cloud 互換 endpoint が異なる status を必要とする場合でも、`code`、retry、client action は本節または該当 API 節で固定する。
+
+**wire surface 別 error 変換：**
+
+| Surface | 固定仕様 |
+|---------|----------|
+| admin HTTP | HTTP status と `{"error": string, "code": string}` を返す。debug field、stack trace、path は返さない |
+| Turso Platform `/v1/*` | Turso 互換 status / wrapper / casing を優先し、差分理由と compatibility snapshot を残す |
+| hrana HTTP `/v2/pipeline` | pipeline JSON 不正は HTTP 400。SQL 実行、permission、constraint は HTTP 200 の `results[i].type="error"` |
+| hrana WebSocket | hello 前の認証失敗は `hello_error`。request 単位の失敗は `response_error`。connection close 条件を明記 |
+| CLI / startup | HTTP error code に変換しない。stderr message、exit code、redaction snapshot を固定 |
+| replication / HA | redirect、timeout、lag、term mismatch、split-brain rejection の status / code / retry を個別に固定 |
+
+**`INTERNAL_ERROR` 使用条件：**
+
+| 状態 | 判定 |
+|------|------|
+| OS / filesystem / library error でも仕様済み category に分類できる | 専用 code に写像する。`INTERNAL_ERROR` 禁止 |
+| serialization、validation、auth、permission、quota、not found、conflict | `INTERNAL_ERROR` 禁止 |
+| invariant violation、到達不能分岐、未分類 bug | `INTERNAL_ERROR` 可。ただし redacted log と bug evidence 必須 |
+| secret scan failure、redaction failure | `INTERNAL_ERROR` にせず merge/blocking failure として扱う |
+| panic / unwrap による process abort | Phase 未完了。HTTP 500 の代替として扱わない |
+
+**複数 error 同時発生時の優先順位：**
+
+| Order | 条件 | 理由 |
+|-------|------|------|
+| 1 | request body / route / method / content-type が不正 | resource 存在や auth 状態を推測させないため、構文不正を先に閉じる |
+| 2 | auth required / invalid / expired / revoked | 未認証 caller に resource 状態を返さない |
+| 3 | scope / permission / block policy / quota | 認証済み caller の操作可否を先に確定 |
+| 4 | resource not found | 認可後に存在判定する |
+| 5 | conflict / idempotency / generation mismatch | 対象 resource の現在 state と request の競合 |
+| 6 | busy / unavailable / timeout | 操作可能だが一時的に完了できない |
+| 7 | corruption / integrity / recovery failure | operator action が必要な状態 |
+| 8 | internal bug | 上記分類に該当しない場合のみ |
+
+§9.1.18 の認証・認可 precedence、§9.1.20 の validation 既定ルール、§9.1.21 の recovery 判定がより具体的な順序を定義する場合は、該当節を優先し、error matrix に差分を記録する。
+
+**retry 既定ルール：**
+
+| Retry | 条件 | Client behavior |
+|-------|------|-----------------|
+| No | validation、auth、permission、not found、unsupported、corruption | 同一 request をそのまま再送しない |
+| Yes | storage busy、replication timeout、leader unavailable、temporary network / upstream failure | exponential backoff + jitter。idempotency 契約を確認 |
+| Conditional | conflict、quota、rate limit、usage unavailable、redirect | state 再取得、quota/limit 確認、redirect follow 後に再試行 |
+| Unknown | 仕様未定義 | 実装禁止。`INTERNAL_ERROR` で代用しない |
+
+retry 可の error は、同一 request を再送した場合に二重作成、二重課金、二重 revoke、二重 restore、branch 重複が起きないよう、§9.1.16 の idempotency 契約または endpoint 固有契約を必ず参照する。
+
+**必須 evidence：**
+
+| Evidence | 必須内容 |
+|----------|----------|
+| error matrix | 各 error code の category、status、wire surface、retry、client action |
+| triggering fixture | 各 error code を発火させる最小 request / config / metadata |
+| precedence snapshot | 複数 error 条件が同時に成立した時の status/code/body |
+| retry matrix | retry 可 / 不可 / conditional の理由と idempotency 契約 ID |
+| SDK/client action snapshot | libSQL SDK、Turso Platform 互換 client、CLI での観測結果 |
+| redaction snapshot | error body、stderr、log に secret、JWT、raw SQL args、absolute path が出ないこと |
+
+**禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| 仕様済み error を `INTERNAL_ERROR` に丸める | merge 不可 |
+| retry 可否が §9.7 または endpoint 契約にない | Phase 未完了 |
+| client action が未定義のまま error code を追加する | review failure |
+| hrana SQL error を HTTP 500 に変換する | merge 不可 |
+| auth 前に resource not found を返して存在有無を漏らす | merge 不可 |
+| error message に token、JWT claim raw value、SQL args、absolute path を出す | merge 不可 |
+| 失敗条件の snapshot が正常系 snapshot だけで代替されている | Phase 未完了 |
+
+error に関係する仕様変更は、§7.3、§9.5、§9.7、manifest の `Error map`、ERR 契約 ID、error matrix、triggering fixture、retry matrix、redaction snapshot を同時更新する。正常系だけが通っても、status、code、retry、client action、precedence、redaction が固定されていない場合は Phase 完了扱いにしない。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -3569,7 +3663,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | 後方互換 / migration | §9.1.15 の互換影響、migration plan、rollback、旧形式 fixture が固定されている | 既存契約を変更しない |
 | 設定解決 / validation | §9.1.19 に従い、CLI/env/TOML/default/secret file の優先順位、不正値、対象 Phase 前挙動、秘匿が固定されている | config 実装を開始しない |
 | API 契約 | §9.1.20 に従い、method/path/auth/request/success/error/schema/validation/serialization が §9.5 または各 API 節に明記されている | route を追加しない |
-| Error code | 失敗条件ごとの `code` が §7.3 / §9.7 に存在する | 先に error code を追加する |
+| Error code | §9.1.22 に従い、失敗条件ごとの `code`、status、wire surface、retry、client action、precedence が §7.3 / §9.7 に存在する | 先に error code と retry 契約を追加する |
 | 永続化 | §9.1.21 に従い、ファイル名、schema、atomic update、fsync、directory sync、rollback、破損時挙動、recovery evidence が §9.6 に明記されている | 書き込み処理を実装しない |
 | 認証/認可 | §9.1.18 に従い、必要 token、scope、ro/rw、org/group、quota、block policy、拒否条件 precedence が明記されている | success response を返す API を公開しない |
 | ログ/秘匿 | §9.1.17、§12、§9.14 に従い、出力 field、request id、audit 相当記録、秘匿対象、redaction evidence が明記されている | request/SQL/token をログに出す実装を入れない |
