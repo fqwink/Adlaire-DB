@@ -9,9 +9,9 @@ use crate::auth::AccessLevel;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TokenRecord {
-    pub id:         String,
-    pub access:     AccessLevel,
-    pub dbs:        Option<HashMap<String, AccessLevel>>,
+    pub id: String,
+    pub access: AccessLevel,
+    pub dbs: Option<HashMap<String, AccessLevel>>,
     #[serde(default)]
     pub organization_scope: Option<String>,
     #[serde(default)]
@@ -28,7 +28,7 @@ pub struct TokenRecord {
     pub token_hash: Option<String>,
     pub created_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
-    pub revoked:    bool,
+    pub revoked: bool,
     pub revoked_at: Option<DateTime<Utc>>,
 }
 

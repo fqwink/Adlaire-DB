@@ -25,7 +25,7 @@ pub struct Claims {
     pub sub: String,
     pub iat: i64,
     pub exp: Option<i64>,
-    pub a:   AccessLevel,
+    pub a: AccessLevel,
     pub dbs: Option<HashMap<String, AccessLevel>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org: Option<String>,
@@ -41,7 +41,7 @@ impl Claims {
             sub: String::new(),
             iat: 0,
             exp: None,
-            a:   AccessLevel::Rw,
+            a: AccessLevel::Rw,
             dbs: None,
             org: None,
             grp: None,
@@ -52,7 +52,7 @@ impl Claims {
     pub fn resolve_access(&self, db_name: &str) -> AccessLevel {
         match &self.dbs {
             Some(dbs) => dbs.get(db_name).cloned().unwrap_or(self.a.clone()),
-            None      => self.a.clone(),
+            None => self.a.clone(),
         }
     }
 
@@ -140,10 +140,7 @@ pub fn sign_claims(secret: &[u8], claims: &Claims) -> anyhow::Result<String> {
     let signed = format!("{header_b64}.{claims_b64}");
     let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
     let sig = hmac::sign(&key, signed.as_bytes());
-    Ok(format!(
-        "{signed}.{}",
-        URL_SAFE_NO_PAD.encode(sig.as_ref())
-    ))
+    Ok(format!("{signed}.{}", URL_SAFE_NO_PAD.encode(sig.as_ref())))
 }
 
 fn decode_json<T: serde::de::DeserializeOwned>(b64: &str) -> Result<T, AppError> {

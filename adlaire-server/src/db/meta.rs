@@ -1,9 +1,4 @@
-use std::{
-    collections::HashSet,
-    fs::OpenOptions,
-    io::Write,
-    path::Path,
-};
+use std::{collections::HashSet, fs::OpenOptions, io::Write, path::Path};
 
 use super::DbInfo;
 
@@ -31,7 +26,7 @@ impl DatabasesMeta {
     pub fn save(&self, data_dir: &Path) -> anyhow::Result<()> {
         validate_database_constraints(self)?;
         let path = data_dir.join("meta").join("databases.json");
-        let tmp  = path.with_extension("json.tmp");
+        let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_vec_pretty(self)?;
         atomic_write_json(data_dir, &tmp, &path, &json)?;
         Ok(())
@@ -40,59 +35,59 @@ impl DatabasesMeta {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OrganizationInfo {
-    pub id:         String,
-    pub name:       String,
-    pub slug:       String,
+    pub id: String,
+    pub name: String,
+    pub slug: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GroupInfo {
-    pub id:                String,
-    pub organization:      String,
-    pub name:              String,
-    pub slug:              String,
-    pub location:          String,
+    pub id: String,
+    pub organization: String,
+    pub name: String,
+    pub slug: String,
+    pub location: String,
     pub delete_protection: bool,
-    pub created_at:        chrono::DateTime<chrono::Utc>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LocationInfo {
-    pub id:         String,
-    pub name:       String,
-    pub provider:   String,
-    pub region:     String,
-    pub primary:    bool,
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub region: String,
+    pub primary: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct QuotaInfo {
-    pub scope_type:           String,
-    pub scope:                String,
-    pub storage_bytes:        Option<u64>,
-    pub rows:                 Option<u64>,
+    pub scope_type: String,
+    pub scope: String,
+    pub storage_bytes: Option<u64>,
+    pub rows: Option<u64>,
     pub write_ops_per_minute: Option<u64>,
-    pub updated_at:           chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UsageInfo {
-    pub scope_type:    String,
-    pub scope:         String,
+    pub scope_type: String,
+    pub scope: String,
     pub storage_bytes: u64,
-    pub rows:          Option<u64>,
-    pub updated_at:    chrono::DateTime<chrono::Utc>,
+    pub rows: Option<u64>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ManagementMeta {
     pub organizations: Vec<OrganizationInfo>,
-    pub groups:        Vec<GroupInfo>,
-    pub locations:     Vec<LocationInfo>,
-    pub quotas:        Vec<QuotaInfo>,
-    pub usage:         Vec<UsageInfo>,
+    pub groups: Vec<GroupInfo>,
+    pub locations: Vec<LocationInfo>,
+    pub quotas: Vec<QuotaInfo>,
+    pub usage: Vec<UsageInfo>,
 }
 
 impl ManagementMeta {
@@ -100,7 +95,8 @@ impl ManagementMeta {
         preflight_phase8(data_dir)?;
         let backup = ensure_phase8_backup(data_dir)?;
         let now = chrono::Utc::now();
-        let mut organizations: Vec<OrganizationInfo> = load_list(data_dir, "organizations.json", "organizations")?;
+        let mut organizations: Vec<OrganizationInfo> =
+            load_list(data_dir, "organizations.json", "organizations")?;
         let mut groups: Vec<GroupInfo> = load_list(data_dir, "groups.json", "groups")?;
         let mut locations: Vec<LocationInfo> = load_list(data_dir, "locations.json", "locations")?;
         let mut quotas: Vec<QuotaInfo> = load_list(data_dir, "quotas.json", "quotas")?;
@@ -108,54 +104,60 @@ impl ManagementMeta {
 
         if organizations.is_empty() {
             organizations.push(OrganizationInfo {
-                id:         default_id("org"),
-                name:       "default".to_string(),
-                slug:       "default".to_string(),
+                id: default_id("org"),
+                name: "default".to_string(),
+                slug: "default".to_string(),
                 created_at: now,
             });
         }
         if locations.is_empty() {
             locations.push(LocationInfo {
-                id:         default_id("loc"),
-                name:       "default".to_string(),
-                provider:   "self-hosted".to_string(),
-                region:     "local".to_string(),
-                primary:    true,
+                id: default_id("loc"),
+                name: "default".to_string(),
+                provider: "self-hosted".to_string(),
+                region: "local".to_string(),
+                primary: true,
                 created_at: now,
             });
         }
         if groups.is_empty() {
             groups.push(GroupInfo {
-                id:                default_id("grp"),
-                organization:      "default".to_string(),
-                name:              "default".to_string(),
-                slug:              "default".to_string(),
-                location:          "default".to_string(),
+                id: default_id("grp"),
+                organization: "default".to_string(),
+                name: "default".to_string(),
+                slug: "default".to_string(),
+                location: "default".to_string(),
                 delete_protection: false,
-                created_at:        now,
+                created_at: now,
             });
         }
         if quotas.is_empty() {
             quotas.push(QuotaInfo {
-                scope_type:           "organization".to_string(),
-                scope:                "default".to_string(),
-                storage_bytes:        Some(10 * 1024 * 1024 * 1024),
-                rows:                 None,
+                scope_type: "organization".to_string(),
+                scope: "default".to_string(),
+                storage_bytes: Some(10 * 1024 * 1024 * 1024),
+                rows: None,
                 write_ops_per_minute: None,
-                updated_at:           now,
+                updated_at: now,
             });
         }
         if usage.is_empty() {
             usage.push(UsageInfo {
-                scope_type:    "organization".to_string(),
-                scope:         "default".to_string(),
+                scope_type: "organization".to_string(),
+                scope: "default".to_string(),
                 storage_bytes: 0,
-                rows:          None,
-                updated_at:    now,
+                rows: None,
+                updated_at: now,
             });
         }
 
-        let meta = Self { organizations, groups, locations, quotas, usage };
+        let meta = Self {
+            organizations,
+            groups,
+            locations,
+            quotas,
+            usage,
+        };
         validate_management_constraints(&meta)?;
         meta.save(data_dir)?;
         crate::token::util::ensure_phase8_token_metadata(data_dir)?;
@@ -165,7 +167,12 @@ impl ManagementMeta {
 
     pub fn save(&self, data_dir: &Path) -> anyhow::Result<()> {
         validate_management_constraints(self)?;
-        save_list(data_dir, "organizations.json", "organizations", &self.organizations)?;
+        save_list(
+            data_dir,
+            "organizations.json",
+            "organizations",
+            &self.organizations,
+        )?;
         save_list(data_dir, "groups.json", "groups", &self.groups)?;
         save_list(data_dir, "locations.json", "locations", &self.locations)?;
         save_list(data_dir, "quotas.json", "quotas", &self.quotas)?;
@@ -180,7 +187,11 @@ pub fn validate_database_constraints(meta: &DatabasesMeta) -> anyhow::Result<()>
     for db in &meta.databases {
         anyhow::ensure!(!db.id.is_empty(), "database id is required");
         anyhow::ensure!(!db.name.is_empty(), "database name is required");
-        anyhow::ensure!(names.insert(db.name.clone()), "duplicate database name: {}", db.name);
+        anyhow::ensure!(
+            names.insert(db.name.clone()),
+            "duplicate database name: {}",
+            db.name
+        );
         anyhow::ensure!(
             org_names.insert((db.organization.clone(), db.name.clone())),
             "duplicate database in organization: {}/{}",
@@ -197,15 +208,26 @@ pub fn validate_management_constraints(meta: &ManagementMeta) -> anyhow::Result<
     for org in &meta.organizations {
         anyhow::ensure!(!org.id.is_empty(), "organization id is required");
         anyhow::ensure!(!org.slug.is_empty(), "organization slug is required");
-        anyhow::ensure!(org_ids.insert(org.id.clone()), "duplicate organization id: {}", org.id);
-        anyhow::ensure!(org_slugs.insert(org.slug.clone()), "duplicate organization slug: {}", org.slug);
+        anyhow::ensure!(
+            org_ids.insert(org.id.clone()),
+            "duplicate organization id: {}",
+            org.id
+        );
+        anyhow::ensure!(
+            org_slugs.insert(org.slug.clone()),
+            "duplicate organization slug: {}",
+            org.slug
+        );
     }
 
     let mut group_ids = HashSet::new();
     let mut group_names = HashSet::new();
     let mut group_slugs = HashSet::new();
     for group in &meta.groups {
-        anyhow::ensure!(!group.organization.is_empty(), "group organization is required");
+        anyhow::ensure!(
+            !group.organization.is_empty(),
+            "group organization is required"
+        );
         anyhow::ensure!(!group.id.is_empty(), "group id is required");
         anyhow::ensure!(!group.name.is_empty(), "group name is required");
         anyhow::ensure!(!group.slug.is_empty(), "group slug is required");
@@ -234,8 +256,16 @@ pub fn validate_management_constraints(meta: &ManagementMeta) -> anyhow::Result<
     for location in &meta.locations {
         anyhow::ensure!(!location.id.is_empty(), "location id is required");
         anyhow::ensure!(!location.name.is_empty(), "location name is required");
-        anyhow::ensure!(location_ids.insert(location.id.clone()), "duplicate location id: {}", location.id);
-        anyhow::ensure!(location_names.insert(location.name.clone()), "duplicate location name: {}", location.name);
+        anyhow::ensure!(
+            location_ids.insert(location.id.clone()),
+            "duplicate location id: {}",
+            location.id
+        );
+        anyhow::ensure!(
+            location_names.insert(location.name.clone()),
+            "duplicate location name: {}",
+            location.name
+        );
     }
 
     let mut quota_scopes = HashSet::new();
@@ -393,12 +423,7 @@ fn save_list<T: serde::Serialize>(
     Ok(())
 }
 
-fn atomic_write_json(
-    data_dir: &Path,
-    tmp: &Path,
-    path: &Path,
-    json: &[u8],
-) -> anyhow::Result<()> {
+fn atomic_write_json(data_dir: &Path, tmp: &Path, path: &Path, json: &[u8]) -> anyhow::Result<()> {
     let meta_dir = data_dir.join("meta");
     std::fs::create_dir_all(&meta_dir)?;
     {
@@ -427,18 +452,18 @@ mod tests {
 
     fn db(name: &str, organization: &str) -> DbInfo {
         DbInfo {
-            id:                uuid::Uuid::new_v4().to_string(),
-            name:              name.to_string(),
-            created_at:        chrono::Utc::now(),
-            size_bytes:        0,
-            organization:      organization.to_string(),
-            group:             "default".to_string(),
-            location:          "default".to_string(),
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            created_at: chrono::Utc::now(),
+            size_bytes: 0,
+            organization: organization.to_string(),
+            group: "default".to_string(),
+            location: "default".to_string(),
             delete_protection: false,
-            block_reads:       false,
-            block_writes:      false,
-            allow_attach:      true,
-            legacy_name:       false,
+            block_reads: false,
+            block_writes: false,
+            allow_attach: true,
+            legacy_name: false,
         }
     }
 
@@ -446,42 +471,42 @@ mod tests {
         let now = chrono::Utc::now();
         ManagementMeta {
             organizations: vec![OrganizationInfo {
-                id:         "org_default".to_string(),
-                name:       "default".to_string(),
-                slug:       "default".to_string(),
+                id: "org_default".to_string(),
+                name: "default".to_string(),
+                slug: "default".to_string(),
                 created_at: now,
             }],
             groups: vec![GroupInfo {
-                id:                "grp_default".to_string(),
-                organization:      "default".to_string(),
-                name:              "default".to_string(),
-                slug:              "default".to_string(),
-                location:          "default".to_string(),
+                id: "grp_default".to_string(),
+                organization: "default".to_string(),
+                name: "default".to_string(),
+                slug: "default".to_string(),
+                location: "default".to_string(),
                 delete_protection: false,
-                created_at:        now,
+                created_at: now,
             }],
             locations: vec![LocationInfo {
-                id:         "loc_default".to_string(),
-                name:       "default".to_string(),
-                provider:   "self-hosted".to_string(),
-                region:     "local".to_string(),
-                primary:    true,
+                id: "loc_default".to_string(),
+                name: "default".to_string(),
+                provider: "self-hosted".to_string(),
+                region: "local".to_string(),
+                primary: true,
                 created_at: now,
             }],
             quotas: vec![QuotaInfo {
-                scope_type:           "organization".to_string(),
-                scope:                "default".to_string(),
-                storage_bytes:        Some(1),
-                rows:                 None,
+                scope_type: "organization".to_string(),
+                scope: "default".to_string(),
+                storage_bytes: Some(1),
+                rows: None,
                 write_ops_per_minute: None,
-                updated_at:           now,
+                updated_at: now,
             }],
             usage: vec![UsageInfo {
-                scope_type:    "organization".to_string(),
-                scope:         "default".to_string(),
+                scope_type: "organization".to_string(),
+                scope: "default".to_string(),
                 storage_bytes: 0,
-                rows:          None,
-                updated_at:    now,
+                rows: None,
+                updated_at: now,
             }],
         }
     }
@@ -498,9 +523,9 @@ mod tests {
     fn rejects_duplicate_management_keys() {
         let mut meta = management();
         meta.organizations.push(OrganizationInfo {
-            id:         "org_other".to_string(),
-            name:       "other".to_string(),
-            slug:       "default".to_string(),
+            id: "org_other".to_string(),
+            name: "other".to_string(),
+            slug: "default".to_string(),
             created_at: chrono::Utc::now(),
         });
         assert!(validate_management_constraints(&meta).is_err());

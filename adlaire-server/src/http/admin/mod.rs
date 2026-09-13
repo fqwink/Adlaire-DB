@@ -76,7 +76,12 @@ async fn parse_optional_json_body<T: serde::de::DeserializeOwned + Default>(
 }
 
 fn path_param(req: &Request<Incoming>, prefix: &[&str]) -> Option<String> {
-    let segs: Vec<_> = req.uri().path().trim_start_matches('/').split('/').collect();
+    let segs: Vec<_> = req
+        .uri()
+        .path()
+        .trim_start_matches('/')
+        .split('/')
+        .collect();
     if segs.len() != prefix.len() + 1 || &segs[..prefix.len()] != prefix {
         return None;
     }
@@ -181,18 +186,21 @@ fn parse_turso_expiry(
                 _ => anyhow::bail!("unknown expiry unit"),
             };
     }
-    anyhow::ensure!(digits.is_empty() && duration > chrono::Duration::zero(), "invalid expiry");
+    anyhow::ensure!(
+        digits.is_empty() && duration > chrono::Duration::zero(),
+        "invalid expiry"
+    );
     Ok(Some(now + duration))
 }
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateDatabaseRequest {
-    name:         String,
+    name: String,
     organization: Option<String>,
-    group:        Option<String>,
-    location:     Option<String>,
-    quota:        Option<serde_json::Value>,
+    group: Option<String>,
+    location: Option<String>,
+    quota: Option<serde_json::Value>,
 }
 
 #[derive(serde::Serialize)]
@@ -221,9 +229,9 @@ struct GroupsResponse {
 #[serde(deny_unknown_fields)]
 struct CreateGroupRequest {
     organization: String,
-    name:         String,
-    slug:         Option<String>,
-    location:     Option<String>,
+    name: String,
+    slug: Option<String>,
+    location: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -234,10 +242,10 @@ struct LocationsResponse {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateLocationRequest {
-    name:     String,
+    name: String,
     provider: Option<String>,
-    region:   Option<String>,
-    primary:  Option<bool>,
+    region: Option<String>,
+    primary: Option<bool>,
 }
 
 #[derive(serde::Serialize)]
@@ -248,8 +256,8 @@ struct QuotasResponse {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PutQuotaRequest {
-    storage_bytes:        Option<u64>,
-    rows:                 Option<u64>,
+    storage_bytes: Option<u64>,
+    rows: Option<u64>,
     write_ops_per_minute: Option<u64>,
 }
 
@@ -288,7 +296,10 @@ struct TokenListResponse {
 pub mod databases {
     use super::*;
 
-    pub async fn list(_req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn list(
+        _req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         let databases = state
             .db_mgr
             .list()
@@ -299,7 +310,10 @@ pub mod databases {
         Ok(crate::http::json_ok(&DatabaseListResponse { databases }))
     }
 
-    pub async fn create(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn create(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         let body = match parse_json_body::<CreateDatabaseRequest>(req).await {
             Ok(body) => body,
             Err(e) => return Ok(e.into_response()),
@@ -312,13 +326,20 @@ pub mod databases {
                 return Ok(AppError::InvalidRequest.into_response());
             }
         }
-        match state.db_mgr.create_scoped(&body.name, organization, group, location).await {
+        match state
+            .db_mgr
+            .create_scoped(&body.name, organization, group, location)
+            .await
+        {
             Ok(info) => Ok(json_created(&info)),
             Err(e) => Ok(e.into_response()),
         }
     }
 
-    pub async fn get(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn get(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         let Some(name) = path_param(&req, &["admin", "v1", "databases"]) else {
             return Ok(crate::http::not_found());
         };
@@ -334,7 +355,10 @@ pub mod databases {
         }
     }
 
-    pub async fn delete(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn delete(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         let Some(name) = path_param(&req, &["admin", "v1", "databases"]) else {
             return Ok(crate::http::not_found());
         };
@@ -354,14 +378,22 @@ pub mod databases {
 pub mod tokens {
     use super::*;
 
-    pub async fn list(_req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn list(
+        _req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         match util::load_tokens(&state.config.data_dir) {
-            Ok(meta) => Ok(crate::http::json_ok(&TokenListResponse { tokens: meta.tokens })),
+            Ok(meta) => Ok(crate::http::json_ok(&TokenListResponse {
+                tokens: meta.tokens,
+            })),
             Err(e) => Ok(AppError::Internal(e).into_response()),
         }
     }
 
-    pub async fn create(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn create(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         let secret = match state.config.jwt_secret_bytes.as_ref() {
             Some(secret) => secret,
             None => return Ok(AppError::AuthDisabled.into_response()),
@@ -430,7 +462,10 @@ pub mod tokens {
         }))
     }
 
-    pub async fn get(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn get(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         let Some(id) = path_param(&req, &["admin", "v1", "tokens"]) else {
             return Ok(crate::http::not_found());
         };
@@ -443,7 +478,10 @@ pub mod tokens {
         }
     }
 
-    pub async fn revoke(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn revoke(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         let Some(id) = path_param(&req, &["admin", "v1", "tokens"]) else {
             return Ok(crate::http::not_found());
         };
@@ -469,12 +507,20 @@ pub mod tokens {
 pub mod organizations {
     use super::*;
 
-    pub async fn list(_req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn list(
+        _req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         let organizations = state.db_mgr.organizations().await;
-        Ok(crate::http::json_ok(&OrganizationsResponse { organizations }))
+        Ok(crate::http::json_ok(&OrganizationsResponse {
+            organizations,
+        }))
     }
 
-    pub async fn create(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn create(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         let body = match parse_json_body::<CreateOrganizationRequest>(req).await {
             Ok(body) => body,
             Err(e) => return Ok(e.into_response()),
@@ -485,7 +531,10 @@ pub mod organizations {
         }
     }
 
-    pub async fn get(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn get(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         let Some(org) = path_param(&req, &["admin", "v1", "organizations"]) else {
             return Ok(crate::http::not_found());
         };
@@ -505,7 +554,10 @@ pub mod organizations {
 pub mod groups {
     use super::*;
 
-    pub async fn list(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn list(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         let org = query_value(req.uri().query(), "organization");
         match state.db_mgr.groups(org.as_deref()).await {
             Ok(groups) => Ok(crate::http::json_ok(&GroupsResponse { groups })),
@@ -513,7 +565,10 @@ pub mod groups {
         }
     }
 
-    pub async fn create(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn create(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         let body = match parse_json_body::<CreateGroupRequest>(req).await {
             Ok(body) => body,
             Err(e) => return Ok(e.into_response()),
@@ -532,12 +587,18 @@ pub mod groups {
 pub mod locations {
     use super::*;
 
-    pub async fn list(_req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn list(
+        _req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         let locations = state.db_mgr.locations().await;
         Ok(crate::http::json_ok(&LocationsResponse { locations }))
     }
 
-    pub async fn create(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn create(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         let body = match parse_json_body::<CreateLocationRequest>(req).await {
             Ok(body) => body,
             Err(e) => return Ok(e.into_response()),
@@ -556,12 +617,18 @@ pub mod locations {
 pub mod quotas {
     use super::*;
 
-    pub async fn list(_req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn list(
+        _req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         let quotas = state.db_mgr.quotas().await;
         Ok(crate::http::json_ok(&QuotasResponse { quotas }))
     }
 
-    pub async fn put(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn put(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         let Some(scope) = path_param(&req, &["admin", "v1", "quotas"]) else {
             return Ok(crate::http::not_found());
         };
@@ -592,7 +659,10 @@ pub mod quotas {
 pub mod usage {
     use super::*;
 
-    pub async fn list(_req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn list(
+        _req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         let usage = state.db_mgr.usage().await;
         Ok(crate::http::json_ok(&UsageResponse { usage }))
     }
@@ -605,47 +675,47 @@ pub mod platform {
 
     #[derive(serde::Serialize)]
     struct TursoOrganizationInfo {
-        name:          String,
-        slug:          String,
+        name: String,
+        slug: String,
         #[serde(rename = "type")]
-        kind:          String,
-        overages:      bool,
-        require_mfa:   bool,
+        kind: String,
+        overages: bool,
+        require_mfa: bool,
         blocked_reads: bool,
     }
 
     #[derive(serde::Serialize)]
     struct TursoOrganizationUsage {
-        uuid:          String,
-        name:          String,
-        slug:          String,
+        uuid: String,
+        name: String,
+        slug: String,
         storage_bytes: u64,
-        databases:     usize,
+        databases: usize,
     }
 
     #[derive(serde::Serialize)]
     struct TursoGroupInfo {
-        name:              String,
-        version:           String,
-        uuid:              String,
-        locations:         Vec<String>,
-        primary:           String,
+        name: String,
+        version: String,
+        uuid: String,
+        locations: Vec<String>,
+        primary: String,
         delete_protection: bool,
     }
 
     #[derive(serde::Serialize)]
     struct TursoDatabaseInfo {
         #[serde(rename = "DbId")]
-        db_id:         String,
+        db_id: String,
         #[serde(rename = "Hostname")]
-        hostname:      String,
+        hostname: String,
         #[serde(rename = "Name")]
-        name:          String,
-        regions:       Vec<String>,
+        name: String,
+        regions: Vec<String>,
         #[serde(rename = "primaryRegion")]
         primary_region: String,
-        block_reads:   bool,
-        block_writes:  bool,
+        block_reads: bool,
+        block_writes: bool,
     }
 
     #[derive(Default, serde::Deserialize)]
@@ -657,35 +727,35 @@ pub mod platform {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct CreateTursoGroupRequest {
-        name:     String,
+        name: String,
         location: Option<String>,
     }
 
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct CreateTursoDatabaseRequest {
-        name:              String,
-        group:             Option<String>,
-        seed:              Option<serde_json::Value>,
+        name: String,
+        group: Option<String>,
+        seed: Option<serde_json::Value>,
         remote_encryption: Option<serde_json::Value>,
-        parent:            Option<serde_json::Value>,
+        parent: Option<serde_json::Value>,
     }
 
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct PatchOrganizationRequest {
-        overages:    Option<bool>,
+        overages: Option<bool>,
         require_mfa: Option<bool>,
     }
 
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct PatchDatabaseConfigurationRequest {
-        size_limit:        Option<serde_json::Value>,
+        size_limit: Option<serde_json::Value>,
         delete_protection: Option<bool>,
-        block_reads:       Option<bool>,
-        block_writes:      Option<bool>,
-        allow_attach:      Option<bool>,
+        block_reads: Option<bool>,
+        block_writes: Option<bool>,
+        allow_attach: Option<bool>,
     }
 
     #[derive(serde::Deserialize)]
@@ -694,14 +764,20 @@ pub mod platform {
         delete_protection: bool,
     }
 
-    pub async fn auth_validate(req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn auth_validate(
+        req: Request<Incoming>,
+        _state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         if let Err(e) = validate_query(req.uri().query(), &[]) {
             return Ok(e.into_response());
         }
         Ok(crate::http::json_ok(&serde_json::json!({ "exp": -1 })))
     }
 
-    pub async fn create_api_token(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn create_api_token(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         if let Err(e) = validate_query(req.uri().query(), &[]) {
             return Ok(e.into_response());
         }
@@ -774,7 +850,10 @@ pub mod platform {
         })))
     }
 
-    pub async fn revoke_api_token(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn revoke_api_token(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         if let Err(e) = validate_query(req.uri().query(), &[]) {
             return Ok(e.into_response());
         }
@@ -788,11 +867,9 @@ pub mod platform {
             Ok(meta) => meta,
             Err(e) => return Ok(AppError::Internal(e).into_response()),
         };
-        let Some(token) = meta
-            .tokens
-            .iter_mut()
-            .find(|token| token.platform_token && token.name.as_deref() == Some(token_name.as_str()))
-        else {
+        let Some(token) = meta.tokens.iter_mut().find(|token| {
+            token.platform_token && token.name.as_deref() == Some(token_name.as_str())
+        }) else {
             return Ok(AppError::TokenNotFound(token_name).into_response());
         };
         if !token.revoked {
@@ -802,10 +879,15 @@ pub mod platform {
         if let Err(e) = util::save_tokens(&state.config.data_dir, &meta) {
             return Ok(AppError::Internal(e).into_response());
         }
-        Ok(crate::http::json_ok(&serde_json::json!({ "token": token_name })))
+        Ok(crate::http::json_ok(
+            &serde_json::json!({ "token": token_name }),
+        ))
     }
 
-    pub async fn locations(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn locations(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         if let Err(e) = validate_query(req.uri().query(), &[]) {
             return Ok(e.into_response());
         }
@@ -823,10 +905,15 @@ pub mod platform {
                 (loc.name, serde_json::Value::String(display))
             })
             .collect::<serde_json::Map<_, _>>();
-        Ok(crate::http::json_ok(&serde_json::json!({ "locations": locations })))
+        Ok(crate::http::json_ok(
+            &serde_json::json!({ "locations": locations }),
+        ))
     }
 
-    pub async fn organizations(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn organizations(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         if let Err(e) = validate_query(req.uri().query(), &[]) {
             return Ok(e.into_response());
         }
@@ -840,7 +927,10 @@ pub mod platform {
         Ok(crate::http::json_ok(&organizations))
     }
 
-    pub async fn organization_usage(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn organization_usage(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         if let Err(e) = validate_query(req.uri().query(), &[]) {
             return Ok(e.into_response());
         }
@@ -872,7 +962,10 @@ pub mod platform {
         })))
     }
 
-    pub async fn patch_organization(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn patch_organization(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         if let Err(e) = validate_query(req.uri().query(), &[]) {
             return Ok(e.into_response());
         }
@@ -893,12 +986,17 @@ pub mod platform {
             .into_iter()
             .find(|item| item.id == org || item.slug == org || item.name == org)
         {
-            Some(info) => Ok(crate::http::json_ok(&serde_json::json!({ "organization": turso_org(info) }))),
+            Some(info) => Ok(crate::http::json_ok(
+                &serde_json::json!({ "organization": turso_org(info) }),
+            )),
             None => Ok(AppError::OrgNotFound(org).into_response()),
         }
     }
 
-    pub async fn groups(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn groups(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         if let Err(e) = validate_query(req.uri().query(), &[]) {
             return Ok(e.into_response());
         }
@@ -908,13 +1006,18 @@ pub mod platform {
         match state.db_mgr.groups(Some(&org)).await {
             Ok(groups) => {
                 let groups: Vec<_> = groups.into_iter().map(turso_group).collect();
-                Ok(crate::http::json_ok(&serde_json::json!({ "groups": groups })))
+                Ok(crate::http::json_ok(
+                    &serde_json::json!({ "groups": groups }),
+                ))
             }
             Err(e) => Ok(e.into_response()),
         }
     }
 
-    pub async fn create_group(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn create_group(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         if let Err(e) = validate_query(req.uri().query(), &[]) {
             return Ok(e.into_response());
         }
@@ -925,13 +1028,22 @@ pub mod platform {
             Ok(body) => body,
             Err(e) => return Ok(e.into_response()),
         };
-        match state.db_mgr.create_group(org, body.name, None, body.location).await {
-            Ok(group) => Ok(crate::http::json_ok(&serde_json::json!({ "group": turso_group(group) }))),
+        match state
+            .db_mgr
+            .create_group(org, body.name, None, body.location)
+            .await
+        {
+            Ok(group) => Ok(crate::http::json_ok(
+                &serde_json::json!({ "group": turso_group(group) }),
+            )),
             Err(e) => Ok(e.into_response()),
         }
     }
 
-    pub async fn group(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn group(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         if let Err(e) = validate_query(req.uri().query(), &[]) {
             return Ok(e.into_response());
         }
@@ -939,12 +1051,17 @@ pub mod platform {
             return Ok(AppError::InvalidRequest.into_response());
         };
         match state.db_mgr.group_info(&org, &group).await {
-            Ok(group) => Ok(crate::http::json_ok(&serde_json::json!({ "group": turso_group(group) }))),
+            Ok(group) => Ok(crate::http::json_ok(
+                &serde_json::json!({ "group": turso_group(group) }),
+            )),
             Err(e) => Ok(e.into_response()),
         }
     }
 
-    pub async fn patch_group_configuration(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn patch_group_configuration(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         if let Err(e) = validate_query(req.uri().query(), &[]) {
             return Ok(e.into_response());
         }
@@ -955,13 +1072,22 @@ pub mod platform {
             Ok(body) => body,
             Err(e) => return Ok(e.into_response()),
         };
-        match state.db_mgr.update_group_configuration(&org, &group, body.delete_protection).await {
-            Ok(group) => Ok(crate::http::json_ok(&serde_json::json!({ "delete_protection": group.delete_protection }))),
+        match state
+            .db_mgr
+            .update_group_configuration(&org, &group, body.delete_protection)
+            .await
+        {
+            Ok(group) => Ok(crate::http::json_ok(
+                &serde_json::json!({ "delete_protection": group.delete_protection }),
+            )),
             Err(e) => Ok(e.into_response()),
         }
     }
 
-    pub async fn databases(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn databases(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         if let Err(e) = validate_query(req.uri().query(), &["group"]) {
             return Ok(e.into_response());
         }
@@ -969,16 +1095,25 @@ pub mod platform {
             return Ok(AppError::InvalidRequest.into_response());
         };
         let group = query_value(req.uri().query(), "group");
-        match state.db_mgr.list_for_organization(&org, group.as_deref()).await {
+        match state
+            .db_mgr
+            .list_for_organization(&org, group.as_deref())
+            .await
+        {
             Ok(databases) => {
                 let databases: Vec<_> = databases.into_iter().map(turso_database).collect();
-                Ok(crate::http::json_ok(&serde_json::json!({ "databases": databases })))
+                Ok(crate::http::json_ok(
+                    &serde_json::json!({ "databases": databases }),
+                ))
             }
             Err(e) => Ok(e.into_response()),
         }
     }
 
-    pub async fn create_database(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn create_database(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         if let Err(e) = validate_query(req.uri().query(), &[]) {
             return Ok(e.into_response());
         }
@@ -997,13 +1132,22 @@ pub mod platform {
             Ok(group) => group.location,
             Err(e) => return Ok(e.into_response()),
         };
-        match state.db_mgr.create_scoped(&body.name, &org, group, &location).await {
-            Ok(database) => Ok(crate::http::json_ok(&serde_json::json!({ "database": turso_database(database) }))),
+        match state
+            .db_mgr
+            .create_scoped(&body.name, &org, group, &location)
+            .await
+        {
+            Ok(database) => Ok(crate::http::json_ok(
+                &serde_json::json!({ "database": turso_database(database) }),
+            )),
             Err(e) => Ok(e.into_response()),
         }
     }
 
-    pub async fn database(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn database(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         if let Err(e) = validate_query(req.uri().query(), &[]) {
             return Ok(e.into_response());
         }
@@ -1011,15 +1155,18 @@ pub mod platform {
             return Ok(AppError::InvalidRequest.into_response());
         };
         match state.db_mgr.get_info(&db).await {
-            Ok(database) if database.organization == org => {
-                Ok(crate::http::json_ok(&serde_json::json!({ "database": turso_database(database) })))
-            }
+            Ok(database) if database.organization == org => Ok(crate::http::json_ok(
+                &serde_json::json!({ "database": turso_database(database) }),
+            )),
             Ok(_) => Ok(AppError::DbNotFound(db).into_response()),
             Err(e) => Ok(e.into_response()),
         }
     }
 
-    pub async fn delete_database(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn delete_database(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         if let Err(e) = validate_query(req.uri().query(), &[]) {
             return Ok(e.into_response());
         }
@@ -1042,7 +1189,10 @@ pub mod platform {
         }
     }
 
-    pub async fn patch_database_configuration(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn patch_database_configuration(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         if let Err(e) = validate_query(req.uri().query(), &[]) {
             return Ok(e.into_response());
         }
@@ -1093,7 +1243,10 @@ pub mod platform {
         }
     }
 
-    pub async fn create_database_token(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn create_database_token(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         if let Err(e) = validate_query(req.uri().query(), &["expiration", "authorization"]) {
             return Ok(e.into_response());
         }
@@ -1117,7 +1270,10 @@ pub mod platform {
             _ => return Ok(AppError::InvalidRequest.into_response()),
         };
         let now = chrono::Utc::now();
-        let expires_at = match super::parse_turso_expiry(query_value(req.uri().query(), "expiration").as_deref(), now) {
+        let expires_at = match super::parse_turso_expiry(
+            query_value(req.uri().query(), "expiration").as_deref(),
+            now,
+        ) {
             Ok(expires_at) => expires_at,
             Err(_) => return Ok(AppError::InvalidRequest.into_response()),
         };
@@ -1160,7 +1316,10 @@ pub mod platform {
         Ok(crate::http::json_ok(&serde_json::json!({ "jwt": jwt })))
     }
 
-    pub async fn rotate_database_tokens(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn rotate_database_tokens(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         if let Err(e) = validate_query(req.uri().query(), &[]) {
             return Ok(e.into_response());
         }
@@ -1178,7 +1337,10 @@ pub mod platform {
         Ok(super::empty_ok())
     }
 
-    pub async fn rotate_group_tokens(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn rotate_group_tokens(
+        req: Request<Incoming>,
+        state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         if let Err(e) = validate_query(req.uri().query(), &[]) {
             return Ok(e.into_response());
         }
@@ -1189,7 +1351,11 @@ pub mod platform {
             Ok(group) => group,
             Err(e) => return Ok(e.into_response()),
         };
-        let databases = match state.db_mgr.list_for_organization(&org, Some(&group_info.name)).await {
+        let databases = match state
+            .db_mgr
+            .list_for_organization(&org, Some(&group_info.name))
+            .await
+        {
             Ok(databases) => databases.into_iter().map(|db| db.name).collect::<Vec<_>>(),
             Err(e) => return Ok(e.into_response()),
         };
@@ -1204,11 +1370,17 @@ pub mod platform {
         Ok(super::empty_ok())
     }
 
-    pub async fn unsupported(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn unsupported(
+        _req: Request<Incoming>,
+        _state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         not_implemented()
     }
 
-    pub async fn unsupported_method(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn unsupported_method(
+        _req: Request<Incoming>,
+        _state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         method_not_allowed()
     }
 
@@ -1314,7 +1486,10 @@ mod tests {
         for file_name in PHASE8_TURSO_SNAPSHOTS {
             let path = snapshot_dir.join(file_name);
             let raw = std::fs::read_to_string(&path).unwrap_or_else(|err| {
-                panic!("missing or unreadable Phase 8 snapshot {}: {err}", path.display())
+                panic!(
+                    "missing or unreadable Phase 8 snapshot {}: {err}",
+                    path.display()
+                )
             });
             for forbidden in ["Bearer ", "eyJ", "adlpt_"] {
                 assert!(
@@ -1325,20 +1500,32 @@ mod tests {
             }
             let value: serde_json::Value = serde_json::from_str(&raw)
                 .unwrap_or_else(|err| panic!("invalid snapshot JSON {}: {err}", path.display()));
-            assert!(value.get("status").is_some(), "{} must include status", path.display());
+            assert!(
+                value.get("status").is_some(),
+                "{} must include status",
+                path.display()
+            );
             assert!(
                 value.get("content_type").is_some(),
                 "{} must include content_type",
                 path.display()
             );
-            assert!(value.get("body").is_some(), "{} must include body", path.display());
+            assert!(
+                value.get("body").is_some(),
+                "{} must include body",
+                path.display()
+            );
         }
     }
 
     #[test]
     fn phase8_query_validation_rejects_ambiguous_queries() {
         assert!(validate_query(Some("group=default"), &["group"]).is_ok());
-        assert!(validate_query(Some("expiration=2w&authorization=read-only"), &["expiration", "authorization"]).is_ok());
+        assert!(validate_query(
+            Some("expiration=2w&authorization=read-only"),
+            &["expiration", "authorization"]
+        )
+        .is_ok());
         assert!(matches!(
             validate_query(Some("group=default&group=app"), &["group"]),
             Err(AppError::InvalidRequest)
@@ -1361,7 +1548,10 @@ mod tests {
 pub mod metrics {
     use super::*;
 
-    pub async fn get(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn get(
+        _req: Request<Incoming>,
+        _state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         not_implemented()
     }
 }
@@ -1369,15 +1559,24 @@ pub mod metrics {
 pub mod backup {
     use super::*;
 
-    pub async fn backup(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn backup(
+        _req: Request<Incoming>,
+        _state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         not_implemented()
     }
 
-    pub async fn restore(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn restore(
+        _req: Request<Incoming>,
+        _state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         not_implemented()
     }
 
-    pub async fn pitr(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn pitr(
+        _req: Request<Incoming>,
+        _state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         not_implemented()
     }
 }
@@ -1385,15 +1584,24 @@ pub mod backup {
 pub mod branches {
     use super::*;
 
-    pub async fn list(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn list(
+        _req: Request<Incoming>,
+        _state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         not_implemented()
     }
 
-    pub async fn create(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn create(
+        _req: Request<Incoming>,
+        _state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         not_implemented()
     }
 
-    pub async fn delete(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
+    pub async fn delete(
+        _req: Request<Incoming>,
+        _state: SharedState,
+    ) -> Result<HttpResponse, Infallible> {
         not_implemented()
     }
 }

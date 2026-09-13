@@ -34,8 +34,10 @@ use crate::{
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        CliCommand::Serve(args)                                    => run_serve(args).await,
-        CliCommand::Token { cmd: TokenSubcommand::Create(args) }   => run_token_create(args),
+        CliCommand::Serve(args) => run_serve(args).await,
+        CliCommand::Token {
+            cmd: TokenSubcommand::Create(args),
+        } => run_token_create(args),
     }
 }
 
@@ -74,22 +76,21 @@ async fn run_serve(args: crate::cli::ServeArgs) -> anyhow::Result<()> {
     }
 
     // Step 6: DB 全件オープン
-    let db_mgr = Arc::new(
-        DbManager::open_all(&config.data_dir, Arc::new(config.storage.clone())).await?
-    );
+    let db_mgr =
+        Arc::new(DbManager::open_all(&config.data_dir, Arc::new(config.storage.clone())).await?);
 
     // Step 7: AppState 構築
     let state: crate::state::SharedState = Arc::new(AppState {
-        config:      Arc::clone(&config),
+        config: Arc::clone(&config),
         db_mgr,
         auth,
-        metrics:     Arc::new(Metrics::new()),
-        role:        ServerRole::Standalone,
+        metrics: Arc::new(Metrics::new()),
+        role: ServerRole::Standalone,
         replication: None,
     });
 
     // Step 8: TCP ソケット bind
-    let api_listener   = tokio::net::TcpListener::bind(("0.0.0.0",       config.port)).await?;
+    let api_listener = tokio::net::TcpListener::bind(("0.0.0.0", config.port)).await?;
     let admin_listener = tokio::net::TcpListener::bind(("127.0.0.1", config.admin_port)).await?;
 
     tracing::info!(
@@ -187,14 +188,16 @@ async fn run_serve(args: crate::cli::ServeArgs) -> anyhow::Result<()> {
 
     let api_abort = api_task.abort_handle();
     let admin_abort = admin_task.abort_handle();
-    if tokio::time::timeout(
-        std::time::Duration::from_secs(shutdown_timeout),
-        async { let _ = tokio::join!(api_task, admin_task); },
-    )
+    if tokio::time::timeout(std::time::Duration::from_secs(shutdown_timeout), async {
+        let _ = tokio::join!(api_task, admin_task);
+    })
     .await
     .is_err()
     {
-        tracing::warn!(timeout_secs = shutdown_timeout, "graceful shutdown timed out, forcing exit");
+        tracing::warn!(
+            timeout_secs = shutdown_timeout,
+            "graceful shutdown timed out, forcing exit"
+        );
         api_abort.abort();
         admin_abort.abort();
         tokio::task::yield_now().await;
@@ -223,7 +226,10 @@ async fn run_serve(args: crate::cli::ServeArgs) -> anyhow::Result<()> {
 
 fn run_token_create(args: crate::cli::TokenCreateArgs) -> anyhow::Result<()> {
     let secret = args.secret.as_bytes().to_vec();
-    anyhow::ensure!(secret.len() >= 32, "--secret は 32 バイト以上の文字列を指定してください");
+    anyhow::ensure!(
+        secret.len() >= 32,
+        "--secret は 32 バイト以上の文字列を指定してください"
+    );
 
     let access = parse_access(&args.access)?;
     let dbs = parse_db_scopes(&args.db)?;
@@ -297,8 +303,7 @@ fn parse_db_scopes(
 fn init_tracing(log_level: &str) {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-    let filter = EnvFilter::try_new(log_level)
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_new(log_level).unwrap_or_else(|_| EnvFilter::new("info"));
 
     tracing_subscriber::registry()
         .with(filter)
@@ -310,7 +315,7 @@ fn init_tracing(log_level: &str) {
 
 async fn shutdown_signal_named() -> &'static str {
     use tokio::signal::unix::{signal, SignalKind};
-    let mut sigint  = signal(SignalKind::interrupt()).unwrap();
+    let mut sigint = signal(SignalKind::interrupt()).unwrap();
     let mut sigterm = signal(SignalKind::terminate()).unwrap();
     tokio::select! {
         _ = sigint.recv()  => "SIGINT",
