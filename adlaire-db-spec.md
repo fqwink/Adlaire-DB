@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.110
+**バージョン：** V.111
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.110` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.111` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -4004,6 +4004,7 @@ branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§
 | `change_impact_matrix` | §9.1.45 の実装中変更に対する影響範囲、同時更新対象、承認状態、drift closure |
 | `rollout_readiness_matrix` | §9.1.46 の起動、停止、再起動、rollback、health、operator action、release 可否 |
 | `compatibility_baseline_matrix` | §9.1.47 の Turso Cloud / libSQL SDK 互換 baseline、refresh trigger、差分分類、証跡 |
+| `security_abuse_matrix` | §9.1.48 の attack surface、untrusted input、bypass attempt、denial、redaction、audit、regression |
 | `completion_gate` | merge 前に満たす Done 条件と失敗時の扱い |
 
 **Phase group 粒度：**
@@ -4102,6 +4103,7 @@ Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§
 | `change_impact_result` | §9.1.45 の change ID ごとの affected sections/matrices/tests/artifacts 更新完了、drift 0 件、承認証跡 |
 | `rollout_readiness_result` | §9.1.46 の rollout ID ごとの startup/shutdown/restart/rollback/health/operator/compat/data safety 証跡 |
 | `compatibility_baseline_result` | §9.1.47 の baseline ID ごとの upstream source、snapshot / SDK version、差分分類、refresh 可否、証跡 |
+| `security_abuse_result` | §9.1.48 の security case ID ごとの bypass denial、redaction、audit/log、quota/rate/persistence、証跡 |
 | `reviewer_decision` | `Done`、`Not Done`、`Spec correction required` のいずれか |
 
 **Phase group Done minimum：**
@@ -5092,6 +5094,64 @@ Phase rollout readiness に関係する仕様変更は、§9.1.10、§9.1.11、�
 
 Phase compatibility baseline に関係する仕様変更は、§1.4、§1.5、§3.5.3、§7.3、§9.1.10、§9.1.11、§9.1.15、§9.1.23、§9.1.24、§9.1.32、§9.1.33、§9.1.35、§9.1.39、§9.1.40、§9.1.43、§9.1.44、§9.1.45、§9.1.46、§9.2、§9.4、§9.5、§9.6、§9.7、§9.8、§9.15、§9.17、該当 Phase 詳細節を同時更新する。compatibility baseline matrix がない Phase 実装 PR は、互換基準、snapshot 更新条件、SDK transcript、upstream 追従差分、自己ホスト例外の根拠が未確定であるため、実装開始不可とする。
 
+#### 9.1.48 Phase security abuse / bypass resistance matrix 固定契約
+
+各 Phase の実装 PR は、攻撃面、信頼しない入力、必須制御、bypass attempt、拒否応答、redaction、audit/log、quota/rate、永続化副作用を security abuse matrix として固定しなければならない。正常系 auth が通ることだけでは security 完了扱いにしない。悪用された場合に何を拒否し、何を記録し、何を漏らさず、どの副作用を禁止するかを Phase 開始前に固定する。
+
+**Security abuse matrix 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `security_case_id` | `SEC-P{phase}-{surface}-{number}` 形式の一意 ID |
+| `phase` | security case を導入または変更する Phase |
+| `attack_surface` | CLI / config / HTTP API / WebSocket / admin API / Turso Platform API / replication / backup / extension / HA / internal adapter |
+| `untrusted_input` | token、JWT claim、path/query/body、SQL args、backup body、replication frame、extension path、metadata file、env/config、header |
+| `required_control` | auth、scope、quota、block policy、path normalization、signature/checksum、idempotency、redaction、rate/size limit |
+| `bypass_attempt` | control をすり抜ける試行。例: missing token、wrong scope、path traversal、duplicate request、replay、tampered metadata、oversized body |
+| `expected_denial` | HTTP status、error code、WebSocket error、CLI exit code、health state、client action |
+| `redaction_rule` | response/log/artifact/metric に出してよい field と禁止 field |
+| `audit_log_rule` | 記録する event、level、request id / trace id、secret 非露出。記録不要なら理由 |
+| `rate_or_quota_effect` | quota、block_reads、block_writes、rate/size limit への影響。影響なしなら理由 |
+| `persistence_effect` | 拒否時に metadata、DB file、archive、token、usage、counter を変更しないこと。変更が必要なら commit order |
+| `regression_test` | bypass / denial / redaction / persistence no-op を検証する TC、command、fixture |
+| `evidence` | denied response、log sample、secret scan、metadata before/after、replay fixture、path traversal fixture |
+
+**Phase group security minimum：**
+
+| Phase group | 最低 security case |
+|-------------|--------------------|
+| Phase 1〜5 | CLI secret、config precedence、data-dir permission/lock、JWT missing/invalid/revoked、log redaction、hrana malformed body |
+| Phase 6〜8 | admin token、DB scope、organization/group/location boundary、quota exceeded、block_reads/block_writes、Platform token、legacy metadata |
+| Phase 9〜10 | WebSocket auth/stream ownership、transaction close rollback、ATTACH path traversal、ro token write denial、metrics label injection |
+| Phase 11〜13 | replication token、frame checksum tamper、snapshot access、archive manifest corruption、replica retry without token leak |
+| Phase 14〜15 | backup body size/type、restore/PITR destructive lock、branch source scope、delete protection、quota before commit |
+| Phase 16〜18 | extension path/symlink/signature、metrics snapshot poisoning、HA promote auth、term rollback、split-brain operator_required |
+| Phase 19 | internal adapter shadow isolation、active switch flag、silent fallback denial、compat diff redaction、rollback flag abuse |
+
+**bypass resistance 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| security case がない attack surface を公開する | 実装開始禁止 |
+| auth / scope / quota / block policy を bypass して success response を返す | merge 不可 |
+| token、JWT、admin/platform/replication/HA token、SQL args、backup body、raw path を response/log/artifact/metric に出す | merge 不可 |
+| path traversal、absolute path、symlink、reserved name を受理する | merge 不可 |
+| quota、block_writes、rate/size limit、delete protection を commit 後に評価する | merge 不可 |
+| replay / duplicate request で二重作成、二重 token、二重 quota charge、二重 branch を発生させる | merge 不可 |
+| security failure を `INTERNAL_ERROR`、generic 500、ログのみで隠す | Phase 未完了 |
+| security case を manual only で pass 扱いにする | merge 不可 |
+| denial 時に metadata / file / runtime map が変わらない証跡がない | Phase 未完了 |
+
+**Done receipt への反映：**
+
+| Done receipt field | 必須内容 |
+|--------------------|----------|
+| `security_abuse_result` | security case ID ごとの bypass attempt、expected denial、redaction、audit/log、persistence no-op、evidence |
+| `security_redaction_result` | secret scan、log/artifact/response/metric redaction、漏洩 0 件 |
+| `security_bypass_closure` | bypass、replay、path traversal、scope/quota/block policy 回避が 0 件である証跡 |
+
+Phase security abuse に関係する仕様変更は、§7.3、§9.1.10、§9.1.11、§9.1.14、§9.1.17、§9.1.18、§9.1.21、§9.1.23、§9.1.24、§9.1.26、§9.1.32、§9.1.33、§9.1.36、§9.1.37、§9.1.39、§9.1.40、§9.1.42、§9.1.43、§9.1.44、§9.1.45、§9.1.46、§9.1.47、§9.2、§9.4、§9.5、§9.6、§9.7、§9.8、§9.14、§9.17、該当 Phase 詳細節を同時更新する。security abuse matrix がない Phase 実装 PR は、攻撃面、bypass、denial、redaction、persistence no-op の根拠が未確定であるため、実装開始不可とする。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -5753,6 +5813,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Change impact / drift control | §9.1.45 に従い、実装中の scope、API、schema、error、metadata、auth、test、oracle、compatibility 変更が change ID、同時更新範囲、承認状態、closure evidence で閉じている | 実装開始禁止。packet freeze 後の暗黙変更、snapshot だけ更新、互換影響未評価、migration / rollback 未評価がある場合は Phase 完了扱いにしない |
 | Rollout readiness | §9.1.46 に従い、startup、shutdown、restart、rollback、health、operator action、compatibility、data safety、blocked release reason が固定されている | release / deploy / production enable 禁止。Phase Done だけで rollout ready 扱い、rollback 未検証、operator_required 隠蔽、環境差分未記録の場合は運用投入不可 |
 | Compatibility baseline | §9.1.47 に従い、Turso Cloud、libSQL SDK、hrana、legacy metadata、previous Phase の baseline、snapshot / SDK version、refresh trigger、差分分類、証跡が固定されている | 実装開始禁止。実装都合の snapshot 更新、SDK transcript 欠落、upstream 未確認、自己ホスト差分理由なし、古い baseline のまま Done / rollout ready は不可 |
+| Security abuse / bypass resistance | §9.1.48 に従い、attack surface、untrusted input、required control、bypass attempt、expected denial、redaction、audit/log、quota/rate、persistence no-op が固定されている | 実装開始禁止。auth/scope/quota bypass、secret 漏洩、path traversal、commit 後拒否、replay 二重処理、manual only security case がある場合は Phase 完了扱いにしない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | 仕様内相互参照 | §9.1.29 に従い、Phase 番号、TC ID、Task ID、API 契約 ID、error code、persistence key、evidence 名、manifest 参照が一致している | 仕様修正 PR に戻す |
 | Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
