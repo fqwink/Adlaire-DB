@@ -3,9 +3,28 @@
 ## 仕様書の位置づけ
 
 - `docs/adlaire-db-spec.md` は**正本**（single source of truth）である
+- `docs/Adlaire-db-spec.html` は `docs/adlaire-db-spec.md` から生成された閲覧用 HTML であり、正本ではない
 - 実装は仕様書に基づいて行うこと
 - 仕様書と実装が乖離している場合は、**仕様書を優先する**
 - 実装の都合で仕様書を変更する場合は、下記「変更承認フロー」に従うこと
+
+## 仕様書 HTML 更新ルール
+
+`docs/adlaire-db-spec.md` を改訂した場合は、`docs/build_spec_v3.py` 経由で `docs/Adlaire-db-spec.html` を更新すること。
+
+- 仕様書改訂 PR では、Markdown 正本と HTML 生成物の整合性を確認する
+- HTML 生成物だけを正として仕様判断してはならない
+- HTML 生成物と Markdown 正本が乖離した場合は、Markdown 正本を優先し、HTML を再生成して整合させる
+
+## ドキュメント生成ツールの位置づけ
+
+以下は別途リポジトリで開発したドキュメント生成ツールおよび関連文書である。
+
+- `docs/build_spec_v3.py`
+- `docs/build_spec_v3_spec.md`
+- `docs/DESIGN.md`
+
+Adlaire DB の仕様正本は、上記ツールではなく `docs/adlaire-db-spec.md` である。
 
 ## 作業開始時の確認
 
