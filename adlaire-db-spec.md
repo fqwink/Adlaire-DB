@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.134
+**バージョン：** V.135
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.134` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.135` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -5468,7 +5468,7 @@ Phase 1 は「実行可能な CLI skeleton と config 解決の土台」を完�
 | log | Phase 1 では構造化 request log は対象外。CLI error は clap/config error のみ |
 | 完了条件 | build/test、help snapshot、invalid flag stderr、config precedence fixture、no persistence evidence、review handoff が揃う |
 
-**Phase 1 atomic task ledger：**
+**Phase 1 原子タスク台帳：**
 
 | Task ID | Goal | Input contracts | Change targets | Forbidden changes | Completion condition | Verification |
 |---------|------|-----------------|----------------|-------------------|----------------------|--------------|
@@ -5480,7 +5480,7 @@ Phase 1 は「実行可能な CLI skeleton と config 解決の土台」を完�
 | `TASK-P1-6` | no persistence evidence | §9.1.21、§9.1.41、§9.1.44 | test / artifact | `meta/`、`databases/`、`.lock`、`data.db` 作成 | 全 Phase 1 scenario 後に data-dir が未作成または空である証跡 | no persistence fixture |
 | `TASK-P1-7` | Phase 1 Done receipt / review handoff | §9.1.33、§9.1.51、§9.1.52 | docs / PR artifact | PR description だけの根拠 | 第三者が build/help/config/no persistence を再現できる | handoff checklist |
 
-**Phase 1 scenario / oracle 固定表：**
+**Phase 1 シナリオマトリクス：**
 
 | Scenario ID | 入力 | 期待結果 | Evidence |
 |-------------|------|----------|----------|
@@ -5504,7 +5504,7 @@ Phase 1 は「実行可能な CLI skeleton と config 解決の土台」を完�
 | help / error snapshot なしで CLI 契約を完了扱いにする | Phase 未完了 |
 | PR description だけで config precedence / no persistence を説明する | 仕様として扱わない |
 
-**Phase 1 Done receipt 最低 fields：**
+**Phase 1 Done receipt 必須項目：**
 
 | Field | 必須内容 |
 |-------|----------|
@@ -5515,6 +5515,7 @@ Phase 1 は「実行可能な CLI skeleton と config 解決の土台」を完�
 | `coverage_closure_result` | help、invalid flag、config precedence、no persistence の coverage gap 0 件 |
 | `review_handoff_result` | 第三者が build/help/config/no persistence を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 1 は CLI skeleton 追加のみ。DB/HTTP/JWT は利用不可である release note |
+| `precision_closure_result` | help/config/no persistence/stub token の artifact path、reviewer 再現 command、未解決判断 0 件 |
 
 **Phase 2 完全実装精度固定契約：**
 
@@ -5534,7 +5535,7 @@ Phase 2 は data-dir、単一 default DB、metadata 初期値、process lock、l
 | restart behavior | 同じ data-dir で再起動して同じ default DB を open し、metadata を保持する |
 | rollback / recovery | 初期化途中失敗時は成功扱いにしない。partial metadata は次回起動で parse できる形式か、起動失敗にする |
 
-**Phase 2 atomic task ledger：**
+**Phase 2 原子タスク台帳：**
 
 | Task ID | Goal | Input contracts | Change targets | Forbidden changes | Completion condition | Verification |
 |---------|------|-----------------|----------------|-------------------|----------------------|--------------|
@@ -5547,7 +5548,7 @@ Phase 2 は data-dir、単一 default DB、metadata 初期値、process lock、l
 | `TASK-P2-7` | restart persistence を確認する | §9.1.39、§9.1.44 | test / artifact | DB 再作成、metadata 初期化し直し | 再起動後も同じ default DB と metadata | restart fixture |
 | `TASK-P2-8` | Phase 2 Done receipt / handoff / operator delta | §9.1.33、§9.1.51、§9.1.52 | docs / PR artifact | PR description だけの根拠 | 第三者が init/lock/open/restart を再現できる | handoff checklist |
 
-**Phase 2 scenario / oracle 固定表：**
+**Phase 2 シナリオマトリクス：**
 
 | Scenario ID | 入力 | 期待結果 | Evidence |
 |-------------|------|----------|----------|
@@ -5574,7 +5575,7 @@ Phase 2 は data-dir、単一 default DB、metadata 初期値、process lock、l
 | `.lock` file の削除を lock 解放手段として要求する | review failure。flock を正とする |
 | PR description だけで WAL / integrity / restart を説明する | 仕様として扱わない |
 
-**Phase 2 Done receipt 最低 fields：**
+**Phase 2 Done receipt 必須項目：**
 
 | Field | 必須内容 |
 |-------|----------|
@@ -5586,6 +5587,7 @@ Phase 2 は data-dir、単一 default DB、metadata 初期値、process lock、l
 | `coverage_closure_result` | tree、metadata、lock、DB open、PRAGMA、integrity、restart、no HTTP exposure の coverage gap 0 件 |
 | `review_handoff_result` | 第三者が init/lock/open/restart/no HTTP を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 2 で data-dir と default DB が作成されるが外部 HTTP API はまだ使えない release note |
+| `precision_closure_result` | data-dir/lock/metadata/default DB/WAL/integrity/restart/no HTTP の artifact path、reviewer 再現 command、未解決判断 0 件 |
 
 **Phase 3 完全実装精度固定契約：**
 
@@ -5608,7 +5610,7 @@ Phase 3 は libSQL client SDK が HTTP 経由で最小 SQL 実行できる hrana
 | close behavior | `close` 後の request は処理せず、追加 result を返さない |
 | persistence | write SQL の commit が完了してから success response を返す。再起動後に書き込みが残ることを証跡化する |
 
-**Phase 3 atomic task ledger：**
+**Phase 3 原子タスク台帳：**
 
 | Task ID | Goal | Input contracts | Change targets | Forbidden changes | Completion condition | Verification |
 |---------|------|-----------------|----------------|-------------------|----------------------|--------------|
@@ -5622,7 +5624,7 @@ Phase 3 は libSQL client SDK が HTTP 経由で最小 SQL 実行できる hrana
 | `TASK-P3-8` | restart persistence / SDK smoke を固定する | §9.1.35、§9.1.47 | tests / artifact | in-memory only 成功 | INSERT 後再起動 SELECT、SDK smoke pass | SDK transcript |
 | `TASK-P3-9` | Phase 3 Done receipt / handoff / operator delta | §9.1.33、§9.1.51、§9.1.52 | docs / PR artifact | PR description だけの根拠 | 第三者が health/pipeline/error/restart を再現できる | handoff checklist |
 
-**Phase 3 scenario / oracle 固定表：**
+**Phase 3 シナリオマトリクス：**
 
 | Scenario ID | 入力 | 期待結果 | Evidence |
 |-------------|------|----------|----------|
@@ -5654,7 +5656,7 @@ Phase 3 は libSQL client SDK が HTTP 経由で最小 SQL 実行できる hrana
 | `baton` session を保持する | Phase 未完了。session は Phase 9 |
 | SDK transcript / wire snapshot なしで完了扱いにする | Phase 未完了 |
 
-**Phase 3 Done receipt 最低 fields：**
+**Phase 3 Done receipt 必須項目：**
 
 | Field | 必須内容 |
 |-------|----------|
@@ -5666,6 +5668,7 @@ Phase 3 は libSQL client SDK が HTTP 経由で最小 SQL 実行できる hrana
 | `coverage_closure_result` | health、pipeline success/error、malformed JSON、SQL error、close、restart、SDK smoke の gap 0 件 |
 | `review_handoff_result` | 第三者が health/pipeline/error/restart/SDK smoke を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 3 で HTTP API `/v2/health` と `/v2/pipeline` が初公開され、auth はまだ無効である release note |
+| `precision_closure_result` | hrana-http v2 schema、wire snapshot、SDK transcript、restart persistence、unsupported surface の artifact path、reviewer 再現 command、未解決判断 0 件 |
 
 **Phase 4 完全実装精度固定契約：**
 
@@ -5693,7 +5696,7 @@ Phase 4 は Phase 3 の hrana-http v2 surface に JWT HS256 認証と `token cre
 | error precedence | malformed JSON / method / content-type 判定後に auth 判定を行う。auth header なしは `AUTH_REQUIRED`、形式不正/署名不正/revoked/未登録は `AUTH_INVALID`、期限切れは `AUTH_EXPIRED` |
 | logging | Authorization header、JWT、secret、raw claim、SQL args は log に出さず `<redacted-secret>` または `<redacted>` に正規化する |
 
-**Phase 4 atomic task ledger：**
+**Phase 4 原子タスク台帳：**
 
 | Task ID | Goal | Input contracts | Change targets | Forbidden changes | Completion condition | Verification |
 |---------|------|-----------------|----------------|-------------------|----------------------|--------------|
@@ -5707,7 +5710,7 @@ Phase 4 は Phase 3 の hrana-http v2 surface に JWT HS256 認証と `token cre
 | `TASK-P4-8` | secret redaction と artifact scan を固定する | §9.1.17、§9.1.18、§10.1 | logging / tests | JWT/secret/claim raw 出力 | log と artifact に secret が残らない | secret scan artifact |
 | `TASK-P4-9` | Phase 4 Done receipt / handoff / operator delta | §9.1.33、§9.1.51、§9.1.52 | docs / PR artifact | 手動確認のみで完了 | 第三者が auth matrix を再現できる | handoff checklist |
 
-**Phase 4 scenario / oracle 固定表：**
+**Phase 4 シナリオマトリクス：**
 
 | Scenario ID | 入力 | 期待結果 | Evidence |
 |-------------|------|----------|----------|
@@ -5742,7 +5745,7 @@ Phase 4 は Phase 3 の hrana-http v2 surface に JWT HS256 認証と `token cre
 | auth matrix / permission matrix / secret scan なしで完了扱いにする | Phase 未完了 |
 | CLI 手動確認だけで Phase 4 完了扱いにする | Phase 未完了。自動検証と再現可能 artifact が必須 |
 
-**Phase 4 Done receipt 最低 fields：**
+**Phase 4 Done receipt 必須項目：**
 
 | Field | 必須内容 |
 |-------|----------|
@@ -5758,6 +5761,7 @@ Phase 4 は Phase 3 の hrana-http v2 surface に JWT HS256 認証と `token cre
 | `coverage_closure_result` | startup、auth、permission、token CLI、revoke、redaction、Phase 1〜3 regression の gap 0 件 |
 | `review_handoff_result` | 第三者が auth matrix、permission matrix、token create、restart、secret scan を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 4 で JWT secret 設定時に `/v2/pipeline` が認証必須になり、未設定時は開発用 auth disabled として動く release note |
+| `precision_closure_result` | auth matrix、permission matrix、token persistence、secret redaction、SDK auth transcript、Phase 1〜3 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
 
 **Phase 5 完全実装精度固定契約：**
 
@@ -5780,7 +5784,7 @@ Phase 5 は Phase 1〜4 の実装を、構造化ログ、統合テスト、SDK �
 | restart persistence | INSERT 後に graceful stop と process abort 相当の両方を行い、同じ `--data` で SELECT 結果が残ることを証跡化する |
 | artifact policy | snapshot / transcript / log / test output は secret scan を通過したものだけを Done receipt に添付する |
 
-**Phase 5 atomic task ledger：**
+**Phase 5 原子タスク台帳：**
 
 | Task ID | Goal | Input contracts | Change targets | Forbidden changes | Completion condition | Verification |
 |---------|------|-----------------|----------------|-------------------|----------------------|--------------|
@@ -5794,7 +5798,7 @@ Phase 5 は Phase 1〜4 の実装を、構造化ログ、統合テスト、SDK �
 | `TASK-P5-8` | unsupported API regression を固定する | §9.1.10、§9.5 | tests / snapshot | 未来 API 成功応答 | 管理 API / multi DB / WS が成功しない | unsupported snapshot |
 | `TASK-P5-9` | Phase 5 Done receipt / handoff / operator delta | §9.1.33、§9.1.51、§9.1.52 | docs / PR artifact | PR description だけの根拠 | 第三者が logs/SDK/restart を再現できる | handoff checklist |
 
-**Phase 5 scenario / oracle 固定表：**
+**Phase 5 シナリオマトリクス：**
 
 | Scenario ID | 入力 | 期待結果 | Evidence |
 |-------------|------|----------|----------|
@@ -5828,7 +5832,7 @@ Phase 5 は Phase 1〜4 の実装を、構造化ログ、統合テスト、SDK �
 | secret scan なしで snapshot / transcript を Done receipt に添付する | Phase 未完了 |
 | flaky test を retry だけで隠して完了扱いにする | Phase 未完了 |
 
-**Phase 5 Done receipt 最低 fields：**
+**Phase 5 Done receipt 必須項目：**
 
 | Field | 必須内容 |
 |-------|----------|
@@ -5845,6 +5849,24 @@ Phase 5 は Phase 1〜4 の実装を、構造化ログ、統合テスト、SDK �
 | `coverage_closure_result` | log、SDK、restart、secret、unsupported、Phase 1〜4 regression の gap 0 件 |
 | `review_handoff_result` | 第三者が log parse、SDK CRUD、restart、secret scan、regression を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 5 では API 機能追加はなく、運用ログと互換 regression が完了条件になる release note |
+| `precision_closure_result` | JSONL parser、request log、SDK CRUD、restart persistence、secret scan、unsupported surface、Phase 1〜4 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
+
+**Phase 1〜5 完全実装精度正規化契約：**
+
+Phase 1〜5 は後続 Phase と同じ Done 判定規則を適用する。実装者は「動いた」「手元確認済み」「PR description に記載済み」を完了根拠にしてはならない。各 Phase の Done receipt は、原子タスク、シナリオ、禁止事項、互換 baseline、secret redaction、review handoff、operator behavior delta、precision closure をすべて埋める。
+
+| 項目 | 固定仕様 | 完了不可条件 |
+|------|----------|--------------|
+| heading normalization | Phase 1〜5 の仕様見出しは `原子タスク台帳`、`シナリオマトリクス`、`Done receipt 必須項目` を正とする | 旧見出しだけを参照して Done 判定する |
+| artifact path | Done receipt の pass/fail は artifact path または再現 command を必ず持つ | 口頭説明、PR description、スクリーンショットのみ |
+| atomic closure | `TASK-P{phase}-*` はすべて pass、open task 0 件でなければならない | skip、manual-only、未実装 task あり |
+| scenario closure | `SCN-P{phase}-*` はすべて pass/fail と理由を記録する。fail は仕様化された対象外または blocker でなければならない | fail 理由なし、期待値更新だけで pass |
+| compatibility baseline | Phase 3〜5 は libSQL SDK transcript と hrana / API snapshot を Done receipt に含める | curl smoke のみ、SDK transcript なし |
+| no future surface | Phase 1〜5 で未来 Phase の API、metadata、JWT claim、WebSocket、Admin API、multi DB route を成功応答にしない | 未来 surface が成功応答する |
+| persistence evidence | Phase 1 は no persistence、Phase 2〜5 は対象 persistence / restart recovery を artifact 化する | 永続化有無の証跡なし |
+| secret redaction | Phase 4〜5 は response/stdout/stderr/log/artifact に secret、JWT、Authorization、raw claim、SQL args が残らない scan を必須にする | scan なし、秘匿値混入 |
+| reviewer reproducibility | 第三者が clean checkout から command で再現できる handoff を必須にする | ローカル状態依存、手順欠落 |
+| bug-zero readiness | Done receipt に coverage gap、未解決判断、仕様未確定、既知 flaky が 0 件であることを明記する | 未解決判断を実装者判断へ先送り |
 
 **Phase 1〜5 の境界決定：**
 
@@ -12718,7 +12740,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.134` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.135` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
