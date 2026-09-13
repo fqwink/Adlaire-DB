@@ -10,7 +10,7 @@ import re, html, unicodedata
 from pathlib import Path
 from typing import Optional
 
-SRC = "docs/spec/spec.md"
+SRC = "docs/spec/project-charter.md"
 OUT = "docs/Adlaire-db-spec.html"
 
 INCLUDE_RE = re.compile(r'^<!--\s*include:\s*([^>]+?)\s*-->\s*$')
@@ -793,7 +793,7 @@ a:focus-visible {{
   <span class="hdr-title">Adlaire DB</span>
   <span class="hdr-sep">/</span>
   <span class="hdr-title" style="color:rgba(255,255,255,.7);font-weight:400">仕様憲章</span>
-  <span class="hdr-ver">V.210</span>
+  <span class="hdr-ver">V.211</span>
 </header>
 
 <div id="lay">

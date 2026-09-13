@@ -119,4 +119,4 @@ Phase 7 時点では、以下の管理 API が利用できる。
 
 ## 仕様書
 
-詳細仕様は [`docs/spec/spec.md`](./docs/spec/spec.md) を参照。
+詳細仕様は [`docs/spec/project-charter.md`](./docs/spec/project-charter.md) を参照。

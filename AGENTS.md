@@ -2,18 +2,17 @@
 
 ## 仕様書の位置づけ
 
-- `docs/spec/spec.md`、`docs/spec/project-charter.md`、`docs/spec/auth.md`、`docs/spec/api.md`、`docs/spec/testing.md`、`docs/spec/phase-*.md` は**仕様正本群**（single source of truth）である
-- `docs/spec/project-charter.md` はプロジェクト憲章であり、`docs/spec/spec.md` に記載された内容を全て保持する
-- `docs/spec/spec.md` は仕様憲章であり、認証・認可仕様、API契約仕様、テスト仕様、Phase 1〜19 の詳細は `docs/spec/` に分割して管理する
-- `docs/spec/spec.md` と `docs/spec/project-charter.md` は同一内容として同期し、片方だけを更新してはならない
-- `docs/Adlaire-db-spec.html` は `docs/spec/spec.md` から生成された閲覧用 HTML であり、正本ではない
+- `docs/spec/project-charter.md`、`docs/spec/auth.md`、`docs/spec/api.md`、`docs/spec/testing.md`、`docs/spec/phase-*.md` は**仕様正本群**（single source of truth）である
+- `docs/spec/project-charter.md` はプロジェクト憲章であり、仕様正本の入口である
+- 認証・認可仕様、API契約仕様、テスト仕様、Phase 1〜19 の詳細は `docs/spec/` に分割して管理する
+- `docs/Adlaire-db-spec.html` は `docs/spec/project-charter.md` から生成された閲覧用 HTML であり、正本ではない
 - 実装は仕様書に基づいて行うこと
 - 仕様書と実装が乖離している場合は、**仕様書を優先する**
 - 実装の都合で仕様書を変更する場合は、下記「変更承認フロー」に従うこと
 
 ## 仕様書 HTML 更新ルール
 
-`docs/spec/spec.md`、`docs/spec/project-charter.md`、`docs/spec/auth.md`、`docs/spec/api.md`、`docs/spec/testing.md`、`docs/spec/phase-*.md` を改訂した場合は、`docs/build-scripts/build_spec_v3.py` 経由で `docs/Adlaire-db-spec.html` を更新すること。
+`docs/spec/project-charter.md`、`docs/spec/auth.md`、`docs/spec/api.md`、`docs/spec/testing.md`、`docs/spec/phase-*.md` を改訂した場合は、`docs/build-scripts/build_spec_v3.py` 経由で `docs/Adlaire-db-spec.html` を更新すること。
 
 - 仕様書改訂 PR では、Markdown 正本と HTML 生成物の整合性を確認する
 - HTML 生成物だけを正として仕様判断してはならない
@@ -27,7 +26,7 @@
 - `docs/build-scripts/build_spec_v3_spec.md`
 - `docs/build-scripts/DESIGN.md`
 
-Adlaire DB の仕様正本群は、上記ツールではなく `docs/spec/spec.md`、`docs/spec/project-charter.md`、`docs/spec/auth.md`、`docs/spec/api.md`、`docs/spec/testing.md`、`docs/spec/phase-*.md` である。
+Adlaire DB の仕様正本群は、上記ツールではなく `docs/spec/project-charter.md`、`docs/spec/auth.md`、`docs/spec/api.md`、`docs/spec/testing.md`、`docs/spec/phase-*.md` である。
 
 ## 作業開始時の確認
 
@@ -41,7 +40,7 @@ Adlaire DB の仕様正本群は、上記ツールではなく `docs/spec/spec.m
 
 ## 変更承認フロー
 
-仕様書（docs/spec/spec.md）およびその他ファイルへの変更は、
+仕様書（docs/spec/project-charter.md）およびその他ファイルへの変更は、
 以下の手順を**必ず**守ること。
 
 1. 変更内容（差分・理由）をチャットに提示する
