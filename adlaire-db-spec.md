@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.124
+**バージョン：** V.125
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.124` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.125` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -6258,6 +6258,101 @@ Phase 9 は hrana-ws v3 WebSocket surface と interactive transaction を完成�
 | `coverage_closure_result` | upgrade、hello、stream、SQL、transaction、store_sql、permission、unsupported、regression の gap 0 件 |
 | `review_handoff_result` | 第三者が WebSocket upgrade、SDK transaction、rollback、store_sql、secret scan を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 9 で hrana-ws v3 `/v3/baton` と `/{db-name}/v3/baton` が公開され、interactive transaction が利用可能になる release note |
+
+**Phase 10 完全実装精度固定契約：**
+
+Phase 10 は管理下 DB 間の ATTACH と、Phase 1〜10 の HTTP/WebSocket/DB 実行を観測するインメモリ metrics API を完成させる Phase である。Phase 10 で成功応答してよい新規外部 API は `GET /admin/v1/metrics` のみであり、replication、backup/restore、branch、extension、Prometheus、metrics 永続化、HA を実装してはならない。Phase 10 実装者は下表を Phase packet、atomic task ledger、scenario matrix、Done receipt、review handoff、operator behavior delta に転記してから実装する。
+
+| 項目 | Phase 10 固定仕様 |
+|------|-------------------|
+| 実装範囲 | ATTACH SQL interception、managed DB path resolution、ATTACH policy、hrana-http/ws 適用、in-memory metrics counters/gauges、`GET /admin/v1/metrics` |
+| ATTACH 対象 | `ATTACH DATABASE '<db-name>' AS <alias>` と `ATTACH '<db-name>' AS <alias>` のみ。single quote DB name のみ許可 |
+| parser | SQL tokenizer または SQLite prepare 前の限定 parser を使う。正規表現だけの判定、semicolon split、文字列リテラル/コメント/quoted identifier 内の誤検出は禁止 |
+| DB name | ATTACH DB 名は Phase 8 metadata に存在する管理下 DB のみ。任意 path、絶対 path、相対 path、URL、空、未登録 DB は成功させない |
+| alias | alias は `^[A-Za-z_][A-Za-z0-9_]{0,63}$`。quote、dot、slash、空、SQLite reserved collision は `INVALID_REQUEST` |
+| path rewrite | libsql / SQLite へ渡す前に管理下 DB の実 path に解決する。client supplied path をそのまま渡さない |
+| auth/scope | source DB と attach target DB の両方に JWT/org/group/db scope が必要。どちらか scope 外なら `ORG_SCOPE_DENIED` または `PERMISSION_DENIED` |
+| block policy | `allow_attach=false`、`block_reads=true`、`block_writes=true`、ro token の優先順位を §9.4.2 の Phase 10 表に従って固定する |
+| transaction | active transaction 中の ATTACH/DETACH は SQLite の結果に従うが、任意 path validation と permission 判定は必ず先に行う |
+| protocol coverage | hrana-http `execute` / `sequence` と hrana-ws `execute` / `batch` / `sequence` の全経路で同一 ATTACH policy を適用する |
+| metrics API | `GET /admin/v1/metrics` は Admin token 必須。body あり、unknown query、非 GET は拒否する |
+| metrics persistence | Phase 10 metrics はプロセス内のみ。再起動で reset される。永続 metrics と Prometheus は Phase 17 |
+| metrics update | 成功/失敗 HTTP request、WebSocket connection、SQL execution、SQL error、auth denial、storage busy を規定 counter に反映する |
+| counter boundary | SQL execution counter は libSQL に渡した step のみ加算する。validation で拒否した SQL は SQL execution counter に含めない |
+| gauge boundary | `size_bytes` / `wal_size_bytes` は response 時に filesystem から取得する。取得失敗は WARN + field `0` |
+| secret | metrics label、log、snapshot に token、JWT、SQL args、生 SQL bind 値、絶対 extension path を含めない |
+
+**Phase 10 atomic task ledger：**
+
+| Task ID | Goal | Input contracts | Change targets | Forbidden changes | Completion condition | Verification |
+|---------|------|-----------------|----------------|-------------------|----------------------|--------------|
+| `TASK-P10-1` | ATTACH parser 境界を固定する | §9.1.28、§9.4.2 Phase 10 | `attach/*` | regex-only、semicolon split | parser cases が誤検出なし | parser fixture |
+| `TASK-P10-2` | managed DB path resolution を固定する | §3.4、§9.6 | `attach/*`、`db/manager.rs` | client path pass-through | 管理下 DB のみ path 解決 | path resolution snapshot |
+| `TASK-P10-3` | ATTACH policy precedence を固定する | §9.1.18、§9.4.2 | `attach/*`、`auth/*` | scope/block/quota 順序揺れ | allow/deny matrix が固定 | policy matrix |
+| `TASK-P10-4` | hrana-http/ws 適用を固定する | §6.2、§6.3、§9.1.28 | `http/pipeline.rs`、`ws/*` | HTTP/WS 差分 | 全 SQL 経路で同一 policy | protocol matrix |
+| `TASK-P10-5` | metrics schema を固定する | §6.4、§9.5 | `metrics.rs`、`http/admin/metrics.rs` | Prometheus 混入、永続化 | JSON schema が snapshot 一致 | metrics snapshot |
+| `TASK-P10-6` | metrics update points を固定する | §9.1.17、§9.4.1 | `metrics.rs`、HTTP/WS hooks | lost increment、二重 decrement | 成功/失敗/WS close が反映 | counter fixture |
+| `TASK-P10-7` | metrics auth / validation を固定する | §6.4、§9.1.18 | `http/admin/metrics.rs` | auth bypass、body 黙認 | Admin token / invalid request が固定 | metrics auth snapshot |
+| `TASK-P10-8` | secret redaction / labels を固定する | §9.1.17、§9.1.18 | metrics / logs / tests | token/SQL args label | secret scan が pass | secret scan artifact |
+| `TASK-P10-9` | Phase 10 Done receipt / handoff / operator delta | §9.1.33、§9.1.51、§9.1.52 | docs / PR artifact | PR description だけの根拠 | 第三者が ATTACH/metrics を再現できる | handoff checklist |
+
+**Phase 10 scenario / oracle 固定表：**
+
+| Scenario ID | 入力 | 期待結果 | Evidence |
+|-------------|------|----------|----------|
+| `SCN-P10-1` | `ATTACH DATABASE 'db_b' AS b` on managed DB | 成功し cross DB SELECT 可能 | attach success transcript |
+| `SCN-P10-2` | `ATTACH '/etc/passwd' AS evil` | `INVALID_REQUEST` または `PERMISSION_DENIED`、path 未使用 | arbitrary path snapshot |
+| `SCN-P10-3` | `ATTACH DATABASE '../db' AS x` | `INVALID_DB_NAME` / `INVALID_REQUEST` | traversal snapshot |
+| `SCN-P10-4` | 未登録 DB を ATTACH | `DB_NOT_FOUND` | missing DB snapshot |
+| `SCN-P10-5` | invalid alias / quoted alias / dot alias | `INVALID_REQUEST` | alias matrix |
+| `SCN-P10-6` | SQL string/comment 内の `ATTACH` | ATTACH と誤検出しない | parser cases artifact |
+| `SCN-P10-7` | `allow_attach=false` の source/target | `PERMISSION_DENIED` | allow_attach snapshot |
+| `SCN-P10-8` | scope 外 target DB | `ORG_SCOPE_DENIED` または `PERMISSION_DENIED` | scope denial snapshot |
+| `SCN-P10-9` | `block_reads=true` target を read source にする | `PERMISSION_DENIED` | block read snapshot |
+| `SCN-P10-10` | ro token で ATTACH 後 write | `PERMISSION_DENIED` | ro attach write snapshot |
+| `SCN-P10-11` | hrana-http execute/sequence ATTACH | HTTP 経路で policy 一致 | HTTP attach transcript |
+| `SCN-P10-12` | hrana-ws execute/batch/sequence ATTACH | WebSocket 経路で policy 一致 | WS attach transcript |
+| `SCN-P10-13` | `GET /admin/v1/metrics` valid Admin token | 200 metrics JSON、managed DB を含む | metrics snapshot |
+| `SCN-P10-14` | metrics no auth / bad token | 401 `AUTH_REQUIRED` / `AUTH_INVALID` | metrics auth snapshot |
+| `SCN-P10-15` | metrics with body / unknown query / non GET | `INVALID_REQUEST` / `METHOD_NOT_ALLOWED` | metrics validation snapshot |
+| `SCN-P10-16` | HTTP success/failure and SQL success/error | counters が規定通り増える | counter update transcript |
+| `SCN-P10-17` | WebSocket connect/close | `connections_active` が二重 decrement なしで戻る | WS metrics transcript |
+| `SCN-P10-18` | server restart | Phase 10 metrics は reset される | reset transcript |
+| `SCN-P10-19` | metrics secret scan | token、JWT、SQL args、生 bind 値が残らない | secret scan result |
+| `SCN-P10-20` | Phase 1〜9 regression + SDK HTTP/WS | すべて pass | regression transcript |
+
+**Phase 10 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| 正規表現だけで ATTACH を判定する | merge 不可 |
+| client supplied path を SQLite / libsql に直接渡す | merge 不可 |
+| 任意 path、相対 path、絶対 path、URL を ATTACH 成功させる | merge 不可 |
+| hrana-http と hrana-ws で ATTACH policy が異なる | merge 不可 |
+| `allow_attach=false`、scope denial、block policy、ro token の precedence を証跡なしで実装する | Phase 未完了 |
+| Phase 10 metrics を永続化または Prometheus endpoint として公開する | merge 不可。Phase 17 対象 |
+| metrics label / response / artifact に secret、JWT、SQL args、生 bind 値を含める | merge 不可 |
+| WebSocket close 時に `connections_active` を二重 decrement する、または decrement 漏れする | Phase 未完了 |
+| ATTACH allow/deny、任意 path 拒否、metrics counter snapshot、Phase 1〜9 regression なしで完了扱いにする | Phase 未完了 |
+
+**Phase 10 Done receipt 最低 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `implemented_scope` | ATTACH SQL interception、managed DB path resolution、ATTACH policy、hrana-http/ws 適用、in-memory metrics、`GET /admin/v1/metrics` |
+| `excluded_scope` | replication、backup/restore、branch、extension、Prometheus、metrics 永続化、HA、内製化 |
+| `atomic_task_result` | `TASK-P10-1`〜`TASK-P10-9` がすべて pass、open task 0 件 |
+| `scenario_matrix_result` | `SCN-P10-1`〜`SCN-P10-20` の pass/fail、artifact path |
+| `attach_parser_result` | parser cases、string/comment/quoted identifier 誤検出なし、semicolon split なし |
+| `attach_policy_result` | allow_attach、scope、block_reads、block_writes、ro/rw、quota、unknown DB、invalid alias/path の matrix |
+| `protocol_coverage_result` | hrana-http execute/sequence、hrana-ws execute/batch/sequence の ATTACH transcript |
+| `metrics_schema_result` | `GET /admin/v1/metrics` schema、auth、validation、counter/gauge field、filesystem failure handling |
+| `metrics_update_result` | HTTP/WS/SQL success/failure、WebSocket close、storage/auth errors の counter update artifact |
+| `compatibility_baseline_result` | Phase 1〜9 regression、TypeScript SDK HTTP/WS transcript、Turso / libSQL compatibility 差分なし |
+| `secret_redaction_result` | metrics/log/snapshot/artifact に token、JWT、SQL args、生 bind 値が残らない scan |
+| `coverage_closure_result` | ATTACH parser、path、policy、protocol、metrics、auth、secret、regression の gap 0 件 |
+| `review_handoff_result` | 第三者が ATTACH allow/deny、任意 path 拒否、metrics counter、secret scan を再現できる command と artifact |
+| `operator_behavior_delta_result` | Phase 10 で管理下 DB の ATTACH と `GET /admin/v1/metrics` が公開されるが、metrics は再起動で reset される release note |
 
 **Phase 8〜10 の境界決定：**
 
