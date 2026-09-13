@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.98
+**バージョン：** V.99
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.98` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.99` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.98` の次は `V.99` とし、以後 `V.100`、`V.101` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.99` の次は `V.100` とし、以後 `V.101`、`V.102` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -3918,6 +3918,7 @@ branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§
 | `evidence_plan` | test、snapshot、fixture、log、artifact、secret scan の保存先 |
 | `regression_set` | 当該 Phase と過去 Phase の実行必須コマンド |
 | `unsupported_behavior` | 未来 Phase、stub、501/400/404/405 の固定挙動 |
+| `dependency_graph` | API、persistence、security、compatibility、oracle、evidence、operational state の prerequisite |
 | `completion_gate` | merge 前に満たす Done 条件と失敗時の扱い |
 
 **Phase group 粒度：**
@@ -4006,6 +4007,7 @@ Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§
 | `oracle_result` | §9.1.35 の oracle 名、version、path、比較 command、exit code、差分理由 |
 | `defect_classification_result` | §9.1.36 の defect 件数、分類別件数、`open:0`、evidence path |
 | `operational_state_result` | §9.1.37 の state matrix、health snapshot、API behavior、recovery runbook |
+| `dependency_graph_result` | §9.1.38 の prerequisite がすべて satisfied である証跡 |
 | `reviewer_decision` | `Done`、`Not Done`、`Spec correction required` のいずれか |
 
 **Phase group Done minimum：**
@@ -4354,6 +4356,70 @@ Phase defect classification に関係する仕様変更は、§9.1.1、§9.1.1a�
 | `operator_required_result` | operator_required がある場合の marker、health、manual action、解除条件。なければ `none` |
 
 Phase operational state に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.21、§9.1.22、§9.1.25、§9.1.30、§9.1.31、§9.1.33、§9.1.36、§9.5、§9.6、§9.7、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。operational state と recovery runbook が固定されていない failure path は、実装が正常系で動いていても Phase 完了扱いにしない。
+
+#### 9.1.38 Phase dependency graph / contract prerequisite 固定契約
+
+各 Phase の実装 PR は、実装開始前に Phase 内 contract の dependency graph を固定しなければならない。dependency graph は「どの契約が満たされていなければ、次の契約を実装・公開・完了扱いにできないか」を示す実装順序の正本である。prerequisite が未完了の契約を実装済み、証跡済み、または Done として扱ってはならない。
+
+**Contract prerequisite 固定表：**
+
+| Contract type | prerequisite | prerequisite 未完了時の扱い |
+|---------------|--------------|------------------------------|
+| API contract | error contract、auth/security contract、persistence contract、oracle、unsupported behavior | route 追加禁止。stub は §9.1.5 / §9.1.34 に従う |
+| Persistence contract | schema、atomic update、fsync、rollback、recovery、operational state | 書き込み処理禁止。metadata commit 禁止 |
+| Security contract | auth source、scope、quota/block policy、denial snapshot、redaction artifact | success response 禁止 |
+| Compatibility contract | Turso / libSQL SDK / legacy metadata 差分、oracle、migration / rollback 方針 | 互換差分を伴う実装禁止 |
+| Concurrency contract | resource lock、idempotency、shutdown、retry、transaction boundary | 状態変更処理禁止 |
+| Oracle contract | Contract ID、expected artifact、normalization、update policy | snapshot / fixture / expected 更新禁止 |
+| Evidence contract | artifact path、generation command、secret scan、manifest linkage | Phase 完了扱い禁止 |
+| Operational contract | state matrix、health response、write policy、operator action、recovery runbook | failure path 実装禁止 |
+| Defect contract | classification、root cause、resolution、evidence、open:0 | Done receipt 作成禁止 |
+
+**Dependency graph 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `contract_id` | §9.1.7 の Contract ID |
+| `contract_type` | API / Persistence / Security / Compatibility / Concurrency / Oracle / Evidence / Operational / Defect |
+| `requires` | prerequisite Contract ID の配列。不要な場合は `[]` |
+| `blocks` | この契約が未完了の場合に止める契約 ID または operation |
+| `status` | `planned`、`satisfied`、`blocked`、`not_applicable` のいずれか |
+| `evidence` | satisfied 判定に使う artifact path / command / section |
+| `not_applicable_reason` | `not_applicable` の場合のみ、仕様本文の根拠 |
+
+**Phase group dependency minimum：**
+
+| Phase group | 必須 dependency |
+|-------------|-----------------|
+| Phase 1〜5 | CLI/config prerequisite、DB open 前の data-dir contract、hrana API 前の SQL/error/oracle contract |
+| Phase 6〜8 | DB route 前の naming/persistence/security contract、Turso API 前の org/group/location/quota/oracle contract |
+| Phase 9〜10 | WebSocket execute 前の auth/stream/tx contract、ATTACH 前の parser/security/persistence contract |
+| Phase 11〜13 | replication response 前の frame/checksum/auth contract、archive cleanup 前の manifest/recovery contract |
+| Phase 14〜15 | restore/branch success 前の rollback/source/quota/security/operational contract |
+| Phase 16〜18 | extension load 前の allowlist/signature/redaction contract、HA promotion 前の term/operator/split-brain contract |
+| Phase 19 | adapter active 前の shadow/oracle/performance/rollback/full regression contract |
+
+**未完了 prerequisite の禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| prerequisite が `planned` / `blocked` のまま dependent API を公開する | merge 不可 |
+| persistence prerequisite 未完了で metadata を commit する | merge 不可 |
+| security prerequisite 未完了で 2xx success を返す | merge 不可 |
+| oracle prerequisite 未完了で snapshot を更新する | merge 不可 |
+| operational prerequisite 未完了で recovery / degraded path を実装する | Phase 未完了 |
+| defect prerequisite 未完了で Done receipt を作成する | Phase 未完了 |
+| dependency graph を PR description だけに置き、仕様本文または artifact と対応しない | Phase 未完了 |
+
+**Done receipt への反映：**
+
+| Done receipt field | 必須内容 |
+|--------------------|----------|
+| `dependency_graph_result` | Contract ID ごとの status、blocked 0 件、not_applicable reason、evidence path |
+| `blocked_contracts` | `blocked` がある場合は Phase 未完了。完了時は `none` |
+| `prerequisite_closure` | dependency graph 上の全 dependent contract が prerequisite satisfied 後に検証済みであること |
+
+Phase dependency graph に関係する仕様変更は、§9.1.7、§9.1.8、§9.1.10、§9.1.11、§9.1.32、§9.1.33、§9.1.34、§9.1.35、§9.1.36、§9.1.37、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。dependency graph がない Phase 実装 PR は、実装順序と完了判定が未確定として扱い、実装開始不可とする。
 
 ### 9.2 Phase 別完了ゲート
 
@@ -4992,6 +5058,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Acceptance oracle | §9.1.35 に従い、API/error/persistence/migration/SDK/unsupported/security/compatibility/regression の正解 artifact、正規化、更新条件が固定されている | snapshot / fixture / expected を更新しない |
 | Defect classification | §9.1.36 に従い、spec gap、implementation bug、regression bug、compatibility diff、oracle gap、environment gap、security gap、persistence gap が分類され、`open:0` になっている | Phase 完了扱いにしない |
 | Operational state / recovery runbook | §9.1.37 に従い、healthy、degraded、unavailable、recovering、rollback_required、operator_required、blocked の API / write / health / log / operator action が固定されている | failure path を実装しない |
+| Dependency graph | §9.1.38 に従い、各 Contract ID の prerequisite、blocks、status、evidence、not_applicable reason が固定され、未完了 prerequisite が 0 件になっている | dependent contract を実装・公開・完了扱いにしない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | 仕様内相互参照 | §9.1.29 に従い、Phase 番号、TC ID、Task ID、API 契約 ID、error code、persistence key、evidence 名、manifest 参照が一致している | 仕様修正 PR に戻す |
 | Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
