@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.145
+**バージョン：** V.146
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.145` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.146` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -7155,7 +7155,7 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 |-------|----------|
 | `handoff_id` | `HANDOFF-P{phase}-{number}` 形式の一意 ID |
 | `spec_version` | 対象仕様書 version。Phase Done 時点の `V.{累積番号}` と一致させる |
-| `reading_order` | レビュアーが読む順番。最低でも §0、§1.4、§9.1.51、§9.11.1〜§9.11.8、対象 Phase 詳細節、Phase packet、Done receipt |
+| `reading_order` | レビュアーが読む順番。最低でも §0、§1.4、§9.1.51、§9.11.1〜§9.11.9、対象 Phase 詳細節、Phase packet、Done receipt |
 | `reproduction_commands` | clean checkout から実行できる command。各 command は working directory、env、fixture、expected exit code を持つ |
 | `expected_artifacts` | command ごとの生成 artifact path、Contract ID、Scenario ID、snapshot / transcript / log の対応 |
 | `decision_criteria` | Done / Not Done / Spec correction required の判定条件。失敗時に参照する仕様節を含める |
@@ -7345,6 +7345,58 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 | allowed exclusion に仕様本文 section、N/A record、代替 artifact がない | Phase 未完了 |
 | secret redaction regression を省略する | merge 不可 |
 | `P{phase}-PRECISION-CLOSURE` に inherited Phase 範囲、required surfaces、`regression_failure_count = 0`、artifact path がない | Phase 未完了 |
+
+### 9.11.9 Phase 1〜19 deterministic execution / flaky prevention closure 最低表
+
+本節は Phase 実装・検証・artifact 生成が実行環境、時刻、乱数、port、timeout、並行実行順、local path に依存して揺れないことを証明する最低条件を定義する。実装者は flaky を retry で隠してはならない。すべての snapshot、transcript、fixture、log、review handoff artifact は、正規化規則と deterministic な待機条件を持たなければならない。
+
+| Phase | deterministic closure 最低対象 |
+|-------|--------------------------------|
+| 1 | CLI help / error snapshot、config precedence、stdout/stderr ordering、no persistence path normalization |
+| 2 | data-dir temp path、process lock timing、metadata write order、WAL busy timeout、restart fixture |
+| 3 | HTTP bind port、request id、health response、pipeline response order、SQL error snapshot、SDK smoke timeout |
+| 4 | JWT token id / expiry、secret source precedence、auth denial log、permission matrix ordering、redaction snapshot |
+| 5 | JSONL log field ordering、request_id normalization、SDK CRUD transcript、restart timing、secret scan output |
+| 6 | DB name fixture、default/path route ordering、directory scan order、metadata list order、isolation transcript |
+| 7 | Admin API list ordering、token create id normalization、revoke timing、concurrency race control、scope matrix |
+| 8 | migration backup path、organization/group/location ordering、quota usage clock、Turso snapshot normalization |
+| 9 | WebSocket connection id、stream id、transaction timing、rollback on disconnect、store_sql id normalization |
+| 10 | ATTACH source ordering、path canonicalization、metrics counter increment order、WebSocket gauge timing |
+| 11 | frame_no ordering、checksum fixture、SSE event order、snapshot timestamp、heartbeat interval / timeout |
+| 12 | replica catch-up wait condition、redirect timing、primary down timeout、multi replica ordering、checksum mismatch artifact |
+| 13 | archive frame filename order、manifest `created_at` clock、retention clock、partial write fixture、cleanup order |
+| 14 | backup snapshot boundary、restore temp name、PITR selector clock、timeout / shutdown race、rollback artifact |
+| 15 | branch internal id、source snapshot boundary、branch list order、delete race、seed compatibility snapshot |
+| 16 | extension path normalization、sha256 fixture、load timing、existing connection non-retroactive check、delete ordering |
+| 17 | metrics flush interval、shutdown flush race、counter monotonicity、Prometheus text ordering、label normalization |
+| 18 | heartbeat clock、failover timeout、term ordering、promote/demote race、partition fixture、leader redirect timing |
+| 19 | shadow diff ordering、adapter selection log、performance workload seed、crash recovery timing、rollback transcript |
+
+**determinism_record 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `determinism_id` | `DET-P{phase}-{surface}-{number}` 形式の一意 ID |
+| `phase` | 対象 Phase 番号 |
+| `nondeterministic_inputs` | timestamp、random、port、host、absolute path、username、request id、connection id、thread scheduling、network timing など揺れる入力 |
+| `normalization_rules` | artifact 上の置換規則。例: `<normalized-id>`、`<normalized-port>`、`<normalized-path>` |
+| `fixed_seed_or_clock` | fixed seed、mock clock、manifest clock、fixture clock、または不要理由 |
+| `timeout_policy` | timeout 値、待機条件、retry 禁止/許可条件、failure 時の error code / artifact |
+| `race_control` | lock、event wait、barrier、deterministic scheduler、または race 対象外の仕様根拠 |
+| `artifact_evidence` | snapshot、transcript、log、flaky report、environment.txt、ci.txt、review handoff path |
+| `flaky_result` | `pass` または `fail`。`passed_after_retry`、`unknown`、`not_run` は禁止 |
+
+**Deterministic / flaky 判定規則：**
+
+| 状態 | 判定 |
+|------|------|
+| flaky を retry 成功だけで pass にする | merge 不可 |
+| timestamp、random、local username、host、absolute path、ephemeral port が未正規化のまま artifact に残る | Phase 未完了 |
+| fixed sleep だけで成立する race / timeout / heartbeat / replication / HA test | review failure |
+| timeout 上限、待機条件、failure artifact が未定義 | Phase 未完了 |
+| list / map / JSON field / Prometheus line / manifest entry の順序が未定義 | Phase 未完了 |
+| flaky 原因、失敗ログ、deterministic 化修正、再実行 artifact が揃っていない | merge 不可 |
+| `P{phase}-PRECISION-CLOSURE` に `flaky_count = 0`、`nondeterministic_artifact_count = 0`、`determinism_result = pass` がない | Phase 未完了 |
 
 ### 9.12 PR レビュー観点
 
@@ -13201,7 +13253,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.145` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.146` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
