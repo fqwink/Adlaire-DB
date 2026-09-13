@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.167
+**バージョン：** V.168
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.167` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.168` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -2534,6 +2534,41 @@ failure closure は「失敗を隠す」ことではなく、失敗の原因、�
 | TODO/FIXME/stub/unimplemented/panic/unwrap production path | production path から除去、または対象 Phase 前 stub 契約へ移動 | 完了 PR に残存 |
 | regression failure | 失敗原因、修正、対象 Phase 以前の regression 再実行 | regression 範囲縮小、skip、後続対応 |
 
+**canonical failure remediation and re-review audit：**
+
+Phase 実装中または review 中に失敗を検出した場合、実装者は失敗を以下の分類へ必ず割り当て、分類ごとの順序で修正、再検証、artifact 再生成、review handoff 更新を行う。分類できない失敗は `unknown` として処理せず、先に仕様本文へ failure class を追加する。
+
+| failure class | 標準修正順序 |
+|---------------|--------------|
+| `spec_conflict` | §9.1.12 に従い仕様矛盾を解消し、Contract ID、manifest、oracle、scenario、artifact path を同時更新する |
+| `contract_mapping_gap` | Contract ID / Task ID / Scenario ID / source section の未接続を先に閉じ、test と artifact を再割当する |
+| `artifact_missing` | artifact を正規化済みで生成し、manifest、Done receipt、review handoff、hash を同時更新する |
+| `hash_mismatch` | artifact 正規化 rule、producer command、expected hash を再生成し、古い hash を残さない |
+| `secret_leak` | 漏洩 artifact を除去し、redaction rule を修正し、secret scan を全 artifact に再実行する |
+| `command_failed` | failed command の root cause を修正し、同一 command を exit code 0 で再実行する |
+| `flaky_or_timeout` | sleep / timing / network 依存を deterministic wait、fixture、timeout 契約へ置換し、失敗ログと pass artifact を両方残す |
+| `compatibility_diff` | Turso Cloud / libSQL SDK / previous Phase との差分を仕様化または実装修正し、compat diff と SDK transcript を再生成する |
+| `regression_failure` | 対象 Phase 以前の regression を修正後に全件再実行し、範囲縮小、skip、後続対応を禁止する |
+| `operator_observability_gap` | health、log、metric、operator action、release note、rollback evidence を補完し、operator delta を更新する |
+
+各 failure entry は以下の field を必ず持つ。
+
+| field | 必須値 |
+|-------|--------|
+| `failure_id` | `FAIL-P{phase}-{n}` 形式の一意 ID |
+| `failure_class` | 上記 failure class のいずれか |
+| `source_contract_id` | 失敗した Contract ID。複数ある場合は全件列挙 |
+| `failed_command` | 失敗を検出した command。artifact 欠落など command がない場合は検出手順 |
+| `failed_artifact_path` | 失敗ログ、差分、欠落 path、secret scan result の path |
+| `root_cause` | 原因。`unknown`、`環境差分`、`一時的` だけでは不可 |
+| `fix_scope` | 修正対象。仕様、実装、test、artifact、manifest、review handoff、operator delta のどれを更新したか |
+| `required_reverification` | 再実行する command、対象 Contract ID、期待 exit code、必要 artifact |
+| `regenerated_artifacts` | 再生成した artifact path と expected hash |
+| `reviewer_command` | reviewer が失敗再現不可または修正後 pass を確認できる command |
+| `closure_result` | `pass` のみ完了扱い。`partial`、`not_run`、`manual_only`、`accepted_risk` は不可 |
+
+`failure_remediation_result = pass` にできるのは、未分類 failure 0 件、`root_cause` 未記載 0 件、再実行 command 未記載 0 件、artifact 再生成漏れ 0 件、regression 再実行漏れ 0 件、secret scan 再実行漏れ 0 件、`closure_result != pass` 0 件の場合だけである。失敗を修正した場合は、対応する readiness packet、Phase 受入 manifest、Done receipt、artifact manifest、review handoff、operator delta を同じ PR で更新しなければならない。
+
 **禁止語句と扱い：**
 
 | PR / manifest / artifact に残る語句 | 判定 |
@@ -4058,11 +4093,11 @@ Phase implementation packet は、実装開始前に以下の canonical key を�
 | `task_ids` | 対象 Phase の atomic task ID 一覧。各 task は入力契約、禁止変更、完了条件、verification command に接続する |
 | `scenario_ids` | 対象 Phase の scenario ID 一覧。各 scenario は expected result、artifact path、oracle に接続する |
 | `artifact_paths` | test、snapshot、fixture、log、manifest、review handoff、secret scan の保存先一覧 |
-| `audit_results` | §9.17 の `phase_packet_result`、`acceptance_manifest_result`、`oracle_result`、`scenario_matrix_result`、`schema_registry_result`、`decision_precedence_result`、`coverage_closure_result`、`artifact_paths_result`、`review_handoff_result`、`operator_delta_result`、`precision_closure_index_result`、`readiness_audit_result` を全て含む |
+| `audit_results` | §9.17 の `phase_packet_result`、`acceptance_manifest_result`、`oracle_result`、`scenario_matrix_result`、`schema_registry_result`、`decision_precedence_result`、`coverage_closure_result`、`artifact_paths_result`、`failure_remediation_result`、`review_handoff_result`、`operator_delta_result`、`precision_closure_index_result`、`readiness_audit_result` を全て含む |
 | `blocking_items` | 実装開始前に残っている blocker 一覧。実装開始可能な packet では空配列または `none` |
 | `ready_to_implement` | 実装開始を許可する最終 boolean。`true` 以外は実装開始禁止 |
 
-`ready_to_implement = true` にできるのは、`audit_results` の 12 field がすべて `pass`、`blocking_items` が 0 件、根拠なし `N/A` が 0 件、未接続の Contract ID / Task ID / Scenario ID / artifact path が 0 件、かつ `scope_in` / `scope_out` が仕様本文と一致する場合だけである。`ready_to_implement` が未記載、`false`、文字列、または pass 根拠なしの場合、その Phase は実装開始禁止とする。
+`ready_to_implement = true` にできるのは、`audit_results` の 13 field がすべて `pass`、`blocking_items` が 0 件、根拠なし `N/A` が 0 件、未接続の Contract ID / Task ID / Scenario ID / artifact path が 0 件、かつ `scope_in` / `scope_out` が仕様本文と一致する場合だけである。`ready_to_implement` が未記載、`false`、文字列、または pass 根拠なしの場合、その Phase は実装開始禁止とする。
 
 canonical readiness packet と §9.17 の readiness audit は同じ入口 gate を表す。どちらか一方だけを更新してはならない。Phase packet、受入 manifest、Done receipt、artifact manifest、review handoff のいずれかで `phase`、`spec_version`、`contract_ids`、`task_ids`、`scenario_ids`、`artifact_paths`、`audit_results` が異なる場合は、仕様修正 PR に戻す。
 
@@ -8094,10 +8129,11 @@ Phase 1〜19 の実装開始前に、実装者は対象 Phase の readiness pack
 | `decision_precedence_result` | §9.1.43 に従い、複数条件同時成立時の status、error code、client action、commit/rollback 順序が固定されている | 実装開始禁止 |
 | `coverage_closure_result` | §9.1.44 に従い、Contract ID、schema ID、scenario ID、decision ID が test、artifact、oracle、regression、N/A 理由へ接続され、coverage gap が 0 件 | 実装開始禁止 |
 | `artifact_paths_result` | §9.1.11 に従い、readiness packet、受入 manifest、Done receipt、artifact manifest、review handoff の artifact path、hash、secret scan、reviewer command が一致している | 実装開始禁止 |
+| `failure_remediation_result` | §9.1.14 に従い、検出済み failure が分類、root cause、修正範囲、再検証 command、再生成 artifact、reviewer command、closure result で閉じている | 実装開始禁止 |
 | `review_handoff_result` | §9.1.51 に従い、第三者が clean checkout から同じ command と artifact で Done / Not Done を判定できる | Phase 完了扱い禁止 |
 | `operator_delta_result` | §9.1.52 に従い、operator から見える before/after、migration/config、rollback、health/log/metric、release note、evidence が固定されている | Phase 完了扱い禁止 |
 | `precision_closure_index_result` | §9.11.1〜§9.11.13 と §9.17 の precision closure 系 field が Phase packet、Done receipt、artifact manifest、reviewer reproduction で相互参照できる | 実装開始禁止 |
-| `readiness_audit_result` | 上記 11 field がすべて `pass`。`missing`、`partial`、`manual_only`、`not_run`、`N/A` 根拠なし、または値不一致が 0 件 | `pass` 以外は実装開始禁止 |
+| `readiness_audit_result` | 上記 12 field がすべて `pass`。`missing`、`partial`、`manual_only`、`not_run`、`N/A` 根拠なし、または値不一致が 0 件 | `pass` 以外は実装開始禁止 |
 
 `readiness_audit_result` は Phase 実装開始の入口 gate であり、実装後の Done receipt で初めて埋めてはならない。実装中に scope、API、schema、error、persistence、auth、compatibility、artifact path、review command、operator behavior のいずれかが変わる場合は、同じ PR で readiness packet、受入 manifest、oracle、scenario matrix、schema registry、precision closure を更新し、再度 `readiness_audit_result = pass` にする。更新しないまま code、test、snapshot、artifact だけを変更した場合は merge 不可とする。
 
@@ -8113,6 +8149,7 @@ Phase 1〜19 の実装開始前に、実装者は対象 Phase の readiness pack
 | decision precedence 未定義のまま複数拒否条件、commit/rollback、auth/quota、resource state を実装する | merge 不可 |
 | coverage closure に未接続の Contract ID、schema ID、scenario ID、decision ID がある | Phase 未完了 |
 | artifact path、hash、secret scan、reviewer command が readiness packet、受入 manifest、Done receipt、artifact manifest、review handoff の間で一致しない | Phase 未完了 |
+| failure が未分類、root cause 未記載、再検証 command 未記載、artifact / regression / secret scan 再実行漏れのまま残る | Phase 未完了 |
 | review handoff が local only、口頭説明、PR description の自由文、または実装者環境だけに依存する | Phase 未完了 |
 | operator delta が health、log、metric、rollback、migration/config、release note のいずれかを欠く | Phase 未完了 |
 | precision closure index と readiness packet の Contract ID、artifact path、review command が一致しない | Phase 未完了 |
@@ -13798,7 +13835,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.167` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.168` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
