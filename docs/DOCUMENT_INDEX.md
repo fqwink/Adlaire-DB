@@ -2,7 +2,7 @@
 
 ## Status
 
-- `docs/PROJECT_CHARTER.md`, `docs/spec/auth.md`, `docs/spec/api.md`, `docs/spec/testing.md`, and `docs/spec/phase-*.md` are the specification source-of-truth set.
+- `docs/PROJECT_CHARTER.md`, `docs/spec/auth.md`, `docs/spec/api.md`, `docs/spec/internalization.md`, `docs/spec/testing.md`, and `docs/spec/phase-*.md` are the specification source-of-truth set.
 - `docs/PROJECT_CHARTER.md` is the project charter and also serves as the specification entry point.
 - `docs/POLICY.md` is the policy document and is not a specification source of truth.
 - Phase 1 through Phase 19 are split under `docs/spec/`.
@@ -23,6 +23,7 @@ accident.
 | `docs/PROJECT_CHARTER.md` | Project charter and specification entry point | Source of truth |
 | `docs/spec/auth.md` | Authentication and authorization specification | Source of truth |
 | `docs/spec/api.md` | API contract specification | Source of truth |
+| `docs/spec/internalization.md` | Internalization implementation specification | Source of truth |
 | `docs/spec/testing.md` | Testing specification | Source of truth |
 | `docs/spec/phase-01.md` - `docs/spec/phase-19.md` | Phase-specific implementation contracts | Source of truth |
 | `docs/POLICY.md` | Decision and operation policies before specification conversion | Supporting document |
@@ -45,7 +46,7 @@ accident.
 | Runtime, auth, and API responsibilities | `docs/PROJECT_CHARTER.md` section 4, `docs/spec/auth.md`, and `docs/spec/api.md` | Keep runtime contracts linked |
 | Data protection and operations responsibilities | `docs/PROJECT_CHARTER.md` sections 7-8 | Preserve operational safety |
 | Implementation and phase responsibilities | `docs/PROJECT_CHARTER.md` sections 9-10 and `docs/spec/phase-*.md` | Phase detail split is active |
-| Internalization and test responsibilities | `docs/PROJECT_CHARTER.md` section 11 and `docs/spec/testing.md` | Keep future testing and evidence gates clear |
+| Internalization and test responsibilities | `docs/spec/internalization.md` and `docs/spec/testing.md` | Keep internal replacement contracts and evidence gates clear |
 
 ## Non-Goals
 
