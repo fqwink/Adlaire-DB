@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.74
+**バージョン：** 0.75
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -2390,6 +2390,52 @@ verification command は deterministic に実行できなければならない�
 
 verification command の追加・削除・引数変更は、manifest、PR description、CI output artifact、該当 Contract ID の追跡表を同時に更新しなければならない。検証 command を変更しただけで仕様本文を更新しない PR は Phase 完了不可である。
 
+#### 9.1.14 Failure closure 固定契約
+
+各 Phase 実装 PR は、検証中に発見した失敗、flaky、未検証、artifact 欠落、secret 混入、仕様矛盾、TODO/FIXME production path を同一 PR 内で解消しなければならない。後続 PR、別 issue、運用メモ、口頭説明へ持ち越した時点で、その Phase は未完了である。
+
+failure closure は「失敗を隠す」ことではなく、失敗の原因、修正、再検証、証跡を同じ追跡単位で閉じることを意味する。修正後に pass した結果だけでなく、発見した失敗の分類と再発防止の evidence を残す。
+
+**closure 必須対象：**
+
+| 対象 | 必須 closure | 未完了判定 |
+|------|--------------|------------|
+| verification command failure | 原因、修正 commit、再実行 command、exit code 0 の artifact | 非 0 exit code、未再実行、artifact 欠落 |
+| flaky test | flaky 原因、deterministic 化修正、失敗ログ、再実行 pass artifact | 再実行成功だけ、失敗ログなし、原因未特定 |
+| unverified contract | Contract ID、追加 test、evidence path、manifest 更新 | `N/A` で隠す、手動確認のみ |
+| missing artifact | 正規化済み artifact 生成、manifest / PR description path 更新 | PR description の説明のみ |
+| secret leakage | 漏洩 artifact 削除、redaction 修正、secret scan 再実行 | secret を含む artifact が残る |
+| spec conflict | §9.1.12 に従う同時仕様修正、test / artifact 更新 | 上位仕様だけ修正、下位矛盾放置 |
+| TODO/FIXME/stub/unimplemented/panic/unwrap production path | production path から除去、または対象 Phase 前 stub 契約へ移動 | 完了 PR に残存 |
+| regression failure | 失敗原因、修正、対象 Phase 以前の regression 再実行 | regression 範囲縮小、skip、後続対応 |
+
+**禁止語句と扱い：**
+
+| PR / manifest / artifact に残る語句 | 判定 |
+|-------------------------------------|------|
+| `known issue` / `known bug` | merge 不可 |
+| `later` / `follow-up` / `next PR` | Phase 未完了 |
+| `temporary` / `workaround` | 仕様本文に期限・owner・解消 Phase がない限り Phase 未完了 |
+| `flaky but passed` | merge 不可 |
+| `manual checked` | §9.1.10 の Manual exception がない限り Phase 未完了 |
+| `TODO` / `FIXME` / `unimplemented` / `panic!` / unchecked `unwrap` in production path | Phase 未完了 |
+| `後で修正` / `後で検証` / `一旦 merge` | merge 不可 |
+
+**closure artifact 必須項目：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `Failure ID` | `FAIL-P{phase}-{number}` の形式 |
+| `Related Contract ID` | 失敗に対応する Contract ID。横断失敗は `ZB-*` も併記 |
+| `Failure class` | command failure / flaky / unverified / artifact / secret / spec conflict / production TODO / regression |
+| `Root cause` | 実装、仕様、test、fixture、環境差分のいずれか |
+| `Fix summary` | 同一 PR 内での修正内容 |
+| `Re-run command` | §9.1.13 の command と完全一致 |
+| `Evidence path` | pass artifact、失敗ログ、修正後 snapshot / fixture |
+| `Closure status` | `closed` のみ許可。`open`、`deferred`、`accepted risk` は Phase 未完了 |
+
+failure closure の追跡表は PR description または `docs/phase-evidence/phase-{phase}.md` に残す。closure artifact が存在しない失敗は、修正済みであっても Phase 完了根拠として扱わない。失敗を見つけた後に仕様変更で対象外へ移す場合も、§9.1.12 に従って仕様本文、manifest、Contract ID、test、artifact を同時更新しなければならない。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -3019,6 +3065,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Evidence artifact | §9.1.11 の保存先、命名、正規化、secret scan が固定されている | 証跡生成まで完了扱いにしない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | Verification command | §9.1.13 の command 分類、順序、exit code、artifact が固定されている | 検証完了扱いにしない |
+| Failure closure | §9.1.14 の失敗、flaky、未検証、artifact 欠落、secret 混入が同一 PR で閉じている | merge 不可 |
 | API 契約 | method/path/auth/request/success/error が §9.5 または各 API 節に明記されている | route を追加しない |
 | Error code | 失敗条件ごとの `code` が §7.3 / §9.7 に存在する | 先に error code を追加する |
 | 永続化 | ファイル名、schema、atomic update、rollback、破損時挙動が §9.6 に明記されている | 書き込み処理を実装しない |
