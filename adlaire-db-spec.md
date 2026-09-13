@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.160
+**バージョン：** V.161
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.160` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.161` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -7145,6 +7145,22 @@ reconciliation field が `pass` 以外になった場合、実装者は以下の
 
 `reproduction_match_result` の失敗を `environment_gap` のまま pass にしてはならない。環境差分が原因の場合は、`environment_profile`、再現 command、toolchain、Docker / CI / release-check 差分、artifact path を仕様または Phase packet に反映し、再実行で pass するまで Phase 未完了とする。
 
+**precision closure remediation order：**
+
+複数の reconciliation failure が同時に出た場合は、以下の順序で修正する。先順位の失敗が残っている間は、後順位 field を pass にしてはならない。
+
+| order | field | 理由 |
+|-------|-------|------|
+| 1 | `freeze_match_result` | 実装開始前の固定契約が正しくなければ、後続 artifact / review の意味が確定しない |
+| 2 | `canonical_format_result` | Done receipt の構造が固定されなければ、manifest / reproduction を機械照合できない |
+| 3 | `manifest_match_result` | artifact の path、hash、secret scan が確定しなければ、reproduction の期待値が決まらない |
+| 4 | `reproduction_match_result` | reviewer が再現できなければ、review algorithm の pass 根拠にならない |
+| 5 | `review_algorithm_result` | step 順序と failure result が確定しなければ、open count / final を評価できない |
+| 6 | `open_count_match_result` | open item が残る限り final pass は許可しない |
+| 7 | `final_reconciliation_result` | 上記 6 field が pass になった後だけ評価する |
+
+manifest / reproduction を先に直して `freeze_match_result` の失敗を隠すこと、open count が残っている状態で `final_reconciliation_result` を pass にすること、複数失敗を 1 つの `environment_gap` にまとめることを禁止する。
+
 **命名不一致時の判定：**
 
 | 状態 | 判定 |
@@ -7187,6 +7203,10 @@ reconciliation field が `pass` 以外になった場合、実装者は以下の
 | failed field を残したまま `final_reconciliation_result` だけを pass にする | merge 不可 |
 | artifact を差し替えて manifest、content hash、reviewer reproduction を更新しない | merge 不可 |
 | reproduction 失敗を `environment_gap` のまま pass 扱いする | merge 不可 |
+| remediation order を飛ばす、または先順位 failure を残したまま後順位 field を pass にする | merge 不可 |
+| manifest / reproduction を先に直して `freeze_match_result` の失敗を隠す | merge 不可 |
+| open count が残っている状態で `final_reconciliation_result` を pass にする | merge 不可 |
+| 複数 failure を 1 つの `environment_gap` にまとめる | merge 不可 |
 | `未解決判断 0 件` だけで `precision_closure_result` を pass とする | merge 不可 |
 | Contract ID に timestamp、random ID、local username、host name、absolute path 由来文字列が含まれる | merge 不可 |
 | artifact が生成されていないのに Done receipt で pass とする | merge 不可 |
@@ -13646,7 +13666,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.160` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.161` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
