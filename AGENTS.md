@@ -30,13 +30,15 @@
 
 ## PR / マージ運用
 
-作業完了時は、原則として作業ブランチを push し、PR を作成すること。
+作業完了時は、main へ直接 push せず、必ず作業ブランチを push し、PR を作成すること。
 
-- Codex は PR 作成までを担当する
+- Codex は、作業ブランチ作成、変更、commit、push、PR 作成までを担当する
 - main へのマージはユーザーが行う
-- ユーザーが明示しない限り、Codex は main へ直接 push しない
+- Codex は main へ直接 push しない
 - ユーザーが明示しない限り、Codex は PR を merge しない
 - PR 作成後は、PR 番号・タイトル・URL を報告し、マージ判断をユーザーに委ねる
+- GitHub 側では、PR merge 後の head branch 自動削除設定を有効化する
+- PR merge 後、Codex は必要に応じて `git fetch --all --prune` を行い、ローカルのマージ済み作業ブランチを閉じる
 
 ## PR 報告形式
 
