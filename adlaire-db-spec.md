@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.117
+**バージョン：** V.118
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.117` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.118` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -5586,6 +5586,86 @@ Phase 2 は data-dir、単一 default DB、metadata 初期値、process lock、l
 | `coverage_closure_result` | tree、metadata、lock、DB open、PRAGMA、integrity、restart、no HTTP exposure の coverage gap 0 件 |
 | `review_handoff_result` | 第三者が init/lock/open/restart/no HTTP を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 2 で data-dir と default DB が作成されるが外部 HTTP API はまだ使えない release note |
+
+**Phase 3 完全実装精度固定契約：**
+
+Phase 3 は libSQL client SDK が HTTP 経由で最小 SQL 実行できる hrana-http v2 surface を完成させる Phase である。Phase 3 で公開してよい外部 API は `GET /v2/health` と `POST /v2/pipeline` のみであり、JWT、WebSocket、管理 API、path-based DB routing は実装してはならない。Phase 3 実装者は下表を Phase packet、atomic task ledger、scenario matrix、Done receipt、review handoff、operator behavior delta に転記してから実装する。
+
+| 項目 | Phase 3 固定仕様 |
+|------|------------------|
+| 実装範囲 | hyper HTTP server、route、`GET /v2/health`、`POST /v2/pipeline`、hrana-http v2 JSON、default DB SQL 実行 |
+| HTTP framework | hyper ベースの自前 routing。axum、actix-web、rocket 等の web framework 導入は禁止 |
+| health response | `GET /v2/health` は 200 JSON `{"status":"ok"}` 固定。Phase 12 までは role/lag を追加しない |
+| pipeline route | `POST /v2/pipeline` のみ。`/{db-name}/v2/pipeline` は Phase 6 まで成功応答禁止 |
+| auth | Phase 3 は認証無効 mode のみ。JWT secret が設定されている場合は Phase 4 完了前のため起動拒否または auth unavailable とする |
+| default DB | すべての SQL は Phase 2 の `default/data.db` へ実行する |
+| request body | top-level JSON object 必須。malformed JSON、array、scalar、null、必須 field 欠落は HTTP 400 `INVALID_REQUEST` |
+| baton/base_url | request の `baton` は受け取るが session は保持しない。response の `baton` / `base_url` は常に `null` |
+| request types | Phase 3 は `execute`、`sequence`、`close` を対象。unknown type は HTTP 400 または当該 item error とし、成功扱いしない |
+| `execute` | positional `args` を bind し、`want_rows` に従って rows / rows_affected / last_insert_rowid を返す |
+| `named_args` | 空配列または省略のみ許可。非空は当該 item を `results[].type="error"` とする |
+| SQL error | SQL 実行 error / constraint error は HTTP 200 のまま `results[i].type="error"` として返す |
+| close behavior | `close` 後の request は処理せず、追加 result を返さない |
+| persistence | write SQL の commit が完了してから success response を返す。再起動後に書き込みが残ることを証跡化する |
+
+**Phase 3 atomic task ledger：**
+
+| Task ID | Goal | Input contracts | Change targets | Forbidden changes | Completion condition | Verification |
+|---------|------|-----------------|----------------|-------------------|----------------------|--------------|
+| `TASK-P3-1` | hyper HTTP server と route を追加する | §9.2 Phase 3、§9.4 Phase 3 | `http/mod.rs`、`main.rs` | 管理 API、WebSocket、JWT | `/v2/health` と `/v2/pipeline` だけ route される | route snapshot |
+| `TASK-P3-2` | health endpoint を固定する | §9.5、§9.1.42 | `http/health.rs` | role/lag 追加 | 200 `{"status":"ok"}` | health snapshot |
+| `TASK-P3-3` | hrana request schema を定義する | §6.2、§9.1.20、§9.1.42 | `hrana/*` | unknown success、SDK 非互換 shape | malformed / missing field が規定 error | schema tests |
+| `TASK-P3-4` | execute request を実装する | §9.1.28、§9.1.35 | `http/pipeline.rs`、`hrana/*` | named_args 成功、HTTP 500 SQL error | SELECT/INSERT が hrana result になる | pipeline success snapshot |
+| `TASK-P3-5` | sequence request を実装する | §9.1.28 | `http/pipeline.rs` | 自前 SQL split | batch 実行は libSQL に委譲し result 順序を固定 | sequence snapshot |
+| `TASK-P3-6` | close behavior を固定する | §9.1.28、§9.1.43 | `http/pipeline.rs` | close 後 request 実行 | close 後の item が処理されない | close fixture |
+| `TASK-P3-7` | SQL / JSON error surface を固定する | §7.3、§9.1.22 | `error.rs`、`http/pipeline.rs` | SQL error を HTTP 400/500 化 | malformed JSON は 400、SQL error は 200 + item error | error snapshots |
+| `TASK-P3-8` | restart persistence / SDK smoke を固定する | §9.1.35、§9.1.47 | tests / artifact | in-memory only 成功 | INSERT 後再起動 SELECT、SDK smoke pass | SDK transcript |
+| `TASK-P3-9` | Phase 3 Done receipt / handoff / operator delta | §9.1.33、§9.1.51、§9.1.52 | docs / PR artifact | PR description だけの根拠 | 第三者が health/pipeline/error/restart を再現できる | handoff checklist |
+
+**Phase 3 scenario / oracle 固定表：**
+
+| Scenario ID | 入力 | 期待結果 | Evidence |
+|-------------|------|----------|----------|
+| `SCN-P3-1` | `GET /v2/health` | 200 JSON `{"status":"ok"}` | health snapshot |
+| `SCN-P3-2` | `POST /v2/pipeline` execute `SELECT 1` | HTTP 200、`results[0].type="ok"`、hrana value 形式 | select snapshot |
+| `SCN-P3-3` | CREATE / INSERT / SELECT pipeline | HTTP 200、write 後 read 可能 | CRUD transcript |
+| `SCN-P3-4` | malformed JSON body | HTTP 400 `INVALID_REQUEST` | malformed snapshot |
+| `SCN-P3-5` | top-level array/scalar/null | HTTP 400 `INVALID_REQUEST` | body shape snapshot |
+| `SCN-P3-6` | SQL syntax error | HTTP 200、当該 item が `type="error"` | SQL error snapshot |
+| `SCN-P3-7` | constraint error | HTTP 200、当該 item が `type="error"` | constraint snapshot |
+| `SCN-P3-8` | `named_args` 非空 | HTTP 200、当該 item が `type="error"` | named args snapshot |
+| `SCN-P3-9` | `sequence` request | HTTP 200、sequence 全体の success/error が固定 | sequence snapshot |
+| `SCN-P3-10` | `close` 後に追加 request | close 後 request は処理されず追加 result なし | close snapshot |
+| `SCN-P3-11` | `/{db-name}/v2/pipeline` | Phase 3 では成功応答なし | no multi DB route evidence |
+| `SCN-P3-12` | INSERT 後 restart して SELECT | 書き込みが残る | restart persistence transcript |
+
+**Phase 3 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| JWT 認証、JWT 検証、token 発行を実装する | merge 不可。JWT は Phase 4 |
+| WebSocket / `/v3/baton` を実装する | merge 不可。WebSocket は Phase 9 |
+| `/{db-name}/v2/pipeline` を成功応答にする | merge 不可。multi DB routing は Phase 6 |
+| 管理 API route を追加する | merge 不可。管理 API は Phase 7 |
+| SQL error を HTTP 400 / 500 に変換する | merge 不可 |
+| malformed JSON を HTTP 200 の hrana error にする | merge 不可 |
+| `named_args` 非空を成功扱いにする | merge 不可 |
+| unknown request type を成功扱いにする | merge 不可 |
+| `baton` session を保持する | Phase 未完了。session は Phase 9 |
+| SDK transcript / wire snapshot なしで完了扱いにする | Phase 未完了 |
+
+**Phase 3 Done receipt 最低 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `implemented_scope` | hyper HTTP server、`GET /v2/health`、`POST /v2/pipeline`、hrana execute/sequence/close、default DB SQL |
+| `excluded_scope` | JWT、WebSocket、管理 API、multi DB route、ATTACH、replication、backup |
+| `atomic_task_result` | `TASK-P3-1`〜`TASK-P3-9` がすべて pass、open task 0 件 |
+| `scenario_matrix_result` | `SCN-P3-1`〜`SCN-P3-12` の pass/fail、artifact path |
+| `compatibility_baseline_result` | hrana-http v2 / libSQL SDK transcript、Turso 差分分類 |
+| `coverage_closure_result` | health、pipeline success/error、malformed JSON、SQL error、close、restart、SDK smoke の gap 0 件 |
+| `review_handoff_result` | 第三者が health/pipeline/error/restart/SDK smoke を再現できる command と artifact |
+| `operator_behavior_delta_result` | Phase 3 で HTTP API `/v2/health` と `/v2/pipeline` が初公開され、auth はまだ無効である release note |
 
 **Phase 1〜5 の境界決定：**
 
