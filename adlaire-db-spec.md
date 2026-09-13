@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.86
+**バージョン：** V.87
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.86` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.87` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.86` の次は `V.87` とし、以後 `V.88`、`V.89` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.87` の次は `V.88` とし、以後 `V.89`、`V.90` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -3329,6 +3329,102 @@ idempotency key を導入する場合は、header 名、body hash 範囲、reten
 
 long-running operation に関係する仕様変更は、§9.1.16、§9.1.21、§9.1.22、§9.5、§9.6、§9.7、該当 Phase 節、manifest の Endpoint / Persistence / Error / Regression map、job state fixture、shutdown fixture、retry matrix、recovery log を同時更新する。正常系だけが通っても、timeout、cancel、shutdown、restart recovery、retry、idempotency が固定されていない場合は Phase 完了扱いにしない。
 
+#### 9.1.26 Resource identity / naming / path normalization 固定契約
+
+各 Phase 実装 PR は、追加・変更する resource の external slug、internal id、filesystem name、display name、metadata key、URL path parameter、JWT scope value、quota key の関係を実装開始前に固定しなければならない。名前の validation、正規化、照合、path 変換が曖昧な resource は API、metadata、filesystem に公開してはならない。
+
+**identity 種別の分離：**
+
+| 種別 | 用途 | 変換可否 |
+|------|------|----------|
+| external slug | API path、query、Turso Platform 互換 field、SDK が見る名前 | validation 後に metadata lookup。勝手に内部 id へ表示変更しない |
+| internal id | metadata 内部参照、stable primary key、audit / job reference | API path として直接受け付ける場合は専用 endpoint に明記 |
+| filesystem name | data-dir 配下の directory / file 名 | external slug から直接 join せず、validated mapping を通す |
+| display name | 将来 UI / description 用の任意文字列 | identity として使わない。path、scope、metadata key に使わない |
+| legacy name | Phase 1〜7 で許可済みの既存 DB 名 | migration で保持し、新規作成規則とは分離 |
+
+external slug、internal id、filesystem name を同一文字列として扱ってよいのは、該当 resource 節で validation、reserved word、collision、migration、path mapping が明記されている場合だけとする。
+
+**resource 別 validation 既定表：**
+
+| Resource | 形式 | 大小文字 | 予約 / 禁止 |
+|----------|------|----------|-------------|
+| DB slug Phase 8+ | `^[a-z0-9-]{1,64}$` | lowercase only | `admin`、`meta`、`.`、`..`、`___`、`/`、NUL |
+| legacy DB name | 既存 metadata に存在する値だけ許可 | 既存値を保持 | 新規作成不可。rename 自動実行禁止 |
+| branch name | `^[a-z0-9-]{1,64}$` | lowercase only | source DB と同名、`___`、`admin`、`meta`、`.`、`..` |
+| internal branch DB name | `{source}___{branch}` | source / branch の規則に従う | external DB create では常に拒否 |
+| organization slug | `^[a-z0-9-]{1,64}$` | lowercase only | `admin`、`default` の扱いは Phase 節で固定 |
+| group slug | `^[a-z0-9-]{1,64}$` | lowercase only | organization 内 unique。global unique にしない |
+| location code | `^[a-z0-9-]{1,32}$` | lowercase only | 空文字、unknown location |
+| token id | `tok_[A-Za-z0-9_-]{16,80}` | case-sensitive | raw token、JWT、secret を id として保存しない |
+| job id | `job_[A-Za-z0-9_-]{16,80}` | case-sensitive | request id、path、secret を含めない |
+| extension name | `^[a-z0-9][a-z0-9_-]{0,63}$` | lowercase only | path separator、dot-prefix、SQL からの直接指定 |
+| HA node id | `^[a-z0-9-]{1,64}$` | lowercase only | `standalone` は default 値専用。multi-node identity と混同しない |
+
+上表と既存 Phase 詳細が衝突する場合は、本節、§9.5、§9.6、該当 Phase 節、migration 契約を同じ PR で更新する。互換維持のため緩和する場合は、緩和対象、期限、legacy fixture、Turso / SDK 影響を明記する。
+
+**URL / Unicode / case normalization：**
+
+| 対象 | 固定仕様 |
+|------|----------|
+| URL path parameter | percent decode 後に UTF-8 として validation。decode 不能は `INVALID_REQUEST` |
+| Unicode | identity field は ASCII subset を原則とする。Unicode normalization に依存する identity は禁止 |
+| case | lowercase only resource は入力が大文字を含む場合 `INVALID_*`。自動 lower-case 変換は禁止 |
+| trailing slash | endpoint 節に明記がない限り、path canonicalization で同一扱いにしない |
+| duplicate separator | `//`、`___`、`..`、`.` は identity 内で禁止 |
+| whitespace | 前後空白、tab、newline、zero-width space は禁止。trim して受理しない |
+| percent encoded slash | `%2F` は decode 後 `/` として拒否。path segment 分割前後で bypass させない |
+
+**metadata / filesystem mapping：**
+
+| 対象 | 必須仕様 |
+|------|----------|
+| metadata key | external slug ではなく、該当 resource の stable key を明記。legacy lookup がある場合は別 map を持つ |
+| filesystem join | validated filesystem name だけを data-dir 配下へ join し、canonicalize 後に data-dir 配下であることを確認 |
+| symlink | data-dir 内の resource directory / file に symlink を使う場合は Phase 節で明記。未定義なら拒否 |
+| collision | case-insensitive filesystem でも衝突しないことを validation / fixture で確認 |
+| rename | DB/org/group/branch/token/job/extension の rename は仕様化されるまで禁止。表示名変更と identity rename を混同しない |
+| delete | metadata 削除と filesystem 削除 / trash / cleanup の順序を §9.1.21 と一致させる |
+| backup/restore | backup file 内の DB 名や path を trust しない。restore target identity は request path を正とする |
+
+filesystem path は API response、log、artifact では logical resource 名または `<normalized-path>` に正規化する。absolute path、local username、temp directory、trash directory を外部へ返してはならない。
+
+**lookup precedence：**
+
+| 状態 | 必須挙動 |
+|------|----------|
+| exact current slug が存在する | current resource を返す |
+| exact legacy name が存在する | legacy resource として返し、response に legacy marker が必要か Phase 節で固定 |
+| current slug と legacy name が衝突する | 起動失敗または migration failure。先勝ち/後勝ち禁止 |
+| internal id と external slug の両方を受け付ける endpoint | 優先順位と ambiguity error を endpoint 節に明記 |
+| branch internal DB name と通常 DB slug が衝突する | 通常 DB create を拒否。既存衝突は起動失敗 |
+| org/group scoped lookup | organization slug → group slug → DB slug の順で scope を解決し、存在漏洩を §9.1.18 に従い抑制 |
+
+**必須 evidence：**
+
+| Evidence | 必須内容 |
+|----------|----------|
+| name validation matrix | valid、uppercase、unicode、空、reserved、separator、長さ超過、percent encoded slash |
+| path traversal fixture | `..`、`%2F`、symlink、absolute path、case collision、data-dir escape |
+| legacy name fixture | Phase 1〜7 DB 名、legacy marker、new create rejection、lookup compatibility |
+| metadata/path consistency snapshot | metadata key、filesystem path、canonical path、logical resource の対応 |
+| scope lookup fixture | org/group/db、token scope、quota key の lookup precedence |
+| redaction snapshot | path、local username、token id/raw token、job id が適切に秘匿 / 正規化されること |
+
+**禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| URL decode 前の文字列だけで validation する | merge 不可 |
+| 大文字を自動 lowercase して別 resource として受理する | merge 不可 |
+| external slug を未検証のまま filesystem path に join する | merge 不可 |
+| legacy name を新規作成でも許可する | review failure。ただし仕様本文に例外がある場合のみ可 |
+| internal id、external slug、display name を同じ field として混用する | Phase 未完了 |
+| filesystem case collision の test がない | Phase 未完了 |
+| resource not found の前に scope 外 resource の存在を漏らす | merge 不可 |
+
+resource identity に関係する仕様変更は、§6、§8、§9.1.18、§9.1.20、§9.1.21、§9.5、§9.6、§9.14、該当 Phase 節、manifest の Endpoint / Persistence / Security / Compatibility map、name validation matrix、path traversal fixture、legacy fixture、metadata/path consistency snapshot を同時更新する。正常系だけが通っても、decode、case、legacy、collision、path traversal、scope lookup が固定されていない場合は Phase 完了扱いにしない。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -3953,7 +4049,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 
 | 確認項目 | 必須状態 | 未定義時の扱い |
 |----------|----------|----------------|
-| Phase スコープ | 対象機能と対象外が §9.2 / §9.4 に明記されている | 仕様追記まで実装しない |
+| Phase スコープ | 対象機能と対象外が §9.2 / §9.4 に明記され、resource identity / naming / path boundary が §9.1.26 に従って固定されている | 仕様追記まで実装しない |
 | Phase 受入 manifest | §9.1.10 の必須 fields が実装開始前に固定されている | 実装 PR として扱わない |
 | Evidence artifact | §9.1.11 の保存先、命名、正規化、secret scan が固定されている | 証跡生成まで完了扱いにしない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
@@ -3963,7 +4059,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | 設定解決 / validation | §9.1.19 に従い、CLI/env/TOML/default/secret file の優先順位、不正値、対象 Phase 前挙動、秘匿が固定されている | config 実装を開始しない |
 | API 契約 | §9.1.20 に従い、method/path/auth/request/success/error/schema/validation/serialization が §9.5 または各 API 節に明記されている | route を追加しない |
 | Error code | §9.1.22 に従い、失敗条件ごとの `code`、status、wire surface、retry、client action、precedence が §7.3 / §9.7 に存在する | 先に error code と retry 契約を追加する |
-| 永続化 | §9.1.21 に従い、ファイル名、schema、atomic update、fsync、directory sync、rollback、破損時挙動、recovery evidence が §9.6 に明記されている | 書き込み処理を実装しない |
+| 永続化 | §9.1.21 / §9.1.26 に従い、ファイル名、schema、atomic update、fsync、directory sync、rollback、破損時挙動、path normalization、recovery evidence が §9.6 に明記されている | 書き込み処理を実装しない |
 | 認証/認可 | §9.1.18 に従い、必要 token、scope、ro/rw、org/group、quota、block policy、拒否条件 precedence が明記されている | success response を返す API を公開しない |
 | ログ/秘匿 | §9.1.17、§12、§9.14 に従い、出力 field、request id、audit 相当記録、秘匿対象、redaction evidence が明記されている | request/SQL/token をログに出す実装を入れない |
 | 並行性 / job lifecycle | §9.1.16 / §9.1.25 に従い、同時 request、resource lock、idempotency、shutdown、transaction、long-running operation の扱いが定義されている | 並行実行で状態を変更する処理を入れない |
