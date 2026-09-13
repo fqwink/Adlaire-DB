@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.140
+**バージョン：** V.141
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.140` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.141` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -2519,7 +2519,7 @@ failure closure は「失敗を隠す」ことではなく、失敗の原因、�
 
 | Field | 必須内容 |
 |-------|----------|
-| `Failure ID` | `FAIL-P{phase}-{number}` の形式 |
+| `Failure ID` | `FAIL-P{phase}-{surface}-{number}` の形式 |
 | `Related Contract ID` | 失敗に対応する Contract ID。横断失敗は `ZB-*` も併記 |
 | `Failure class` | command failure / flaky / unverified / artifact / secret / spec conflict / production TODO / regression |
 | `Root cause` | 実装、仕様、test、fixture、環境差分のいずれか |
@@ -7062,6 +7062,66 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 | ambiguity ID に selected decision、rejected options、decision basis、affected contracts、evidence が揃っていない | Phase 未完了 |
 | open ambiguity が 1 件以上ある状態で `precision_closure_result` を pass にする | merge 不可 |
 | ambiguity closure が PR description のみで仕様本文または phase evidence に存在しない | 仕様として扱わない |
+
+### 9.11.4 Phase 1〜19 failure / resume closure 最低表
+
+本節は Phase 実装中に失敗、flaky、未検証、artifact 欠落、blocked contract、途中中断が発生した場合の最低閉鎖条件を定義する。実装者は失敗を発見した時点で failure record を作成し、同一 PR 内で修正または仕様修正へ戻す。`P{phase}-PRECISION-CLOSURE` は open failure 0、open flaky 0、open unverified 0、missing artifact 0、blocked contract 0 を証明しなければならない。
+
+| Phase | failure / resume closure 最低対象 |
+|-------|-----------------------------------|
+| 1 | CLI parse failure、config precedence failure、stub token mismatch、unexpected persistence、help snapshot drift |
+| 2 | data-dir partial init、lock conflict、metadata parse failure、DB open failure、integrity_check failure、restart mismatch |
+| 3 | malformed JSON、hrana result mismatch、SQL error mapping、close behavior、restart persistence、SDK smoke failure |
+| 4 | secret resolution failure、JWT validation failure、permission classifier mismatch、token atomicity、revoke state、secret leak |
+| 5 | JSONL parse failure、request log field missing、SDK transcript failure、restart data loss、unsupported future route success、secret scan hit |
+| 6 | DB name validation miss、path route/default route mix、metadata/directory inconsistency、DB isolation failure、restart restore failure |
+| 7 | admin auth bypass、DB CRUD atomicity failure、token JWT leak、revoke delayed effect、DB scope mismatch、concurrency lost update |
+| 8 | metadata migration failure、legacy fallback failure、Turso snapshot drift、scope/quota precedence mismatch、Platform token leak |
+| 9 | WebSocket upgrade failure、hello ordering bug、stream state leak、transaction rollback failure、store_sql scope leak、SDK WS failure |
+| 10 | ATTACH parser false positive/negative、arbitrary path success、scope/block mismatch、metrics counter drift、WebSocket gauge leak |
+| 11 | primary port/config failure、replication auth bypass、frame_no/checksum mismatch、SSE ordering drift、snapshot inconsistency、heartbeat/status leak |
+| 12 | replica state corruption、resume frame mismatch、WAL gap/duplicate handling、checksum mismatch unresolved、redirect drift、primary down ambiguity |
+| 13 | manifest/file inconsistency、partial archive write、retention unsafe delete、corrupt/orphan file handling、disabled mode drift |
+| 14 | backup inconsistency、restore partial commit、rollback failure、PITR range/frame corruption、startup recovery marker ambiguity |
+| 15 | branch metadata/runtime mismatch、branch create/delete partial failure、source delete denial miss、seed compatibility drift、restart recovery failure |
+| 16 | extension path/symlink bypass、sha mismatch handling、load_failed recovery drift、SQL load bypass、absolute path leak |
+| 17 | metrics snapshot corruption、counter lost increment、flush race、Prometheus format drift、label secret leak、usage/quota source mismatch |
+| 18 | HA term regression、promote/demote commit failure, leader unknown drift、split-brain miss、restart primary write leak、partition ambiguity |
+| 19 | invalid flag fallback、shadow diff unresolved、active mode gate miss、rollback needs migration、performance threshold miss、SDK transcript drift |
+
+**failure record 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `failure_id` | `FAIL-P{phase}-{surface}-{number}` 形式の一意 ID |
+| `owner_contract` | 対応する Contract ID。横断失敗は複数可 |
+| `failure_class` | `command_failure`、`flaky`、`unverified`、`missing_artifact`、`secret_leak`、`spec_conflict`、`regression`、`blocked_contract` のいずれか |
+| `first_seen` | command、scenario ID、artifact path、observed result |
+| `root_cause` | 仕様不足、実装不一致、環境差分、oracle 不一致、互換差分、secret 混入など |
+| `resolution` | code fix、spec fix、oracle fix、environment fix、not_a_defect のいずれか。`not_a_defect` は仕様本文参照必須 |
+| `rerun_evidence` | 修正後の command、exit code、artifact path、secret scan、regression result |
+| `resume_point` | 再開する execution step、直前 successful command、再生成する artifact |
+| `status` | Phase Done 時は `closed` のみ。`open`、`deferred`、`known_issue`、`flaky_but_passed` は禁止 |
+
+**resume closure 固定規則：**
+
+| 状態 | 固定仕様 |
+|------|----------|
+| 中断後に再開する | Phase packet、manifest、Contract ID、Task ID、Scenario ID、artifact path、Done receipt を再確認する |
+| 再開時に仕様 version が進んでいる | 新 version に合わせて Phase packet / manifest / Contract ID / Done receipt を再固定する |
+| artifact を再生成する | 旧 artifact を参照した Done receipt を更新し、Contract ID と生成 command を一致させる |
+| failure を仕様変更で対象外へ移す | 仕様本文、manifest、Contract ID、Scenario ID、artifact path、Done receipt を同じ PR で更新する |
+| flaky が再実行で通った | 原因、失敗ログ、deterministic 化修正、再実行 artifact がなければ未完了 |
+
+**failure / resume 判定規則：**
+
+| 状態 | 判定 |
+|------|------|
+| open failure、open flaky、open unverified、missing artifact、blocked contract が 1 件以上ある | Phase 未完了 |
+| `known issue`、`後で検証`、`別 PR で修正`、`flaky but passed` を Done receipt に残す | merge 不可 |
+| failure record が PR description のみで phase evidence にない | 仕様として扱わない |
+| resume point が不明なまま中断・引継ぎ・再開する | 実装再開禁止 |
+| failure closure と `P{phase}-PRECISION-CLOSURE` の open count が一致しない | Phase 未完了 |
 
 ### 9.12 PR レビュー観点
 
@@ -12918,7 +12978,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.140` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.141` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
