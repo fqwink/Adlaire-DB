@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.84
+**バージョン：** V.85
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.84` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.85` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.84` の次は `V.85` とし、以後 `V.86`、`V.87` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.85` の次は `V.86` とし、以後 `V.87`、`V.88` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -3123,6 +3123,103 @@ error に関係する仕様変更は、§7.3、§9.5、§9.7、manifest の `Err
 
 Turso Cloud 互換に関係する仕様変更は、§1.4、§3.5.3、§6、§7、§9.4、§9.5、§9.8、§9.15、該当 Phase 節、manifest の `Compatibility map`、COMPAT 契約 ID、Turso snapshot、SDK transcript、compat diff、legacy regression を同時更新する。Turso snapshot が更新されていても、差分分類、SDK 影響、後方互換、redaction が固定されていない場合は Phase 完了扱いにしない。
 
+#### 9.1.24 CI / release-check / environment reproducibility 固定契約
+
+各 Phase 実装 PR は、完了判定に使う CI、Docker test environment、local verification、release-check、artifact 生成環境を実装開始前に固定しなければならない。実行環境によって結果が変わる検証、手順が口頭説明だけの検証、artifact と manifest が一致しない検証は Phase 完了根拠として扱わない。
+
+**必須 gate：**
+
+| Gate | 必須内容 | 適用条件 |
+|------|----------|----------|
+| format / lint | repository 標準 formatter / linter。存在しない場合は `N/A` 理由を manifest に記載 | all |
+| unit | 対象 crate/module の unit test | all implementation phases |
+| integration | HTTP、WebSocket、CLI、persistence の外部挙動 test | 外部 API または永続化を持つ Phase |
+| SDK compatibility | TypeScript/Rust/Go libSQL SDK の該当 regression | hrana / SDK 互換面を変更する Phase |
+| Turso compatibility | `/v1/*`、metadata、auth、quota、error の snapshot / compat diff | Turso 互換対象を変更する Phase |
+| persistence / restart / rollback | fsync、rename、crash、corruption、migration、rollback | 永続化 schema または破壊的操作を変更する Phase |
+| security / secret scan | auth denial、scope denial、artifact secret scan、log redaction | secret、auth、artifact を扱う Phase |
+| release-check | repository 標準 release validation または同等 command | release、packaging、CI 完了判定を行う Phase |
+
+**environment 固定項目：**
+
+| 項目 | 必須固定 |
+|------|----------|
+| Rust toolchain | channel / version / target / components。`rust-toolchain.toml` がある場合はそれを正とする |
+| Cargo lock | `Cargo.lock` を正とし、CI で lock drift を許可しない |
+| Node.js | SDK compatibility test で使う Node.js version と package lock |
+| Docker image | image 名、tag、digest または build context。`latest` のみは禁止 |
+| OS / arch | Linux target、CPU architecture、glibc/musl 方針、unsupported OS |
+| timezone / locale | `TZ=UTC`、UTF-8 locale を既定。timestamp snapshot は UTC 正規化 |
+| env vars | test に必要な env 名、default、secret redaction。未定義時の挙動 |
+| ports | 固定 port または ephemeral port の割当方法。衝突時 retry / failure 方針 |
+| data dir | test ごとに isolated temporary directory。既存 user data dir 使用禁止 |
+| network | 外部 network 依存の可否、mock / fixture、offline 時の扱い |
+
+**local / Docker / CI 差分許容範囲：**
+
+| 差分 | 許可 | 条件 |
+|------|------|------|
+| absolute path | Yes | artifact では `<normalized-path>` に置換 |
+| host / port | Yes | `<normalized-host>` / `<normalized-port>` に置換 |
+| execution time | Yes | performance gate 以外は pass/fail に使わない |
+| timestamp | Yes | UTC 秒精度または `<normalized-time>` |
+| dependency version | No | lock file / image tag / toolchain に一致させる |
+| feature flag | No | manifest に明記された flags だけ使用 |
+| test order | No | order 依存がある場合は test failure |
+| network availability | No | external dependency は fixture 化または Manual exception |
+
+**CI artifact 必須内容：**
+
+| Artifact | 必須内容 |
+|----------|----------|
+| `environment.txt` | OS、arch、Rust、Cargo、Node、Docker image、timezone、locale、env subset |
+| `ci.txt` | 実行 command、開始順序、exit code、pass/fail summary、対象 commit |
+| `release-check.txt` | release-check command、exit code、検査項目、失敗時の理由 |
+| `secret-scan.txt` | scan command、対象 path、検出 0 件または blocking failure |
+| `toolchain.json` | machine-readable な toolchain / dependency / image version |
+| `flaky-report.txt` | flaky なし、または検出時の原因と deterministic 化修正 |
+
+artifact の保存先は §9.1.11 に従い、Contract ID を path に含める。CI artifact と manifest の `Regression set`、PR description、test name、snapshot path が 1 つでも不一致の場合は Phase 未完了とする。
+
+**flaky / timeout / network 依存の扱い：**
+
+| 状態 | 判定 |
+|------|------|
+| retry すれば通るが原因未特定 | Phase 未完了 |
+| timeout が環境依存で、上限や待機条件が仕様化されていない | Phase 未完了 |
+| 外部 network がないと失敗する test | fixture 化する。不可なら Manual exception と期限が必須 |
+| sleep 固定待ちで成立する race test | review failure。状態待ち / event / timeout 契約へ置換 |
+| CI では skip、local では実行 | skip 理由と代替 artifact がない限り Phase 未完了 |
+| secret scan を通すために artifact を削除する | merge 不可。redaction 修正が必要 |
+
+**release-check 必須検査：**
+
+| Check | 必須判定 |
+|-------|----------|
+| worktree clean | release-check 開始時と終了時に clean |
+| spec version | 仕様本文変更時に `V.{累積番号}` が増加している |
+| lock drift | `Cargo.lock` / package lock / image pin に未承認差分がない |
+| contract coverage | 対象 Phase の Contract ID に未カバーが 0 件 |
+| artifact existence | manifest の Evidence path が存在する |
+| snapshot strictness | snapshot 差分に仕様本文または compat diff の理由がある |
+| secret scan | JWT、Bearer、admin/platform/replication/HA token、生 SQL args、absolute path がない |
+| regression result | 対象 Phase 以前の regression が全件成功 |
+| zero-bug gate | 既知不具合、未検証、未生成証跡、production TODO/FIXME が 0 件 |
+
+**禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| local だけ通して CI / Docker 再現性を固定しない | Phase 未完了 |
+| `latest` tag、floating toolchain、unlocked dependency を完了 gate に使う | merge 不可 |
+| CI artifact に実行 command、exit code、対象 commit がない | Phase 未完了 |
+| failed gate を `known issue`、`flaky`、`後で検証` として残す | merge 不可 |
+| release-check の対象を PR ごとに実装者判断で減らす | review failure |
+| secret scan を未実行のまま artifact を採用する | merge 不可 |
+| Docker と CI の差分理由が manifest にない | Phase 未完了 |
+
+CI / release-check に関係する仕様変更は、§3.5.5、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.8、manifest の `Regression set`、該当 Contract ID、`environment.txt`、`ci.txt`、`release-check.txt`、`secret-scan.txt` を同時更新する。検証 command が成功していても、環境、toolchain、artifact、secret scan、release-check の再現性が固定されていない場合は Phase 完了扱いにしない。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -3751,7 +3848,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Phase 受入 manifest | §9.1.10 の必須 fields が実装開始前に固定されている | 実装 PR として扱わない |
 | Evidence artifact | §9.1.11 の保存先、命名、正規化、secret scan が固定されている | 証跡生成まで完了扱いにしない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
-| Verification command | §9.1.13 の command 分類、順序、exit code、artifact が固定されている | 検証完了扱いにしない |
+| Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
 | Failure closure | §9.1.14 の失敗、flaky、未検証、artifact 欠落、secret 混入が同一 PR で閉じている | merge 不可 |
 | 後方互換 / migration | §9.1.15 の互換影響、migration plan、rollback、旧形式 fixture が固定されている | 既存契約を変更しない |
 | 設定解決 / validation | §9.1.19 に従い、CLI/env/TOML/default/secret file の優先順位、不正値、対象 Phase 前挙動、秘匿が固定されている | config 実装を開始しない |
@@ -3762,7 +3859,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | ログ/秘匿 | §9.1.17、§12、§9.14 に従い、出力 field、request id、audit 相当記録、秘匿対象、redaction evidence が明記されている | request/SQL/token をログに出す実装を入れない |
 | 並行性 | §9.1.16 に従い、同時 request、resource lock、idempotency、shutdown、transaction の扱いが定義されている | 並行実行で状態を変更する処理を入れない |
 | 後方互換 / Turso 追従 | §9.1.23 に従い、既存 endpoint/schema/config への影響、Turso 差分分類、SDK 影響、migration path が明記されている | 既存契約を変更しない |
-| テスト | §9.8 の該当 Phase 行に正常/異常/認可/永続化/障害系がある | 完了扱いにしない |
+| テスト | §9.8 と §9.1.24 に従い、該当 Phase 行に正常/異常/認可/永続化/障害系と CI / release-check / secret scan evidence がある | 完了扱いにしない |
 | 運用 | config、metrics、health、rollback 手順が必要な Phase では明記されている | 運用 API を公開しない |
 
 **Phase 間の前倒し実装ルール：**
