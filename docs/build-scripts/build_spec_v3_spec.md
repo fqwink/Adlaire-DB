@@ -35,7 +35,7 @@
 |------|------|
 | Python バージョン | 3.9 以上（型ヒント `dict[str, int]`、`list[tuple]` を使用） |
 | 外部依存 | **なし** — `re`・`html`・`unicodedata`・`pathlib`・`typing` の標準ライブラリのみ使用。`pip install` 不要 |
-| 入力 | UTF-8 エンコードの Markdown ファイル。`docs/spec/spec.md` から `docs/spec/phase-*.md` を include 展開する |
+| 入力 | UTF-8 エンコードの Markdown ファイル。`docs/spec/spec.md` から `docs/spec/auth.md`、`docs/spec/api.md`、`docs/spec/testing.md`、`docs/spec/phase-*.md` を include 展開する |
 | 出力 | UTF-8 エンコードの単一 HTML ファイル |
 
 ---
@@ -51,7 +51,7 @@ OUT = "docs/Adlaire-db-spec.html"    # 出力 HTML
 
 別の環境で実行する場合はこの 2 変数を書き換える。
 
-仕様憲章内の `<!-- include: docs/spec/phase-01.md -->` 形式の行は、HTML 生成前に指定 Markdown ファイルの本文へ展開する。include はリポジトリルートからの相対パスで記述する。
+仕様憲章内の `<!-- include: docs/spec/auth.md -->` や `<!-- include: docs/spec/phase-01.md -->` 形式の行は、HTML 生成前に指定 Markdown ファイルの本文へ展開する。include はリポジトリルートからの相対パスで記述する。
 
 ---
 
@@ -409,7 +409,7 @@ HTML テンプレートの `PAGE` f-string 内を直接編集する。
 ```python
 <title>Adlaire DB 仕様憲章</title>          # ← ブラウザタブタイトル
 <span class="hdr-title">Adlaire DB</span>  # ← ヘッダー表示名
-<span class="hdr-ver">V.206</span>         # ← バージョンバッジ
+<span class="hdr-ver">V.208</span>         # ← バージョンバッジ
 ```
 
 ### 8.4 TOC の対象見出しレベル
