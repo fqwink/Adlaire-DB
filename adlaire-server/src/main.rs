@@ -9,6 +9,7 @@ mod http;
 mod metrics;
 mod state;
 mod token;
+mod ws;
 
 use std::sync::Arc;
 
@@ -127,6 +128,7 @@ async fn run_serve(args: crate::cli::ServeArgs) -> anyhow::Result<()> {
                         });
                         if let Err(e) = http1::Builder::new()
                             .serve_connection(io, service)
+                            .with_upgrades()
                             .await
                         {
                             tracing::debug!(err = %e, "API connection closed with error");

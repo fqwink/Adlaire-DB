@@ -19,6 +19,11 @@ pub async fn route(req: Request<Incoming>, state: SharedState) -> Result<HttpRes
 
     let response = match (method.as_str(), path.as_str()) {
         ("GET", "/v2/health") => health::handle(req, state).await,
+        ("GET", "/v3/baton") => crate::ws::handle(req, state, "default").await,
+        ("GET", p) if p.ends_with("/v3/baton") => match extract_ws_db_name(p) {
+            Some(db_name) => crate::ws::handle(req, state, db_name).await,
+            None => Ok(not_found()),
+        },
         ("POST", "/v2/pipeline") => pipeline::handle(req, state, "default").await,
         ("POST", p) if p.ends_with("/v2/pipeline") => match extract_db_name(p) {
             Some(db_name) => pipeline::handle(req, state, db_name).await,
@@ -227,6 +232,14 @@ fn extract_db_name(path: &str) -> Option<&str> {
     let mut segs = path.trim_start_matches('/').split('/');
     match (segs.next(), segs.next(), segs.next(), segs.next()) {
         (Some(db), Some("v2"), Some("pipeline"), None) if !db.is_empty() => Some(db),
+        _ => None,
+    }
+}
+
+fn extract_ws_db_name(path: &str) -> Option<&str> {
+    let mut segs = path.trim_start_matches('/').split('/');
+    match (segs.next(), segs.next(), segs.next(), segs.next()) {
+        (Some(db), Some("v3"), Some("baton"), None) if !db.is_empty() => Some(db),
         _ => None,
     }
 }

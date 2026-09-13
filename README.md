@@ -5,7 +5,7 @@ Rust + libsql（embedded SQLite）で実装する。外部 Web フレームワ�
 
 ## 現在の状態
 
-**Phase 7 実装済み** — HTTP サーバー・hrana-http v2 パイプライン・JWT 認証・ログ・マルチ DB ルーター・管理 API が動作する。
+**Phase 9 実装中** — HTTP サーバー・hrana-http v2 パイプライン・JWT 認証・ログ・マルチ DB ルーター・管理 API・Turso Cloud 互換管理モデル・hrana-ws v3 の基本経路が動作する。
 
 | フェーズ | 内容 | 状態 |
 |----------|------|------|
@@ -16,8 +16,8 @@ Rust + libsql（embedded SQLite）で実装する。外部 Web フレームワ�
 | Phase 5 | ログ・統合テスト | ✅ 完了 |
 | Phase 6 | マルチ DB ルーター | ✅ 完了 |
 | Phase 7 | 管理 API・トークン CRUD・DB スコープ JWT | ✅ 完了 |
-| Phase 8 | Turso Cloud 互換管理モデル | 🔲 未実装 |
-| Phase 9 | WebSocket（hrana-ws v3） | 🔲 未実装 |
+| Phase 8 | Turso Cloud 互換管理モデル | ✅ 完了 |
+| Phase 9 | WebSocket（hrana-ws v3） | 🚧 実装中 |
 | Phase 10 | ATTACH DB・メトリクス | 🔲 未実装 |
 | Phase 11 | レプリケーション基盤（WAL ストリーム・スナップショット） | 🔲 未実装 |
 | Phase 12 | レプリカ同期・書き込みリダイレクト | 🔲 未実装 |
@@ -99,7 +99,7 @@ const result = await db.execute("SELECT 1");
 
 ## 管理 API
 
-Phase 7 時点では、以下の管理 API が利用できる。
+Phase 8 時点では、以下の管理 API が利用できる。
 
 - `GET /admin/v1/databases`
 - `POST /admin/v1/databases`
@@ -110,10 +110,9 @@ Phase 7 時点では、以下の管理 API が利用できる。
 - `GET /admin/v1/tokens/{id}`
 - `DELETE /admin/v1/tokens/{id}`
 
-## 制約（Phase 7 時点）
+## 制約（Phase 9 実装中）
 
-- Turso Cloud 互換管理モデル（location / organization / group / quota）は Phase 8 以降
-- WebSocket（hrana-ws v3）は未対応（`GET /v3/baton` は Phase 9 で実装、現在 501 を返す）
+- WebSocket（hrana-ws v3）は Phase 9 で基本経路を実装中
 - ATTACH DB・メトリクスは Phase 10 以降
 - レプリケーション、バックアップ、ブランチ、HA は Phase 11 以降
 
