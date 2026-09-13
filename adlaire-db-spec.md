@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.101
+**バージョン：** V.102
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.101` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.102` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -103,6 +103,55 @@ Adlaire DB の活用目的は、SQLite / libSQL 系の軽量さを保ちなが�
 | 内製化禁止線 | 内製化を理由に API、response wrapper、JWT claim、metadata schema、error code、SDK 互換挙動を破ってはならない |
 | モード分離 | Adlaire 独自拡張が必要な場合は、Turso 互換 mode と Adlaire 拡張 mode を仕様上分離し、既定は Turso 互換 mode とする |
 | 完了判定 | 内製化 PR は Turso Cloud / libSQL SDK compatibility、Phase regression、oracle、invariant ledger が通るまで完了扱いにしない |
+
+**最終目標：**
+
+Adlaire DB の最終目標は、Turso Cloud 互換の自己ホスト DB 管理基盤として実用化したうえで、外部 contract を固定したまま内部実装を Adlaire 独自基盤へ段階移行することである。外部 contract とは、HTTP/WebSocket wire format、Platform API、admin API、SDK 互換挙動、JWT claim、metadata schema、error code、response wrapper、persistence compatibility、operator-facing behavior を指す。内部実装とは、WAL、checkpoint、storage、query executor adapter、archive、branch engine、quota engine、scheduler、metrics、HA coordination、recovery engine を指す。
+
+**絶対ルール：**
+
+| Rule | 内容 | 違反時の扱い |
+|------|------|--------------|
+| External contract freeze | Turso Cloud 互換 mode の外部 contract は、内製化都合で変更しない | merge 不可 |
+| Internal replacement only | 内製化 PR は外部 contract ではなく adapter 境界の内側だけを置き換える | Phase 未完了 |
+| Compatibility first | Turso Cloud / libSQL SDK 互換 snapshot が壊れる変更は、先に仕様差分、mode 分離、migration、rollback を定義する | 実装開始禁止 |
+| Default compatibility mode | 既定挙動は常に Turso 互換 mode とする | Adlaire 拡張 mode を既定にした場合は merge 不可 |
+| No silent divergence | 自己ホスト都合の差分を暗黙仕様にしない。差分理由、代替仕様、client impact、evidence を本文に残す | review failure |
+| Evidence before Done | compatibility、oracle、invariant、regression、rollback evidence が揃うまで Done receipt を作成しない | Phase 未完了 |
+
+**禁止事項：**
+
+| 禁止事項 | 例 | 判定 |
+|----------|----|------|
+| 内製化都合で API path / method / request / response を変更する | adapter 差し替えのため `/v1/*` wrapper を変える | merge 不可 |
+| SDK 互換を壊す | `@libsql/client` が既存 URL 差し替えで動かない | merge 不可 |
+| metadata schema を理由なく破壊する | migration / rollback なしに field rename / delete を行う | merge 不可 |
+| error code を差し替える | 既存 `DB_NOT_FOUND` を別 code に変える | merge 不可 |
+| Turso 互換 mode に Adlaire 独自挙動を混ぜる | 既定 mode で独自 field 必須、独自 auth 必須にする | merge 不可 |
+| `INTERNAL_ERROR` で互換差分を隠す | 本来 `INVALID_REQUEST` / `QUOTA_EXCEEDED` の差分を 500 にする | Phase 未完了 |
+| production path を rollback flag なしで内製 crate へ切り替える | shadow 検証なしに write path を置換する | merge 不可 |
+
+**許可事項：**
+
+| 許可事項 | 条件 | 必須 evidence |
+|----------|------|---------------|
+| 内部 adapter の追加 | 既定 path の外部 contract に差分を出さない | shadow diff、compat snapshot |
+| libsql crate 内側の置換準備 | production write path を変えない、または rollback flag を持つ | rollback test、crash recovery test |
+| shadow mode 実装 | client-visible response に影響しない | shadow/active diff、performance baseline |
+| Adlaire 拡張 mode 追加 | Turso 互換 mode と config / API / metadata を仕様上分離する | mode matrix、SDK regression |
+| 自己ホスト差分の採用 | Turso Cloud と同一にできない理由が security / persistence / operation 上明確 | compatibility diff、client impact |
+| 内製 crate の新規開発 | 外部 contract を固定し、adapter 境界に閉じる | unit coverage、oracle、invariant result |
+
+**実装判断表：**
+
+| 変更種別 | 判断 | 仕様に必要な固定事項 |
+|----------|------|----------------------|
+| Turso Cloud 互換に影響する変更 | 原則 Turso Cloud に追従。差分は例外扱い | snapshot source、差分理由、SDK impact、error mapping |
+| libSQL SDK 互換に影響する変更 | SDK 互換を壊さない。壊す場合は Turso 互換 mode では不可 | SDK transcript、regression command、migration note |
+| 自己ホスト差分 | security、persistence、operation の理由がある場合のみ可 | 代替仕様、operator impact、compatibility diff |
+| 内部最適化 | 外部 contract に差分がなければ可 | performance baseline、rollback condition |
+| Adlaire 独自拡張 | Turso 互換 mode と分離する場合のみ可 | mode flag、API boundary、metadata boundary |
+| Phase 19 以降の内製化 | external contract freeze / internal replacement only を満たす場合のみ可 | shadow diff、oracle、invariant、full regression |
 
 実装判断で迷う場合は、`Turso Cloud 互換 > libSQL SDK 互換 > 既存 Adlaire 後方互換 > 自己ホスト最適化 > 内製化都合 > Adlaire 独自拡張` の順で優先する。内部実装を育てることは目的であるが、外部契約を壊してまで内製化を進めてはならない。
 
@@ -5118,6 +5167,18 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 - TypeScript `@libsql/client` 互換は Phase 5 以降の regression target とする
 - backup/restore/PITR/branch のファイル形式を変える場合は、旧形式読み込み可否と不可の場合の明示エラーを仕様化する
 - Adlaire 独自拡張を追加する場合は、Turso 互換 mode の response、metadata、error、SDK 挙動に差分を出さない。差分が必要な場合は mode 分離、互換 snapshot、migration、rollback を仕様化してから実装する
+
+**互換優先の merge 不可条件：**
+
+| 状態 | 判定 |
+|------|------|
+| Turso 互換 mode の API path、method、request、response wrapper、field casing が仕様差分なしに変わる | merge 不可 |
+| libSQL SDK regression が失敗し、差分理由と修正方針が Done receipt にない | merge 不可 |
+| metadata schema の rename / delete / required field 追加に migration と rollback がない | merge 不可 |
+| error code、HTTP status、retry policy が §7.3 と矛盾する | merge 不可 |
+| Adlaire 拡張 mode の挙動が既定 mode に混入する | merge 不可 |
+| 内製 crate への切り替えに shadow diff、rollback flag、compat snapshot がない | merge 不可 |
+| Turso Cloud との差分を `INTERNAL_ERROR`、generic 500、またはログだけで隠す | Phase 未完了 |
 
 ### 9.16 実装順序ルール
 
@@ -10156,6 +10217,8 @@ HTTP ステータス：503
 - 内製化は Turso Cloud 互換を維持するための内部実装差し替えであり、Turso Cloud 追従を止める理由にしてはならない
 - API、認証、metadata、エラー、SDK 互換挙動は互換レイヤーとして固定し、その内側の実装から段階的に置き換える
 - Turso 互換 mode は常に既定 mode とし、Adlaire 独自拡張 mode を追加する場合も互換 mode の snapshot と SDK regression に差分を出してはならない
+- Phase 19 以降の内製化は `external contract freeze / internal replacement only` を固定契約とし、wire/API/metadata/error/auth/SDK 挙動を変えずに内部 crate、adapter、engine、scheduler、storage 境界だけを置換する
+- production path を内製 crate へ切り替える場合は、shadow mode、active mode、rollback flag、compatibility oracle、performance baseline、crash recovery evidence を同一 PR で提示する
 - 既存の外部クレートで要件を満たせる場合は積極的に採用する
 - 既存クレートで不足する機能は、最初から内製クレートとして開発する
 - **外部クレートと内製クレートの併用パターンを初期段階から採用する**
