@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.106
+**バージョン：** V.107
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.106` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.107` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -4000,6 +4000,7 @@ branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§
 | `resource_lifecycle_matrix` | §9.1.41 の resource type、state、allowed/forbidden transition、commit order、recovery behavior |
 | `schema_registry` | §9.1.42 の field-level schema、required/null/default/migration/compatibility/redaction 契約 |
 | `decision_precedence_matrix` | §9.1.43 の複数条件同時成立時の優先順位、selected behavior、losing behavior、error/status/client action |
+| `coverage_closure_matrix` | §9.1.44 の Contract ID / source matrix / test / artifact / oracle / N/A reason の網羅完了表 |
 | `completion_gate` | merge 前に満たす Done 条件と失敗時の扱い |
 
 **Phase group 粒度：**
@@ -4094,6 +4095,7 @@ Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§
 | `resource_lifecycle_result` | §9.1.41 の state / transition ごとの pass/fail、forbidden transition 0 件、recovery evidence path |
 | `schema_registry_result` | §9.1.42 の schema ID ごとの field coverage、unknown/null/default/migration/redaction evidence |
 | `decision_precedence_result` | §9.1.43 の decision ID ごとの precedence 実行結果、selected behavior、error/status snapshot、losing behavior 非発火証跡 |
+| `coverage_closure_result` | §9.1.44 の coverage ID ごとの pass/fail/N/A、gap 0 件、test/artifact/oracle 実在証跡 |
 | `reviewer_decision` | `Done`、`Not Done`、`Spec correction required` のいずれか |
 
 **Phase group Done minimum：**
@@ -4839,6 +4841,76 @@ Phase schema registry に関係する仕様変更は、§9.1.10、§9.1.11、§9
 
 Phase decision precedence に関係する仕様変更は、§7.3、§9.1.10、§9.1.11、§9.1.12、§9.1.14、§9.1.23、§9.1.24、§9.1.32、§9.1.33、§9.1.35、§9.1.36、§9.1.37、§9.1.39、§9.1.40、§9.1.41、§9.1.42、§9.2、§9.4、§9.5、§9.6、§9.7、§9.8、§9.15、§9.17、該当 Phase 詳細節を同時更新する。decision precedence matrix がない conflict は、実装者ごとの分岐順差、存在漏洩、誤った retry、commit 後拒否による後続バグ修正を防げないため、実装開始不可とする。
 
+#### 9.1.44 Phase coverage closure / implementation completeness matrix 固定契約
+
+各 Phase の実装 PR は、Phase packet に含まれる全契約が test、artifact、oracle、regression、Done receipt のいずれで証明されるかを coverage closure matrix として固定しなければならない。契約を定義しただけ、正常系だけ、PR description の説明だけ、または根拠のない `N/A` で Phase 完了扱いにしてはならない。
+
+**Coverage closure matrix 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `coverage_id` | `COV-P{phase}-{contract-id}` 形式の一意 ID |
+| `phase` | coverage を閉じる Phase |
+| `source_contract` | API / persistence / error / security / compatibility / concurrency / operation / regression の Contract ID |
+| `source_matrix` | dependency_graph / invariant_ledger / scenario_matrix / resource_lifecycle_matrix / schema_registry / decision_precedence_matrix / phase_detail / api_table / persistence_table / error_table |
+| `implementation_surface` | code module、route、CLI、config、metadata、job、health、log/metric、test fixture の対象 |
+| `required_test` | 必須 test ID、command、または SDK / Turso snapshot compare。自動化不能な場合は manual exception ID |
+| `required_evidence` | artifact path。snapshot、fixture、transcript、log、compat diff、secret scan、CI output のいずれか |
+| `oracle` | §9.1.35 の oracle 名と version。oracle 不要の場合は理由 |
+| `status` | `planned`、`pass`、`fail`、`blocked`、`not_applicable` のいずれか。Done 時は `pass` または根拠付き `not_applicable` のみ |
+| `not_applicable_reason` | `not_applicable` の場合のみ、§9.2、§9.4、該当 Phase 詳細節、unsupported 固定表の本文参照 |
+| `gap_class` | gap がある場合は `missing_test`、`missing_artifact`、`missing_oracle`、`missing_regression`、`manual_only`、`spec_gap`、`implementation_gap` |
+| `blocker` | `status` が `pass` / 根拠付き `not_applicable` 以外の場合に止める operation。例: route publish、metadata commit、Done receipt、merge |
+
+**coverage 対象固定表：**
+
+| Source | 必ず coverage に含めるもの |
+|--------|-----------------------------|
+| dependency_graph | 全 prerequisite と dependent contract。`blocked`、`planned`、未証明 satisfied を残さない |
+| invariant_ledger | invariant ID ごとの before/after、violation signal、regression guard |
+| scenario_matrix | normal、invalid、auth/scope/quota、persistence、rollback、concurrency、compatibility、unsupported、redaction、operational |
+| resource_lifecycle_matrix | state、allowed transition、forbidden transition、recovery、operator_required |
+| schema_registry | field ごとの required/null/default/validation/migration/redaction/compatibility |
+| decision_precedence_matrix | conflict ごとの selected behavior、losing behavior、error/status/client action |
+| API / persistence / security contract | method/path/body/error、file/schema/fsync/rollback、auth/scope/quota/redaction |
+| compatibility / regression contract | Turso Cloud、libSQL SDK、legacy metadata、previous Phase regression、Phase 1 から対象 Phase 直前までの影響 |
+
+**Phase group coverage minimum：**
+
+| Phase group | 最低 coverage |
+|-------------|----------------|
+| Phase 1〜5 | CLI/config/data-dir/default DB/hrana-http/JWT/log の normal/error/restart/redaction/SDK smoke |
+| Phase 6〜8 | multi DB/admin API/Turso Platform/org/group/location/quota/legacy migration の auth/persistence/compat/regression |
+| Phase 9〜10 | WebSocket/transaction/ATTACH/metrics の protocol、rollback、path denial、counter consistency、disconnect |
+| Phase 11〜13 | replication/archive の frame/checksum/snapshot/retention/corruption/restart/role health |
+| Phase 14〜15 | backup/restore/PITR/branch の destructive rollback、source selector、quota、seed isolation、restart recovery |
+| Phase 16〜18 | extension/metrics/HA の signature、allowlist、snapshot corruption、term/leader/split-brain/operator_required |
+| Phase 19 | internal adapter の shadow/active/rollback、wire/API parity、performance baseline、Phase 1〜18 full regression |
+
+**coverage closure 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| Contract ID、schema ID、scenario ID、decision ID が coverage matrix に存在しない | 実装開始禁止 |
+| normal 系 test だけで error/auth/persistence/rollback/compatibility を pass 扱いにする | Phase 未完了 |
+| `manual only` を coverage pass として扱う | merge 不可。ただし §9.1.10 の manual exception がある補助証跡を除く |
+| `N/A` に本文参照と理由がない | Phase 未完了 |
+| artifact path が存在しない、または Contract ID と対応しない | Phase 未完了 |
+| oracle なしで snapshot / fixture / expected を更新する | merge 不可 |
+| previous Phase regression を coverage 外にする | Phase 未完了 |
+| failed / skipped / flaky / blocked を pass 扱いにする | merge 不可 |
+| coverage matrix を PR description だけに置き、仕様本文、manifest、artifact と対応しない | Phase 未完了 |
+
+**Done receipt への反映：**
+
+| Done receipt field | 必須内容 |
+|--------------------|----------|
+| `coverage_closure_result` | coverage ID ごとの status、gap 0 件、required_test、required_evidence、oracle、not_applicable reason |
+| `coverage_gap_result` | `missing_test`、`missing_artifact`、`missing_oracle`、`missing_regression`、`manual_only`、`spec_gap`、`implementation_gap` が 0 件である証跡 |
+| `coverage_regression_result` | previous Phase regression と互換 snapshot が coverage 対象に含まれ、pass していること |
+
+Phase coverage closure に関係する仕様変更は、§9.1.7、§9.1.8、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.1.24、§9.1.29、§9.1.32、§9.1.33、§9.1.35、§9.1.36、§9.1.38、§9.1.39、§9.1.40、§9.1.41、§9.1.42、§9.1.43、§9.2、§9.4、§9.5、§9.6、§9.7、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。coverage closure matrix がない Phase 実装 PR は、契約定義と実装証跡の未対応、検証漏れ、根拠なし N/A、旧 Phase regression 漏れによる後続バグ修正を防げないため、実装開始不可とする。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -5496,6 +5568,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Resource lifecycle | §9.1.41 に従い、resource type、state、allowed/forbidden transition、entry/exit condition、API behavior、write policy、commit order、recovery behavior、state evidence が固定されている | 実装開始禁止。状態遷移未定義または forbidden transition 未検証の場合は Phase 完了扱いにしない |
 | Schema registry | §9.1.42 に従い、request、response、metadata、config、JWT claim、WebSocket message、artifact、log/metric の field-level schema、required/null/default/migration/compatibility/redaction が固定されている | 実装開始禁止。field 意味ズレ、根拠なし null/省略、migration 未定義の場合は Phase 完了扱いにしない |
 | Decision precedence | §9.1.43 に従い、複数条件同時成立時の precedence、selected behavior、losing behavior、error/status/client action、compatibility 差分が固定されている | 実装開始禁止。分岐順の実装依存、存在漏洩、commit 後拒否、protocol 間不一致がある場合は Phase 完了扱いにしない |
+| Coverage closure | §9.1.44 に従い、全 Contract ID / schema ID / scenario ID / decision ID が test、artifact、oracle、regression、N/A 理由へ対応している | 実装開始禁止。coverage gap、manual only pass、根拠なし N/A、旧 Phase regression 漏れがある場合は Phase 完了扱いにしない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | 仕様内相互参照 | §9.1.29 に従い、Phase 番号、TC ID、Task ID、API 契約 ID、error code、persistence key、evidence 名、manifest 参照が一致している | 仕様修正 PR に戻す |
 | Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
