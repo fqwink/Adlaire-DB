@@ -445,7 +445,7 @@ a:focus-visible {
   <span class="hdr-title">Adlaire DB</span>
   <span class="hdr-sep">/</span>
   <span class="hdr-title" style="color:rgba(255,255,255,.7);font-weight:400">プロジェクト憲章 / 仕様正本入口</span>
-  <span class="hdr-ver">V.216</span>
+  <span class="hdr-ver">V.217</span>
 </header>
 
 <div id="lay">
@@ -634,12 +634,12 @@ a:focus-visible {
   <main id="ct">
     <div class="ci">
       <h1 id="Adlaire-DB-プロジェクト憲章-仕様正本入口" class="mh h1">Adlaire DB プロジェクト憲章 / 仕様正本入口</h1>
-<p class="mp"><strong>バージョン：</strong> V.216 <strong>ステータス：</strong> 設計中 <strong>最終更新：</strong> 2026-09-13</p>
+<p class="mp"><strong>バージョン：</strong> V.217 <strong>ステータス：</strong> 設計中 <strong>最終更新：</strong> 2026-09-13</p>
 <hr class="mr">
 <h2 id="0-プロジェクト憲章-仕様正本入口の責務" class="mh h2">0. プロジェクト憲章 / 仕様正本入口の責務</h2>
-<p class="mp"><code class="ic">docs/PROJECT_CHARTER.md</code> は、プロジェクト憲章であり、仕様正本群の入口も兼ねる。本ファイルは Adlaire DB の目的、価値、優先順位、判断原則、方針を示す。実装・テスト・レビュー・完了判定に使う確定契約は <code class="ic">docs/spec/</code> 配下の仕様正本群へ切り離して管理する。仕様正本内で矛盾がある場合は、実装判断ではなく仕様改訂で解消する。</p>
+<p class="mp"><code class="ic">docs/PROJECT_CHARTER.md</code> は、プロジェクト憲章であり、仕様正本群の入口も兼ねる。本ファイルは Adlaire DB の概要、方針、ポリシー、仕様正本群への入口、仕様駆動開発方針をまとめる。実装・テスト・レビュー・完了判定に使う確定契約は <code class="ic">docs/spec/</code> 配下の仕様正本群へ切り離して管理する。仕様正本内で矛盾がある場合は、実装判断ではなく仕様改訂で解消する。</p>
 <h3 id="0-1-仕様バージョン管理責務" class="mh h3">0.1 仕様バージョン管理責務</h3>
-<p class="mp">本仕様書のバージョンは <code class="ic">V.{累積番号}</code> 形式で表記する。現在の仕様書バージョンは <code class="ic">V.216</code> である。</p>
+<p class="mp">本仕様書のバージョンは <code class="ic">V.{累積番号}</code> 形式で表記する。現在の仕様書バージョンは <code class="ic">V.217</code> である。</p>
 <p class="mp">仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、<code class="ic">V.1</code>、<code class="ic">0.x</code>、日付ベース、Phase 番号ベースへ戻してはならない。</p>
 <p class="mp">仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。<code class="ic">V.99</code> の次は <code class="ic">V.100</code> とし、以後 <code class="ic">V.101</code>、<code class="ic">V.102</code> のように 1 ずつ増加させる。</p>
 <p class="mp"><strong>禁止事項：</strong></p>
@@ -691,10 +691,14 @@ a:focus-visible {
 <tr><td>ポリシーだけを根拠に Phase 完了扱いにする</td><td>完了条件と証跡が仕様化されていないため</td></tr>
 <tr><td>ポリシーを仕様の代わりに PR description で補う</td><td>正本に残らず後続実装が迷うため</td></tr>
 </table></div>
-<h4 id="0-2-4-仕様として記載する内容" class="mh h4">0.2.4 仕様として記載する内容</h4>
+<h4 id="0-2-4-仕様駆動開発方針" class="mh h4">0.2.4 仕様駆動開発方針</h4>
+<p class="mp">Adlaire DB は仕様駆動開発を採用する。実装、テスト、レビュー、完了判定は、<code class="ic">docs/spec/</code> 配下の仕様正本群に固定された契約に基づいて行う。</p>
+<p class="mp">方針およびポリシーは、そのまま実装根拠にしてはならない。実装する場合は、先に仕様正本群へ落とし込み、対象、入力、出力、状態、error、永続化、検証、Done 条件を固定してから実装する。</p>
+<p class="mp">実装中に仕様不足、仕様矛盾、未定義の挙動を見つけた場合は、実装判断で補完してはならない。先に仕様変更 PR で仕様正本群を更新し、必要な契約を固定してから実装を進める。</p>
+<h4 id="0-2-5-仕様として記載する内容" class="mh h4">0.2.5 仕様として記載する内容</h4>
 <p class="mp">仕様には、実装者がそのまま実装、テスト、レビュー、完了判定できる確定契約を記載する。実装根拠にできるのは、<code class="ic">docs/spec/</code> 配下で仕様正本として固定された契約だけである。</p>
 <p class="mp">仕様として扱うには、少なくとも対象、入力、出力、状態遷移、永続化、error、認証認可、互換差分、rollback、検証 command、artifact、Done 判定のうち該当項目が明示されていなければならない。</p>
-<h4 id="0-2-5-混在時の扱い" class="mh h4">0.2.5 混在時の扱い</h4>
+<h4 id="0-2-6-混在時の扱い" class="mh h4">0.2.6 混在時の扱い</h4>
 <p class="mp">実装時にプロジェクト憲章、方針、ポリシーと仕様が矛盾する場合は、仕様を優先する。仕様が不足している場合は、実装で補完してはならない。先に仕様変更 PR を作成し、API 契約、状態遷移、永続化契約、エラー契約、テスト条件、完了条件を追加してから実装する。</p>
 <h2 id="1-プロダクト責務" class="mh h2">1. プロダクト責務</h2>
 <p class="mp">Adlaire DB が何を提供し、何を優先し、どの方向へ進化するかを固定する責務である。Turso Cloud 互換、自己ホスト運用、将来的な内製化方針は、この責務に従って判断する。</p>
@@ -13703,7 +13707,7 @@ T6-7: 統合テスト
 <p class="mp"><strong>Phase 19 Done receipt 必須項目：</strong></p>
 <div class="tw"><table class="mt">
 <tr><th>項目</th><th>内容</th></tr>
-<tr><td><code class="ic">version_result</code></td><td>仕様書 <code class="ic">V.216</code> 準拠、Phase 19 contract ID、commit SHA</td></tr>
+<tr><td><code class="ic">version_result</code></td><td>仕様書 <code class="ic">V.217</code> 準拠、Phase 19 contract ID、commit SHA</td></tr>
 <tr><td><code class="ic">config_result</code></td><td><code class="ic">TASK-P19-1</code>、<code class="ic">SCN-P19-1</code>〜<code class="ic">SCN-P19-5</code> の pass/fail と artifact path</td></tr>
 <tr><td><code class="ic">adapter_result</code></td><td>WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path</td></tr>
 <tr><td><code class="ic">shadow<em>diff</em>result</code></td><td>差分ゼロまたは差分理由、ERROR log、test failure の証跡</td></tr>
