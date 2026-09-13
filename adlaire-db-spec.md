@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.115
+**バージョン：** V.116
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.115` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.116` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -5448,6 +5448,73 @@ API を実装する場合は、各 endpoint について必ず次を仕様本文
 | Phase 3 | `http/mod.rs`, `http/pipeline.rs`, `http/health.rs`, `hrana/*`, `error.rs`, `main.rs` | `GET /v2/health`, `POST /v2/pipeline` のみ Phase 完了対象。`/v2/pipeline` は `default` DB 固定 | Phase 2 の永続化を継続。SQL 成功応答前に SQLite/libsql の commit が完了していること | malformed JSON は HTTP 400。SQL エラーは HTTP 200 + hrana error。HTTP request log は Phase 5 まで必須ではない | TC-1, TC-2, TC-6。`named_args` 非空、invalid JSON、SQL error、close 後無視を含める |
 | Phase 4 | `auth/*`, `token/*`, `config.rs`, `main.rs`, `http/pipeline.rs` | `Authorization: Bearer <JWT>` を検証する。`token create` は JWT を stdout に出す。認証無効モードは secret 未指定時のみ | `meta/tokens.json` に token record を追記する。追記は atomic update | `AUTH_REQUIRED`, `AUTH_INVALID`, `AUTH_EXPIRED`, `PERMISSION_DENIED` を §7.3 通り返す。JWT/token secret はログ出力禁止 | TC-3。valid/none/bad/expired/revoked/ro-write を含める |
 | Phase 5 | `tests/*`, logging middleware, `metrics.rs` stub | API 追加は禁止。既存 API の互換性と運用ログを固める | 新規永続化なし。既存 DB の再起動後永続性を検証する | JSON Lines logs。method/path/status/duration_ms を記録し、Authorization と SQL args は出さない | TC-1〜TC-6、TypeScript SDK 互換、再起動後 SELECT、ログ形式検証 |
+
+**Phase 1 完全実装精度固定契約：**
+
+Phase 1 は「実行可能な CLI skeleton と config 解決の土台」を完成させる Phase であり、DB、HTTP、JWT、metadata 永続化を開始してはならない。Phase 1 実装者は下表を Phase packet、atomic task ledger、scenario matrix、Done receipt、review handoff、operator behavior delta に転記してから実装する。
+
+| 項目 | Phase 1 固定仕様 |
+|------|------------------|
+| 実装範囲 | Cargo workspace、binary 起動、`serve` / `token create` subcommand、help、CLI parse、config resolution |
+| binary name | `adlaire-db` 固定。別名 binary を Phase 1 完了根拠にしてはならない |
+| `serve --data` | 必須。未指定は clap 標準 error、非 0 exit。server startup へ進まない |
+| `serve --config` | 任意。指定時は TOML parse を行い、parse error は起動失敗。存在しない file は config error |
+| config precedence | CLI > env > TOML > default。Phase 1 ではこの順位の fixture を必ず作る |
+| env 対象 | Phase 1 で読む env は config 解決に必要な最小項目だけ。secret / token env は読んでも JWT 発行に使わない |
+| `token create` | subcommand と引数 validation だけを実装する。Phase 1 では token 文字列を発行せず、stub response または unsupported error を固定する |
+| stdout/stderr | help は stdout、parse/config error は stderr。token secret、raw path の不要な展開値は出力しない |
+| 永続化 | Phase 1 は永続化なし。`meta/`、`databases/`、`.lock`、`tokens.json`、`data.db` を作成しない |
+| process side effect | help / invalid flag / config parse の各 scenario で data-dir 配下に file を作らない |
+| log | Phase 1 では構造化 request log は対象外。CLI error は clap/config error のみ |
+| 完了条件 | build/test、help snapshot、invalid flag stderr、config precedence fixture、no persistence evidence、review handoff が揃う |
+
+**Phase 1 atomic task ledger：**
+
+| Task ID | Goal | Input contracts | Change targets | Forbidden changes | Completion condition | Verification |
+|---------|------|-----------------|----------------|-------------------|----------------------|--------------|
+| `TASK-P1-1` | Cargo workspace と binary skeleton を成立させる | §9.2 Phase 1、§9.4 Phase 1 | `Cargo.toml`、crate manifest、`main.rs` | DB open、HTTP server、metadata file | `cargo build` が成功し `adlaire-db --help` が起動 | `cargo build`; `adlaire-db --help` |
+| `TASK-P1-2` | `serve` subcommand と `--data` 必須 validation | §9.1.20、§9.1.49 | `cli.rs` | data-dir 作成、lock 取得、DB 初期化 | `serve --help` に `--data` が表示され、未指定は非 0 exit | `adlaire-db serve --help`; `adlaire-db serve` |
+| `TASK-P1-3` | `token create` subcommand skeleton | §9.2 Phase 1、§9.4 Phase 1 | `cli.rs` | JWT 発行、`tokens.json` 書き込み、secret 永続化 | help と引数 validation が動き、発行処理は Phase 4 まで未対応として固定 | `adlaire-db token create --help` |
+| `TASK-P1-4` | TOML/env/default config model | §9.1.19、§9.1.42 | `config.rs` | DB/HTTP/JWT 起動 side effect | CLI > env > TOML > default の fixture が pass | config precedence test |
+| `TASK-P1-5` | error surface と stdout/stderr snapshot | §7.3、§9.1.22、§9.1.35 | `cli.rs`、`config.rs` | 独自不定形 error、secret 出力 | help/invalid/config error の snapshot が固定 | help / stderr snapshot |
+| `TASK-P1-6` | no persistence evidence | §9.1.21、§9.1.41、§9.1.44 | test / artifact | `meta/`、`databases/`、`.lock`、`data.db` 作成 | 全 Phase 1 scenario 後に data-dir が未作成または空である証跡 | no persistence fixture |
+| `TASK-P1-7` | Phase 1 Done receipt / review handoff | §9.1.33、§9.1.51、§9.1.52 | docs / PR artifact | PR description だけの根拠 | 第三者が build/help/config/no persistence を再現できる | handoff checklist |
+
+**Phase 1 scenario / oracle 固定表：**
+
+| Scenario ID | 入力 | 期待結果 | Evidence |
+|-------------|------|----------|----------|
+| `SCN-P1-1` | `adlaire-db --help` | exit 0、stdout に top-level commands、stderr empty | help snapshot |
+| `SCN-P1-2` | `adlaire-db serve --help` | exit 0、stdout に `--data` / `--config`、stderr empty | serve help snapshot |
+| `SCN-P1-3` | `adlaire-db token create --help` | exit 0、stdout に token create の引数、stderr empty | token help snapshot |
+| `SCN-P1-4` | `adlaire-db serve` | exit non-zero、clap error、data-dir side effect なし | invalid flag stderr + no persistence |
+| `SCN-P1-5` | invalid `--config` path | exit non-zero、config error、DB/HTTP/JWT は起動しない | config error snapshot |
+| `SCN-P1-6` | CLI/env/TOML/default が同時指定 | CLI 値が勝ち、env、TOML、default は losing behavior として発火しない | precedence fixture |
+| `SCN-P1-7` | `token create` 実行 | JWT を発行せず、Phase 1 stub/unsupported として固定された出力または error | token stub snapshot |
+
+**Phase 1 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| `serve --data` で DB open まで進む | merge 不可。DB open は Phase 2 |
+| HTTP listener を bind する | merge 不可。HTTP は Phase 3 |
+| JWT を発行する、または `tokens.json` を作る | merge 不可。JWT/token persistence は Phase 4 |
+| `{data-dir}/databases/default/data.db`、`meta/`、`.lock` を作る | merge 不可。data-dir 初期化は Phase 2 |
+| Phase 2 以降の metadata schema を先に作る | merge 不可 |
+| help / error snapshot なしで CLI 契約を完了扱いにする | Phase 未完了 |
+| PR description だけで config precedence / no persistence を説明する | 仕様として扱わない |
+
+**Phase 1 Done receipt 最低 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `implemented_scope` | Cargo workspace、CLI skeleton、config resolution、stub token create |
+| `excluded_scope` | DB open、HTTP server、JWT 発行、tokens.json、data.db、metadata 初期化 |
+| `atomic_task_result` | `TASK-P1-1`〜`TASK-P1-7` がすべて pass、open task 0 件 |
+| `scenario_matrix_result` | `SCN-P1-1`〜`SCN-P1-7` の pass/fail、artifact path |
+| `coverage_closure_result` | help、invalid flag、config precedence、no persistence の coverage gap 0 件 |
+| `review_handoff_result` | 第三者が build/help/config/no persistence を再現できる command と artifact |
+| `operator_behavior_delta_result` | Phase 1 は CLI skeleton 追加のみ。DB/HTTP/JWT は利用不可である release note |
 
 **Phase 1〜5 の境界決定：**
 
