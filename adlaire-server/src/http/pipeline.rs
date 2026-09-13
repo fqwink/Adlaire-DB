@@ -9,7 +9,10 @@ use crate::{
     error::AppError,
     hrana::{
         convert::{hrana_to_sql, sql_to_stmt_result},
-        types::{HranaError, PipelineRequest, PipelineResponse, StreamRequest, StreamResponse, StreamResult},
+        types::{
+            HranaError, PipelineRequest, PipelineResponse, StreamRequest, StreamResponse,
+            StreamResult,
+        },
     },
     http::HttpResponse,
     state::SharedState,
@@ -77,10 +80,10 @@ async fn parse_json_body<T: serde::de::DeserializeOwned>(
 }
 
 async fn execute_pipeline(
-    db:       &Arc<dyn SqldAdapter>,
-    claims:   &Claims,
+    db: &Arc<dyn SqldAdapter>,
+    claims: &Claims,
     requests: &[StreamRequest],
-    db_info:  &DbInfo,
+    db_info: &DbInfo,
     quota_exceeded: bool,
 ) -> Result<Vec<StreamResult>, AppError> {
     let mut results = Vec::with_capacity(requests.len());
@@ -102,7 +105,7 @@ async fn execute_pipeline(
                     results.push(StreamResult::Error {
                         error: HranaError {
                             message: "named arguments are not supported yet".into(),
-                            code:    "SQLITE_ERROR".into(),
+                            code: "SQLITE_ERROR".into(),
                         },
                     });
                     continue;
@@ -119,7 +122,7 @@ async fn execute_pipeline(
                         results.push(StreamResult::Error {
                             error: HranaError {
                                 message: "invalid argument value".into(),
-                                code:    "SQLITE_ERROR".into(),
+                                code: "SQLITE_ERROR".into(),
                             },
                         });
                         continue;
@@ -134,7 +137,7 @@ async fn execute_pipeline(
                     Err(AppError::Sqld(msg)) => results.push(StreamResult::Error {
                         error: HranaError {
                             message: msg.clone(),
-                            code:    sqld_error_code(&msg),
+                            code: sqld_error_code(&msg),
                         },
                     }),
                     Err(e) => return Err(e),
@@ -158,7 +161,7 @@ async fn execute_pipeline(
                     Err(AppError::Sqld(msg)) => results.push(StreamResult::Error {
                         error: HranaError {
                             message: msg.clone(),
-                            code:    sqld_error_code(&msg),
+                            code: sqld_error_code(&msg),
                         },
                     }),
                     Err(e) => return Err(e),
@@ -181,8 +184,7 @@ fn is_write_stmt(sql: &str) -> bool {
     let upper = sql.trim_start().to_ascii_uppercase();
     matches!(
         upper.split_whitespace().next().unwrap_or(""),
-        "INSERT" | "UPDATE" | "DELETE" | "CREATE" | "DROP"
-            | "ALTER" | "REPLACE" | "PRAGMA"
+        "INSERT" | "UPDATE" | "DELETE" | "CREATE" | "DROP" | "ALTER" | "REPLACE" | "PRAGMA"
     )
 }
 

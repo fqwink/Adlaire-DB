@@ -17,9 +17,9 @@ pub enum SqlValue {
 
 #[derive(Debug, Default)]
 pub struct SqlResult {
-    pub cols:              Vec<(Option<String>, Option<String>)>, // (name, decltype)
-    pub rows:              Vec<Vec<SqlValue>>,
-    pub rows_affected:     u64,
+    pub cols: Vec<(Option<String>, Option<String>)>, // (name, decltype)
+    pub rows: Vec<Vec<SqlValue>>,
+    pub rows_affected: u64,
     pub last_insert_rowid: Option<i64>,
 }
 
@@ -29,8 +29,8 @@ pub struct SqlResult {
 pub trait SqldAdapter: Send + Sync {
     async fn execute(
         &self,
-        sql:       &str,
-        args:      Vec<SqlValue>,
+        sql: &str,
+        args: Vec<SqlValue>,
         want_rows: bool,
     ) -> Result<SqlResult, AppError>;
 
@@ -47,23 +47,26 @@ pub struct RealSqldAdapter {
 }
 
 impl RealSqldAdapter {
-    pub async fn open(path: &Path, busy_timeout_ms: u64, run_integrity_check: bool) -> anyhow::Result<Self> {
-        let db = libsql::Builder::new_local(path)
-            .build()
-            .await?;
+    pub async fn open(
+        path: &Path,
+        busy_timeout_ms: u64,
+        run_integrity_check: bool,
+    ) -> anyhow::Result<Self> {
+        let db = libsql::Builder::new_local(path).build().await?;
 
         let conn = db.connect()?;
         // journal_mode と busy_timeout は結果行を返すため query() を使う
         let _ = conn.query("PRAGMA journal_mode=WAL", ()).await?;
         conn.execute("PRAGMA synchronous=NORMAL", ()).await?;
-        let _ = conn.query(
-            &format!("PRAGMA busy_timeout={busy_timeout_ms}"),
-            (),
-        ).await?;
+        let _ = conn
+            .query(&format!("PRAGMA busy_timeout={busy_timeout_ms}"), ())
+            .await?;
 
         if run_integrity_check {
             let mut rows = conn.query("PRAGMA integrity_check", ()).await?;
-            let row = rows.next().await?
+            let row = rows
+                .next()
+                .await?
                 .ok_or_else(|| anyhow::anyhow!("integrity_check returned no rows"))?;
             let val: String = row.get(0)?;
             if val != "ok" {
@@ -89,7 +92,10 @@ fn libsql_err(e: libsql::Error) -> AppError {
 #[async_trait::async_trait]
 impl SqldAdapter for RealSqldAdapter {
     async fn execute_batch(&self, sql: &str) -> Result<(), AppError> {
-        let conn = self.db.connect().map_err(|e| AppError::Sqld(e.to_string()))?;
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| AppError::Sqld(e.to_string()))?;
         conn.execute_batch(sql)
             .await
             .map(|_| ())
@@ -98,20 +104,20 @@ impl SqldAdapter for RealSqldAdapter {
 
     async fn execute(
         &self,
-        sql:       &str,
-        args:      Vec<SqlValue>,
+        sql: &str,
+        args: Vec<SqlValue>,
         want_rows: bool,
     ) -> Result<SqlResult, AppError> {
         // 注意: Connection は呼び出しごとに生成される。
         // BEGIN/COMMIT をまたぐトランザクションは Phase 5 で Connection 共有に変更する。
-        let conn   = self.db.connect().map_err(|e| AppError::Sqld(e.to_string()))?;
+        let conn = self
+            .db
+            .connect()
+            .map_err(|e| AppError::Sqld(e.to_string()))?;
         let params = to_libsql_params(args);
 
         if want_rows {
-            let mut rows = conn
-                .query(sql, params)
-                .await
-                .map_err(libsql_err)?;
+            let mut rows = conn.query(sql, params).await.map_err(libsql_err)?;
 
             let col_count = rows.column_count();
             let cols: Vec<(Option<String>, Option<String>)> = (0..col_count)
@@ -134,21 +140,18 @@ impl SqldAdapter for RealSqldAdapter {
 
             Ok(SqlResult {
                 cols,
-                rows:              result_rows,
-                rows_affected:     0,
+                rows: result_rows,
+                rows_affected: 0,
                 last_insert_rowid: None,
             })
         } else {
-            let rows_affected = conn
-                .execute(sql, params)
-                .await
-                .map_err(libsql_err)?;
+            let rows_affected = conn.execute(sql, params).await.map_err(libsql_err)?;
 
             let last_insert_rowid = conn.last_insert_rowid();
 
             Ok(SqlResult {
-                cols:              vec![],
-                rows:              vec![],
+                cols: vec![],
+                rows: vec![],
                 rows_affected,
                 last_insert_rowid: Some(last_insert_rowid),
             })
@@ -159,22 +162,22 @@ impl SqldAdapter for RealSqldAdapter {
 fn to_libsql_params(args: Vec<SqlValue>) -> Vec<libsql::Value> {
     args.into_iter()
         .map(|v| match v {
-            SqlValue::Null       => libsql::Value::Null,
+            SqlValue::Null => libsql::Value::Null,
             SqlValue::Integer(n) => libsql::Value::Integer(n),
-            SqlValue::Real(f)    => libsql::Value::Real(f),
-            SqlValue::Text(s)    => libsql::Value::Text(s),
-            SqlValue::Blob(b)    => libsql::Value::Blob(b),
+            SqlValue::Real(f) => libsql::Value::Real(f),
+            SqlValue::Text(s) => libsql::Value::Text(s),
+            SqlValue::Blob(b) => libsql::Value::Blob(b),
         })
         .collect()
 }
 
 fn from_libsql_value(v: libsql::Value) -> SqlValue {
     match v {
-        libsql::Value::Null       => SqlValue::Null,
+        libsql::Value::Null => SqlValue::Null,
         libsql::Value::Integer(n) => SqlValue::Integer(n),
-        libsql::Value::Real(f)    => SqlValue::Real(f),
-        libsql::Value::Text(s)    => SqlValue::Text(s),
-        libsql::Value::Blob(b)    => SqlValue::Blob(b),
+        libsql::Value::Real(f) => SqlValue::Real(f),
+        libsql::Value::Text(s) => SqlValue::Text(s),
+        libsql::Value::Blob(b) => SqlValue::Blob(b),
     }
 }
 
@@ -190,8 +193,8 @@ impl SqldAdapter for MockSqldAdapter {
 
     async fn execute(
         &self,
-        _sql:       &str,
-        _args:      Vec<SqlValue>,
+        _sql: &str,
+        _args: Vec<SqlValue>,
         _want_rows: bool,
     ) -> Result<SqlResult, AppError> {
         Ok(SqlResult::default())

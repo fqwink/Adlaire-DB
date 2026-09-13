@@ -2,10 +2,10 @@
 
 ## 仕様書の位置づけ
 
-- `docs/PROJECT_CHARTER.md` は**プロジェクト憲章正本**であり、仕様正本群の入口も兼ねる
+- `docs/PROJECT_CHARTER.md` は**プロジェクト憲章正本**であり、概要、方針、ポリシー、仕様正本群の入口、仕様駆動開発方針をまとめる
 - `docs/spec/core.md`、`docs/spec/auth.md`、`docs/spec/api.md`、`docs/spec/internalization.md`、`docs/spec/testing.md`、`docs/spec/phase-*.md` は**仕様正本群**（single source of truth）である
 - 中核仕様、認証・認可仕様、API契約仕様、内製化仕様、テスト仕様、Phase 1〜19 の詳細は `docs/spec/` に分割して管理する
-- `docs/POLICY.md` はポリシー文書であり、仕様ではない
+- ポリシーは `docs/PROJECT_CHARTER.md` に記載し、仕様ではない
 - 方針、ポリシーを実装根拠にする場合は、先に仕様正本へ落とし込むこと
 - `docs/Adlaire-db-spec.html` は `docs/PROJECT_CHARTER.md` から生成された閲覧用 HTML であり、正本ではない
 - 実装は仕様書に基づいて行うこと

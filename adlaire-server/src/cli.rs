@@ -3,7 +3,11 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "adlaire-db", version, about = "Self-hosted libSQL-compatible DB server")]
+#[command(
+    name = "adlaire-db",
+    version,
+    about = "Self-hosted libSQL-compatible DB server"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: CliCommand,

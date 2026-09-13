@@ -2,9 +2,9 @@
 
 ## Status
 
-- `docs/PROJECT_CHARTER.md` is the project charter source of truth and also serves as the specification entry point.
+- `docs/PROJECT_CHARTER.md` is the project charter source of truth and records the overview, direction, policies, specification entry point, and specification-driven development direction.
 - `docs/spec/core.md`, `docs/spec/auth.md`, `docs/spec/api.md`, `docs/spec/internalization.md`, `docs/spec/testing.md`, and `docs/spec/phase-*.md` are the specification source-of-truth set.
-- `docs/POLICY.md` is the policy document and is not a specification source of truth.
+- Policies are recorded in `docs/PROJECT_CHARTER.md` and are not specification source of truth.
 - Phase 1 through Phase 19 are split under `docs/spec/`.
 - Files outside the specification source-of-truth set are supporting documents.
 - If this index conflicts with the specification source-of-truth set, the specification source-of-truth set takes precedence.
@@ -20,14 +20,13 @@ accident.
 
 | Path | Role | Authority |
 |------|------|-----------|
-| `docs/PROJECT_CHARTER.md` | Project charter and specification entry point | Project charter source of truth |
+| `docs/PROJECT_CHARTER.md` | Project charter, overview, direction, policies, and specification entry point | Project charter source of truth |
 | `docs/spec/core.md` | Core compatibility, boundary, runtime, persistence, operations, and implementation-control specification | Source of truth |
 | `docs/spec/auth.md` | Authentication and authorization specification | Source of truth |
 | `docs/spec/api.md` | API contract specification | Source of truth |
 | `docs/spec/internalization.md` | Internalization implementation specification | Source of truth |
 | `docs/spec/testing.md` | Testing specification | Source of truth |
 | `docs/spec/phase-01.md` - `docs/spec/phase-19.md` | Phase-specific implementation contracts | Source of truth |
-| `docs/POLICY.md` | Decision and operation policies before specification conversion | Supporting document |
 | `AGENTS.md` | Repository work rules for agents | Work rule |
 | `docs/DOCUMENT_INDEX.md` | Documentation index and split-management reference | Supporting document |
 

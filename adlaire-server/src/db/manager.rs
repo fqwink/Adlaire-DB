@@ -22,35 +22,32 @@ use crate::{
 
 pub struct DbManager {
     data_dir: PathBuf,
-    dbs:      RwLock<HashMap<String, Arc<dyn SqldAdapter>>>,
-    meta:     RwLock<DatabasesMeta>,
+    dbs: RwLock<HashMap<String, Arc<dyn SqldAdapter>>>,
+    meta: RwLock<DatabasesMeta>,
     management: RwLock<ManagementMeta>,
-    config:   Arc<StorageConfig>,
+    config: Arc<StorageConfig>,
 }
 
 impl DbManager {
     /// 起動時: databases.json を読み込み、各 DB をオープンする
-    pub async fn open_all(
-        data_dir: &Path,
-        config:   Arc<StorageConfig>,
-    ) -> anyhow::Result<Self> {
+    pub async fn open_all(data_dir: &Path, config: Arc<StorageConfig>) -> anyhow::Result<Self> {
         let mut meta = DatabasesMeta::load(data_dir)?;
 
         // "default" DB が存在しなければ作成する（Phase 3 シングル DB モード）
         if !meta.databases.iter().any(|d| d.name == "default") {
             let info = DbInfo {
-                id:                uuid::Uuid::new_v4().to_string(),
-                name:              "default".to_string(),
-                created_at:        chrono::Utc::now(),
-                size_bytes:        0,
-                organization:      "default".to_string(),
-                group:             "default".to_string(),
-                location:          "default".to_string(),
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "default".to_string(),
+                created_at: chrono::Utc::now(),
+                size_bytes: 0,
+                organization: "default".to_string(),
+                group: "default".to_string(),
+                location: "default".to_string(),
                 delete_protection: false,
-                block_reads:       false,
-                block_writes:      false,
-                allow_attach:      true,
-                legacy_name:       false,
+                block_reads: false,
+                block_writes: false,
+                allow_attach: true,
+                legacy_name: false,
             };
             let db_path = data_dir.join("databases").join("default");
             std::fs::create_dir_all(&db_path)?;
@@ -72,7 +69,10 @@ impl DbManager {
                 db.location = "default".to_string();
                 changed = true;
             }
-            if db.name.contains('_') || db.name.chars().any(|c| c.is_ascii_uppercase()) || db.name.len() > 64 {
+            if db.name.contains('_')
+                || db.name.chars().any(|c| c.is_ascii_uppercase())
+                || db.name.len() > 64
+            {
                 db.legacy_name = true;
                 changed = true;
             }
@@ -84,12 +84,15 @@ impl DbManager {
 
         let mut dbs: HashMap<String, Arc<dyn SqldAdapter>> = HashMap::new();
         for db in &meta.databases {
-            let db_file = data_dir
-                .join("databases")
-                .join(&db.name)
-                .join("data.db");
+            let db_file = data_dir.join("databases").join(&db.name).join("data.db");
 
-            match RealSqldAdapter::open(&db_file, config.busy_timeout_ms, !config.skip_integrity_check).await {
+            match RealSqldAdapter::open(
+                &db_file,
+                config.busy_timeout_ms,
+                !config.skip_integrity_check,
+            )
+            .await
+            {
                 Ok(adapter) => {
                     dbs.insert(db.name.clone(), Arc::new(adapter));
                     tracing::info!(db = %db.name, "opened database");
@@ -104,8 +107,8 @@ impl DbManager {
         tracing::info!(count = dbs.len(), "DbManager ready");
         Ok(Self {
             data_dir: data_dir.to_path_buf(),
-            dbs:      RwLock::new(dbs),
-            meta:     RwLock::new(meta),
+            dbs: RwLock::new(dbs),
+            meta: RwLock::new(meta),
             management: RwLock::new(management),
             config,
         })
@@ -116,7 +119,8 @@ impl DbManager {
     }
 
     pub async fn create(&self, name: &str) -> Result<DbInfo, AppError> {
-        self.create_inner(name, "default", "default", "default", false).await
+        self.create_inner(name, "default", "default", "default", false)
+            .await
     }
 
     pub async fn create_scoped(
@@ -129,7 +133,8 @@ impl DbManager {
         let organization = self.resolve_organization_slug(organization).await?;
         let group = self.resolve_group_name(&organization, group).await?;
         let location = self.resolve_location_name(location).await?;
-        self.create_inner(name, &organization, &group, &location, true).await
+        self.create_inner(name, &organization, &group, &location, true)
+            .await
     }
 
     async fn create_inner(
@@ -157,36 +162,43 @@ impl DbManager {
         }
 
         let db_path = self.data_dir.join("databases").join(name);
-        std::fs::create_dir_all(&db_path)
-            .map_err(|e| AppError::Internal(e.into()))?;
+        std::fs::create_dir_all(&db_path).map_err(|e| AppError::Internal(e.into()))?;
 
         let db_file = db_path.join("data.db");
-        let adapter = RealSqldAdapter::open(&db_file, self.config.busy_timeout_ms, !self.config.skip_integrity_check)
-            .await
-            .map_err(|e| AppError::Internal(e))?;
+        let adapter = RealSqldAdapter::open(
+            &db_file,
+            self.config.busy_timeout_ms,
+            !self.config.skip_integrity_check,
+        )
+        .await
+        .map_err(|e| AppError::Internal(e))?;
 
         let info = DbInfo {
-            id:                uuid::Uuid::new_v4().to_string(),
-            name:              name.to_string(),
-            created_at:        chrono::Utc::now(),
-            size_bytes:        0,
-            organization:      organization.to_string(),
-            group:             group.to_string(),
-            location:          location.to_string(),
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            created_at: chrono::Utc::now(),
+            size_bytes: 0,
+            organization: organization.to_string(),
+            group: group.to_string(),
+            location: location.to_string(),
             delete_protection: false,
-            block_reads:       false,
-            block_writes:      false,
-            allow_attach:      true,
-            legacy_name:       false,
+            block_reads: false,
+            block_writes: false,
+            allow_attach: true,
+            legacy_name: false,
         };
 
         {
             let mut meta = self.meta.write().await;
             meta.databases.push(info.clone());
-            meta.save(&self.data_dir).map_err(|e| AppError::Internal(e))?;
+            meta.save(&self.data_dir)
+                .map_err(|e| AppError::Internal(e))?;
         }
 
-        self.dbs.write().await.insert(name.to_string(), Arc::new(adapter));
+        self.dbs
+            .write()
+            .await
+            .insert(name.to_string(), Arc::new(adapter));
         tracing::info!(db = name, id = %info.id, "created database");
         Ok(info)
     }
@@ -206,14 +218,14 @@ impl DbManager {
 
         let db_path = self.data_dir.join("databases").join(name);
         if db_path.exists() {
-            std::fs::remove_dir_all(&db_path)
-                .map_err(|e| AppError::Internal(e.into()))?;
+            std::fs::remove_dir_all(&db_path).map_err(|e| AppError::Internal(e.into()))?;
         }
 
         {
             let mut meta = self.meta.write().await;
             meta.databases.retain(|d| d.name != name);
-            meta.save(&self.data_dir).map_err(|e| AppError::Internal(e))?;
+            meta.save(&self.data_dir)
+                .map_err(|e| AppError::Internal(e))?;
         }
 
         tracing::info!(db = name, "deleted database");
@@ -225,19 +237,25 @@ impl DbManager {
         meta.databases
             .iter()
             .map(|info| {
-                let db_path = self.data_dir
+                let db_path = self
+                    .data_dir
                     .join("databases")
                     .join(&info.name)
                     .join("data.db");
-                let size_bytes = std::fs::metadata(&db_path)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
-                DbInfo { size_bytes, ..info.clone() }
+                let size_bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+                DbInfo {
+                    size_bytes,
+                    ..info.clone()
+                }
             })
             .collect()
     }
 
-    pub async fn list_for_organization(&self, organization: &str, group: Option<&str>) -> Result<Vec<DbInfo>, AppError> {
+    pub async fn list_for_organization(
+        &self,
+        organization: &str,
+        group: Option<&str>,
+    ) -> Result<Vec<DbInfo>, AppError> {
         let organization = self.resolve_organization_slug(organization).await?;
         let group = match group {
             Some(group) => Some(self.resolve_group_name(&organization, group).await?),
@@ -248,7 +266,12 @@ impl DbManager {
             .await
             .into_iter()
             .filter(|db| db.organization == organization)
-            .filter(|db| group.as_ref().map(|group| db.group == *group).unwrap_or(true))
+            .filter(|db| {
+                group
+                    .as_ref()
+                    .map(|group| db.group == *group)
+                    .unwrap_or(true)
+            })
             .collect())
     }
 
@@ -256,12 +279,20 @@ impl DbManager {
         self.management.read().await.organizations.clone()
     }
 
-    pub async fn create_organization(&self, name: String, slug: Option<String>) -> Result<OrganizationInfo, AppError> {
+    pub async fn create_organization(
+        &self,
+        name: String,
+        slug: Option<String>,
+    ) -> Result<OrganizationInfo, AppError> {
         let slug = slug.unwrap_or_else(|| name.clone());
         validate_slug(&name)?;
         validate_slug(&slug)?;
         let mut management = self.management.write().await;
-        if management.organizations.iter().any(|org| org.id == slug || org.slug == slug) {
+        if management
+            .organizations
+            .iter()
+            .any(|org| org.id == slug || org.slug == slug)
+        {
             return Err(AppError::OrgAlreadyExists(slug));
         }
         let info = OrganizationInfo {
@@ -271,7 +302,9 @@ impl DbManager {
             created_at: chrono::Utc::now(),
         };
         management.organizations.push(info.clone());
-        management.save(&self.data_dir).map_err(|e| AppError::Internal(e))?;
+        management
+            .save(&self.data_dir)
+            .map_err(|e| AppError::Internal(e))?;
         Ok(info)
     }
 
@@ -280,9 +313,18 @@ impl DbManager {
             Some(org) => Some(self.resolve_organization_slug(org).await?),
             None => None,
         };
-        let groups = self.management.read().await.groups
+        let groups = self
+            .management
+            .read()
+            .await
+            .groups
             .iter()
-            .filter(|group| organization.as_ref().map(|org| group.organization == *org).unwrap_or(true))
+            .filter(|group| {
+                organization
+                    .as_ref()
+                    .map(|org| group.organization == *org)
+                    .unwrap_or(true)
+            })
             .cloned()
             .collect();
         Ok(groups)
@@ -318,7 +360,9 @@ impl DbManager {
             created_at: chrono::Utc::now(),
         };
         management.groups.push(info.clone());
-        management.save(&self.data_dir).map_err(|e| AppError::Internal(e))?;
+        management
+            .save(&self.data_dir)
+            .map_err(|e| AppError::Internal(e))?;
         Ok(info)
     }
 
@@ -335,7 +379,11 @@ impl DbManager {
     ) -> Result<LocationInfo, AppError> {
         validate_slug(&name)?;
         let mut management = self.management.write().await;
-        if management.locations.iter().any(|loc| loc.name == name || loc.id == name) {
+        if management
+            .locations
+            .iter()
+            .any(|loc| loc.name == name || loc.id == name)
+        {
             return Err(AppError::LocationAlreadyExists(name));
         }
         let info = LocationInfo {
@@ -347,7 +395,9 @@ impl DbManager {
             created_at: chrono::Utc::now(),
         };
         management.locations.push(info.clone());
-        management.save(&self.data_dir).map_err(|e| AppError::Internal(e))?;
+        management
+            .save(&self.data_dir)
+            .map_err(|e| AppError::Internal(e))?;
         Ok(info)
     }
 
@@ -366,18 +416,33 @@ impl DbManager {
         self.require_scope(&scope_type, &scope).await?;
         let mut management = self.management.write().await;
         let now = chrono::Utc::now();
-        if let Some(existing) = management.quotas.iter_mut().find(|quota| quota.scope_type == scope_type && quota.scope == scope) {
+        if let Some(existing) = management
+            .quotas
+            .iter_mut()
+            .find(|quota| quota.scope_type == scope_type && quota.scope == scope)
+        {
             existing.storage_bytes = storage_bytes;
             existing.rows = rows;
             existing.write_ops_per_minute = write_ops_per_minute;
             existing.updated_at = now;
             let info = existing.clone();
-            management.save(&self.data_dir).map_err(|e| AppError::Internal(e))?;
+            management
+                .save(&self.data_dir)
+                .map_err(|e| AppError::Internal(e))?;
             return Ok(info);
         }
-        let info = QuotaInfo { scope_type, scope, storage_bytes, rows, write_ops_per_minute, updated_at: now };
+        let info = QuotaInfo {
+            scope_type,
+            scope,
+            storage_bytes,
+            rows,
+            write_ops_per_minute,
+            updated_at: now,
+        };
         management.quotas.push(info.clone());
-        management.save(&self.data_dir).map_err(|e| AppError::Internal(e))?;
+        management
+            .save(&self.data_dir)
+            .map_err(|e| AppError::Internal(e))?;
         Ok(info)
     }
 
@@ -422,13 +487,8 @@ impl DbManager {
             .find(|d| d.name == name)
             .cloned()
             .ok_or_else(|| AppError::DbNotFound(name.to_string()))?;
-        let db_path = self.data_dir
-            .join("databases")
-            .join(name)
-            .join("data.db");
-        let size_bytes = std::fs::metadata(&db_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let db_path = self.data_dir.join("databases").join(name).join("data.db");
+        let size_bytes = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
         Ok(DbInfo { size_bytes, ..info })
     }
 
@@ -457,7 +517,8 @@ impl DbManager {
             info.allow_attach = value;
         }
         let info = info.clone();
-        meta.save(&self.data_dir).map_err(|e| AppError::Internal(e))?;
+        meta.save(&self.data_dir)
+            .map_err(|e| AppError::Internal(e))?;
         Ok(info)
     }
 
@@ -491,12 +552,21 @@ impl DbManager {
         };
         info.delete_protection = delete_protection;
         let info = info.clone();
-        management.save(&self.data_dir).map_err(|e| AppError::Internal(e))?;
+        management
+            .save(&self.data_dir)
+            .map_err(|e| AppError::Internal(e))?;
         Ok(info)
     }
 
     async fn require_organization(&self, org: &str) -> Result<(), AppError> {
-        if self.management.read().await.organizations.iter().any(|item| item.id == org || item.slug == org || item.name == org) {
+        if self
+            .management
+            .read()
+            .await
+            .organizations
+            .iter()
+            .any(|item| item.id == org || item.slug == org || item.name == org)
+        {
             Ok(())
         } else {
             Err(AppError::OrgNotFound(org.to_string()))
@@ -505,7 +575,8 @@ impl DbManager {
 
     async fn require_group(&self, organization: &str, group: &str) -> Result<(), AppError> {
         if self.management.read().await.groups.iter().any(|item| {
-            item.organization == organization && (item.id == group || item.slug == group || item.name == group)
+            item.organization == organization
+                && (item.id == group || item.slug == group || item.name == group)
         }) {
             Ok(())
         } else {
@@ -514,7 +585,14 @@ impl DbManager {
     }
 
     async fn require_location(&self, location: &str) -> Result<(), AppError> {
-        if self.management.read().await.locations.iter().any(|item| item.id == location || item.name == location) {
+        if self
+            .management
+            .read()
+            .await
+            .locations
+            .iter()
+            .any(|item| item.id == location || item.name == location)
+        {
             Ok(())
         } else {
             Err(AppError::LocationNotFound(location.to_string()))
@@ -525,7 +603,14 @@ impl DbManager {
         match scope_type {
             "organization" => self.require_organization(scope).await,
             "group" => {
-                if self.management.read().await.groups.iter().any(|item| item.id == scope || item.slug == scope || item.name == scope) {
+                if self
+                    .management
+                    .read()
+                    .await
+                    .groups
+                    .iter()
+                    .any(|item| item.id == scope || item.slug == scope || item.name == scope)
+                {
                     Ok(())
                 } else {
                     Err(AppError::GroupNotFound(scope.to_string()))
@@ -547,7 +632,11 @@ impl DbManager {
             .ok_or_else(|| AppError::OrgNotFound(org.to_string()))
     }
 
-    async fn resolve_group_name(&self, organization: &str, group: &str) -> Result<String, AppError> {
+    async fn resolve_group_name(
+        &self,
+        organization: &str,
+        group: &str,
+    ) -> Result<String, AppError> {
         self.management
             .read()
             .await
@@ -579,8 +668,8 @@ impl DbManager {
 }
 
 fn validate_slug(value: &str) -> Result<(), AppError> {
-    use std::sync::LazyLock;
     use regex::Regex;
+    use std::sync::LazyLock;
     static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9_-]{1,63}$").unwrap());
     if RE.is_match(value) {
         Ok(())
