@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.137
+**バージョン：** V.138
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.137` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.138` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -6916,6 +6916,43 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 | 18 | HA token、node_id、term、leader election、promote/demote、split-brain policy が決まっている | leader election、failover、redirect、restart、partition、split-brain rejection、Phase 1〜17 regression が通る |
 | 19 | 切り替える内製 crate、config flag、rollback flag、性能基準、互換テスト範囲が決まっている | Turso Cloud / libSQL SDK 互換、crash recovery、rollback、performance baseline、Phase 1〜18 regression が通る |
 
+### 9.11.1 Phase 1〜19 実装精度索引
+
+本索引は Phase 実装開始時の入口である。実装者は対象 Phase の行にある `詳細節`、`固定契約`、`台帳`、`シナリオ`、`Done receipt`、`横断契約`、`regression`、`precision closure` を Phase packet に転記してから実装する。1 つでも未定義、未読、未転記、または Phase packet / Done receipt / 実装差分と不一致がある場合は、実装開始禁止または Phase 未完了とする。
+
+| Phase | 詳細節 | 固定契約 | 台帳 | シナリオ | Done receipt | 横断契約 | 必須 regression | precision closure |
+|-------|--------|----------|------|----------|--------------|----------|-----------------|-------------------|
+| 1 | `### Phase 1` | Phase 1 完全実装精度固定契約 | Phase 1 原子タスク台帳 | Phase 1 シナリオマトリクス | Phase 1 Done receipt 必須項目 | Phase 1〜5 完全実装精度正規化契約 | build/test | help/config/no persistence/stub token |
+| 2 | `### Phase 2` | Phase 2 完全実装精度固定契約 | Phase 2 原子タスク台帳 | Phase 2 シナリオマトリクス | Phase 2 Done receipt 必須項目 | Phase 1〜5 完全実装精度正規化契約 | Phase 1 regression | data-dir/lock/metadata/default DB/WAL/integrity/restart/no HTTP |
+| 3 | `### Phase 3` | Phase 3 完全実装精度固定契約 | Phase 3 原子タスク台帳 | Phase 3 シナリオマトリクス | Phase 3 Done receipt 必須項目 | Phase 1〜5 完全実装精度正規化契約 | Phase 1〜2 regression | hrana-http v2 schema/wire snapshot/SDK transcript/restart persistence |
+| 4 | `### Phase 4` | Phase 4 完全実装精度固定契約 | Phase 4 原子タスク台帳 | Phase 4 シナリオマトリクス | Phase 4 Done receipt 必須項目 | Phase 1〜5 完全実装精度正規化契約 | Phase 1〜3 regression | auth matrix/permission matrix/token persistence/secret redaction |
+| 5 | `### Phase 5` | Phase 5 完全実装精度固定契約 | Phase 5 原子タスク台帳 | Phase 5 シナリオマトリクス | Phase 5 Done receipt 必須項目 | Phase 1〜5 完全実装精度正規化契約 | Phase 1〜4 regression | JSONL/request log/SDK CRUD/restart/secret scan/unsupported surface |
+| 6 | `### Phase 6` | Phase 6 完全実装精度固定契約 | Phase 6 原子タスク台帳 | Phase 6 シナリオマトリクス | Phase 6 Done receipt 必須項目 | Phase 6〜11 完全実装精度正規化契約 | Phase 1〜5 regression | DB name/path routing/default compatibility/isolation/metadata/restart |
+| 7 | `### Phase 7` | Phase 7 完全実装精度固定契約 | Phase 7 原子タスク台帳 | Phase 7 シナリオマトリクス | Phase 7 Done receipt 必須項目 | Phase 6〜11 完全実装精度正規化契約 | Phase 1〜6 regression | Admin auth/DB CRUD/token CRUD/DB scope/revoke/metadata consistency |
+| 8 | `### Phase 8` | Phase 8 完全実装精度固定契約 | Phase 8 原子タスク台帳 | Phase 8 シナリオマトリクス | Phase 8 Done receipt 必須項目 | Phase 6〜11 完全実装精度正規化契約 | Phase 1〜7 regression | org/group/location/quota/usage/Turso wrapper/migration/scope/quota |
+| 9 | `### Phase 9` | Phase 9 完全実装精度固定契約 | Phase 9 原子タスク台帳 | Phase 9 シナリオマトリクス | Phase 9 Done receipt 必須項目 | Phase 6〜11 完全実装精度正規化契約 | Phase 1〜8 regression | WebSocket upgrade/hello/stream/transaction/close/SDK WS |
+| 10 | `### Phase 10` | Phase 10 完全実装精度固定契約 | Phase 10 原子タスク台帳 | Phase 10 シナリオマトリクス | Phase 10 Done receipt 必須項目 | Phase 6〜11 完全実装精度正規化契約 | Phase 1〜9 regression | ATTACH allow/deny/path rejection/metrics/admin auth/redaction |
+| 11 | `### Phase 11` | Phase 11 完全実装精度固定契約 | Phase 11 原子タスク台帳 | Phase 11 シナリオマトリクス | Phase 11 Done receipt 必須項目 | Phase 6〜11 完全実装精度正規化契約 | Phase 1〜10 regression | replica registration/WAL stream/checksum/snapshot/retention/compatibility |
+| 12 | `### Phase 12` | Phase 12 完全実装精度固定契約 | Phase 12 原子タスク台帳 | Phase 12 シナリオマトリクス | Phase 12 Done receipt 必須項目 | Phase 12〜19 完全実装精度正規化契約 | Phase 1〜11 regression | replica state/snapshot bootstrap/WAL catch-up/redirect/primary down/multi replica |
+| 13 | `### Phase 13` | Phase 13 完全実装精度固定契約 | Phase 13 原子タスク台帳 | Phase 13 シナリオマトリクス | Phase 13 Done receipt 必須項目 | Phase 12〜19 完全実装精度正規化契約 | Phase 1〜12 regression | manifest/archive/snapshot/retention/corruption/disabled mode |
+| 14 | `### Phase 14` | Phase 14 完全実装精度固定契約 | Phase 14 原子タスク台帳 | Phase 14 シナリオマトリクス | Phase 14 Done receipt 必須項目 | Phase 12〜19 完全実装精度正規化契約 | Phase 1〜13 regression | backup consistency/restore rollback/PITR/startup recovery/policy precedence |
+| 15 | `### Phase 15` | Phase 15 完全実装精度固定契約 | Phase 15 原子タスク台帳 | Phase 15 シナリオマトリクス | Phase 15 Done receipt 必須項目 | Phase 12〜19 完全実装精度正規化契約 | Phase 1〜14 regression | branch metadata/create/delete recovery/routing isolation/seed compatibility |
+| 16 | `### Phase 16` | Phase 16 完全実装精度固定契約 | Phase 16 原子タスク台帳 | Phase 16 シナリオマトリクス | Phase 16 Done receipt 必須項目 | Phase 12〜19 完全実装精度正規化契約 | Phase 1〜15 regression | extension manifest/allowlist/sha256/path rejection/load/SQL bypass |
+| 17 | `### Phase 17` | Phase 17 完全実装精度固定契約 | Phase 17 原子タスク台帳 | Phase 17 シナリオマトリクス | Phase 17 Done receipt 必須項目 | Phase 12〜19 完全実装精度正規化契約 | Phase 1〜16 regression | metrics snapshot/Prometheus/counter restore/usage-quota/label redaction |
+| 18 | `### Phase 18` | Phase 18 完全実装精度固定契約 | Phase 18 原子タスク台帳 | Phase 18 シナリオマトリクス | Phase 18 Done receipt 必須項目 | Phase 12〜19 完全実装精度正規化契約 | Phase 1〜17 regression | HA state/term/promote/demote/redirect/split-brain/restart |
+| 19 | `### Phase 19` | Phase 19 完全実装精度固定契約 | Phase 19 原子タスク台帳 | Phase 19 シナリオマトリクス | Phase 19 Done receipt 必須項目 | Phase 12〜19 完全実装精度正規化契約 | Phase 1〜18 regression | config flags/shadow-active-rollback/adapter boundary/SDK/performance/crash recovery |
+
+**索引の判定規則：**
+
+| 状態 | 判定 |
+|------|------|
+| 対象 Phase の詳細節、固定契約、台帳、シナリオ、Done receipt、横断契約のいずれかを Phase packet に転記していない | 実装開始禁止 |
+| Phase packet の `scope`、`regression_set`、`precision_closure_result` が本索引と一致しない | 実装開始禁止 |
+| Done receipt の `implemented_scope`、`excluded_scope`、`atomic_task_result`、`scenario_matrix_result`、`precision_closure_result` が本索引と一致しない | Phase 未完了 |
+| 本索引にない Phase 外機能、未来 API、metadata、config、dependency を実装差分へ含める | merge 不可 |
+| 本索引の必須 regression を実行せず、影響なし理由も Phase packet / Done receipt にない | Phase 未完了 |
+| 索引、Phase 詳細節、§9.2、§9.4、§9.8、§9.11、§9.17 が矛盾する | 仕様修正 PR に戻す |
+
 ### 9.12 PR レビュー観点
 
 PR レビューでは以下を必ず確認する。該当しない項目は PR description に `N/A` と理由を書く。
@@ -12771,7 +12808,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.137` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.138` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
