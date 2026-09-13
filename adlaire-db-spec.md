@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.159
+**バージョン：** V.160
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.159` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.160` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -7129,6 +7129,22 @@ Phase 完了時の Done receipt は、Phase packet freeze checklist と `precisi
 
 `final_reconciliation_result = pass` の場合だけ Phase 完了候補にできる。`freeze_match_result`、`canonical_format_result`、`manifest_match_result`、`reproduction_match_result`、`review_algorithm_result`、`open_count_match_result` のいずれかを省略した Done receipt は、機能が動作していても Phase 未完了とする。
 
+**precision closure reconciliation failure remediation map：**
+
+reconciliation field が `pass` 以外になった場合、実装者は以下の修正先を先に解消する。失敗 field を `N/A` に逃がすこと、`final_reconciliation_result` だけを pass にすること、artifact だけを差し替えて manifest / hash / reviewer reproduction を更新しないことを禁止する。
+
+| failed field | 修正先 |
+|--------------|--------|
+| `freeze_match_result` | Phase packet freeze checklist、または仕様修正 PR。Done receipt 側だけを書き換えない |
+| `canonical_format_result` | Done receipt の canonical object。key 名、固定 key object、summary 条件を修正 |
+| `manifest_match_result` | artifact manifest、artifact generator、content hash、secret scan、redaction policy を同時修正 |
+| `reproduction_match_result` | reviewer reproduction command、environment profile、expected artifact path、expected content hash、timeout を同時修正 |
+| `review_algorithm_result` | review algorithm の失敗 step と `review_result` を一致させ、fail fast 順序を修正 |
+| `open_count_match_result` | open item closure、failure record、N/A 根拠、regression failure、operator action gap を先に閉じる |
+| `final_reconciliation_result` | 上記 6 field の失敗を先に解消する。final だけ pass にしてはならない |
+
+`reproduction_match_result` の失敗を `environment_gap` のまま pass にしてはならない。環境差分が原因の場合は、`environment_profile`、再現 command、toolchain、Docker / CI / release-check 差分、artifact path を仕様または Phase packet に反映し、再実行で pass するまで Phase 未完了とする。
+
 **命名不一致時の判定：**
 
 | 状態 | 判定 |
@@ -7167,6 +7183,10 @@ Phase 完了時の Done receipt は、Phase packet freeze checklist と `precisi
 | reconciliation field が `pass` 以外、または `fail`、`missing`、`not_run`、`manual_only` を含む | Phase 未完了 |
 | `final_reconciliation_result` が `pass` でない、または 6 field の pass を根拠にしていない | Phase 未完了 |
 | Done receipt 側で freeze checklist と異なる値へ書き換える | merge 不可 |
+| reconciliation failure を `N/A`、`accepted_risk`、`manual_only` で回避する | merge 不可 |
+| failed field を残したまま `final_reconciliation_result` だけを pass にする | merge 不可 |
+| artifact を差し替えて manifest、content hash、reviewer reproduction を更新しない | merge 不可 |
+| reproduction 失敗を `environment_gap` のまま pass 扱いする | merge 不可 |
 | `未解決判断 0 件` だけで `precision_closure_result` を pass とする | merge 不可 |
 | Contract ID に timestamp、random ID、local username、host name、absolute path 由来文字列が含まれる | merge 不可 |
 | artifact が生成されていないのに Done receipt で pass とする | merge 不可 |
@@ -13626,7 +13646,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.159` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.160` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
