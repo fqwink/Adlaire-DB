@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.143
+**バージョン：** V.144
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.143` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.144` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -7155,7 +7155,7 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 |-------|----------|
 | `handoff_id` | `HANDOFF-P{phase}-{number}` 形式の一意 ID |
 | `spec_version` | 対象仕様書 version。Phase Done 時点の `V.{累積番号}` と一致させる |
-| `reading_order` | レビュアーが読む順番。最低でも §0、§1.4、§9.1.51、§9.11.1〜§9.11.6、対象 Phase 詳細節、Phase packet、Done receipt |
+| `reading_order` | レビュアーが読む順番。最低でも §0、§1.4、§9.1.51、§9.11.1〜§9.11.7、対象 Phase 詳細節、Phase packet、Done receipt |
 | `reproduction_commands` | clean checkout から実行できる command。各 command は working directory、env、fixture、expected exit code を持つ |
 | `expected_artifacts` | command ごとの生成 artifact path、Contract ID、Scenario ID、snapshot / transcript / log の対応 |
 | `decision_criteria` | Done / Not Done / Spec correction required の判定条件。失敗時に参照する仕様節を含める |
@@ -7243,6 +7243,57 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 | skip した verification に代替 artifact または unsupported / denial artifact がない | Phase 未完了 |
 | N/A record が Done receipt、Phase packet、review handoff、precision closure と相互参照できない | Phase 未完了 |
 | `P{phase}-PRECISION-CLOSURE` に `open_na_without_spec_reason = 0`、`manual_only_pass = 0`、`skipped_required_verification = 0` がない | Phase 未完了 |
+
+### 9.11.7 Phase 1〜19 go / no-go closure 最低表
+
+本節は Phase 実装開始、Phase 完了、merge、release / rollout の Go / No-Go 判定を固定する。実装者は Phase packet、artifact、Done receipt、review handoff、precision closure の各証跡を集めたうえで、対象 Phase の `go_no_go_record` を作成しなければならない。Go / No-Go 判定は「実装者の感触」ではなく、open item が 0 であることと再現可能な証跡で決める。
+
+| Phase | entry Go 最低条件 | exit Go 最低条件 | No-Go 最低条件 |
+|-------|-------------------|------------------|----------------|
+| 1 | CLI / config / no persistence の scope と対象外が固定済み | build、help、invalid flag、config precedence、no persistence が再現済み | DB / HTTP / JWT / metadata 永続化が成功応答を持つ |
+| 2 | data-dir、lock、metadata、default DB の contract が固定済み | init、lock、WAL、integrity、restart、no HTTP が再現済み | partial init、lock bypass、restart mismatch、HTTP route success |
+| 3 | hrana HTTP endpoint、wire schema、SDK smoke の oracle が固定済み | health、pipeline、SQL error、restart、SDK transcript が再現済み | JWT / WebSocket / Admin API success、wire snapshot drift |
+| 4 | JWT secret、claim、permission、token create、redaction が固定済み | auth matrix、permission matrix、revoke、secret scan が再現済み | auth bypass、scope mismatch、token / secret leak |
+| 5 | log、SDK、restart、unsupported surface、regression set が固定済み | JSONL、SDK CRUD、restart、secret scan、Phase 1〜4 regression が再現済み | unsupported future surface success、flaky / manual only pass |
+| 6 | DB routing、name validation、isolation、metadata migration が固定済み | default/path route、isolation、metadata consistency、restart が再現済み | DB 混線、metadata/directory 不整合、未来 API success |
+| 7 | Admin auth、DB CRUD、token CRUD、DB scope、revoke が固定済み | admin matrix、scope matrix、revoke immediate、concurrency が再現済み | admin bypass、token JWT leak、lost update |
+| 8 | Turso model、org/group/location/quota/usage、migration が固定済み | migration、Turso wrapper、quota、snapshot、secret scan が再現済み | Turso snapshot drift、legacy migration failure、quota bypass |
+| 9 | WebSocket protocol、stream、transaction、rollback、SDK WS が固定済み | upgrade、hello、tx commit/rollback、store_sql、SDK WS が再現済み | stream state leak、rollback failure、SDK WS drift |
+| 10 | ATTACH policy、path rejection、metrics counter、auth が固定済み | ATTACH allow/deny、path rejection、metrics、redaction が再現済み | arbitrary path success、counter drift、scope bypass |
+| 11 | primary role、replication auth、frame/checksum、snapshot が固定済み | primary startup、SSE、snapshot、heartbeat、status が再現済み | replication auth bypass、checksum drift、snapshot inconsistency |
+| 12 | replica state、catch-up、redirect、primary down、multi replica が固定済み | primary + 2 replica、redirect、restart、checksum mismatch が再現済み | replica corruption、primary down ambiguity、redirect drift |
+| 13 | archive manifest、frame write、retention、corruption handling が固定済み | archive write、restart、retention cleanup、corruption、disabled mode が再現済み | manifest/file inconsistency、unsafe delete、corrupt file success |
+| 14 | backup、restore temp、rollback、PITR、startup recovery が固定済み | backup、restore rollback、PITR、corrupt/range outside、startup recovery が再現済み | partial commit、rollback 不能隠蔽、restore-failed 未処理 |
+| 15 | branch metadata、source selector、delete、routing、seed が固定済み | current/PITR branch、delete recovery、restart、source delete denial が再現済み | branch/source 混線、delete partial failure、seed drift |
+| 16 | extension allowlist、sha256、path、load timing、SQL bypass が固定済み | register/load/delete/restart/path rejection/SQL rejection が再現済み | symlink/path bypass、sha mismatch success、SQL direct load |
+| 17 | metrics snapshot、Prometheus、usage/quota、redaction が固定済み | snapshot restore、Prometheus、quota boundary、corrupt recovery が再現済み | counter loss、format drift、label secret leak |
+| 18 | HA token、term、promote/demote、split-brain、partition が固定済み | promote/demote/redirect/split-brain/restart/partition が再現済み | term regression、multi leader、primary write leak |
+| 19 | adapter flags、shadow/active/rollback、SDK、performance、crash recovery が固定済み | shadow、active gate、rollback、SDK、performance、crash recovery が再現済み | wire/API drift、rollback migration required、performance threshold miss |
+
+**go_no_go_record 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `gate_id` | `GATE-P{phase}-{number}` 形式の一意 ID |
+| `phase` | 対象 Phase 番号 |
+| `entry_go` | 実装開始条件がすべて満たされている場合のみ `true` |
+| `exit_go` | Done receipt、artifact、handoff、precision closure がすべて満たされている場合のみ `true` |
+| `blocking_items` | open failure、open ambiguity、open N/A、missing artifact、manual only pass、regression skip、reviewer unresolved の件数 |
+| `required_evidence` | Phase packet、manifest、scenario、artifact、failure closure、N/A closure、review handoff、Done receipt、precision closure の path |
+| `reviewer_decision` | `Done`、`Not Done`、`Spec correction required` のいずれか |
+| `release_decision` | `release_ready`、`phase_done_only`、`blocked` のいずれか。Phase Done と release ready を混同しない |
+
+**Go / No-Go 判定規則：**
+
+| 状態 | 判定 |
+|------|------|
+| `entry_go` が `true` でない | 実装開始禁止 |
+| `exit_go` が `true` でない | Phase 未完了 |
+| `blocking_items` が 1 件以上ある | merge 不可 |
+| open failure、open ambiguity、根拠なし N/A、artifact 欠落、reviewer 再現不可、manual only 完了、regression 未実行が残る | No-Go |
+| Turso Cloud / libSQL SDK 互換差分に仕様本文の理由、snapshot、client impact がない | No-Go |
+| Phase Done だが rollout readiness、operator runbook、rollback、release note が未完了 | `phase_done_only`。運用投入不可 |
+| `P{phase}-PRECISION-CLOSURE` に `entry_go = true`、`exit_go = true`、`blocking_items = 0`、`reviewer_decision = Done` がない | Phase 未完了 |
 
 ### 9.12 PR レビュー観点
 
@@ -13099,7 +13150,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.143` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.144` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
