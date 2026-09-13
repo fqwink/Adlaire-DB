@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.100
+**バージョン：** V.101
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.100` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.101` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -78,6 +78,33 @@ libSQL 内部コンポーネントの内製化はフェーズ完了後に計画�
 
 **I-6：外部 Web フレームワーク不使用**  
 HTTP サーバー層に Web フレームワーク（axum・actix-web・rocket 等）を使用しない。hyper 等の低レベル HTTP ライブラリ（クレート）は使用可能だが、ルーティング・ミドルウェア・リクエスト解析の構造はフレームワークに依存せず自前で実装する。
+
+### 1.5 活用・進化方針
+
+Adlaire DB の活用目的は、SQLite / libSQL 系の軽量さを保ちながら、Turso Cloud と同等の管理体験を自己ホスト環境へ持ち込むことである。単なる SQLite wrapper ではなく、Turso Cloud 互換の API、SDK 接続、認証、metadata、organization / group / location / quota、backup、restore、PITR、branch、replication、metrics、HA、運用証跡を段階的に備える DB 管理基盤として実装する。
+
+**活用対象：**
+
+| 活用対象 | 目的 | 必須方針 |
+|----------|------|----------|
+| 小規模 SaaS / 個人開発 | user / organization / project ごとの DB を軽量に管理する | Turso Cloud 互換 API と libSQL SDK 互換を優先する |
+| 社内・オンプレ環境 | 外部クラウドへデータを出せない環境で DB 管理 API を提供する | 自己ホスト運用でも organization / group / location / quota を正式対象にする |
+| 開発・検証環境 | Turso Cloud を使わずに互換 API、SDK、migration、backup、branch を検証する | snapshot / oracle / compatibility test を仕様化する |
+| アプリ別独立 DB | CMS、業務ツール、管理画面、tenant ごとに DB を分離する | DB identity、path boundary、auth scope、quota を破らない |
+| 運用復旧基盤 | backup、restore、PITR、branch、rollback により戻せる運用を実現する | success-before-fsync、partial commit、metadata/file 不一致を禁止する |
+
+**進化方針：Turso Cloud 互換優先、内部は段階的に内製化**
+
+| 項目 | 固定方針 |
+|------|----------|
+| 外部契約 | API、wire format、SDK 挙動、認証、metadata、error、管理モデルは Turso Cloud 互換を優先する |
+| 自己ホスト差分 | 単一サーバーやオンプレ都合の差分は許可するが、差分理由、代替仕様、SDK 影響、後方互換性を仕様本文へ明記してから実装する |
+| 内部実装 | 初期は libsql crate と外部 crate を利用し、運用機能を満たす。成熟後に adapter 境界の内側から段階的に内製 crate へ置き換える |
+| 内製化禁止線 | 内製化を理由に API、response wrapper、JWT claim、metadata schema、error code、SDK 互換挙動を破ってはならない |
+| モード分離 | Adlaire 独自拡張が必要な場合は、Turso 互換 mode と Adlaire 拡張 mode を仕様上分離し、既定は Turso 互換 mode とする |
+| 完了判定 | 内製化 PR は Turso Cloud / libSQL SDK compatibility、Phase regression、oracle、invariant ledger が通るまで完了扱いにしない |
+
+実装判断で迷う場合は、`Turso Cloud 互換 > libSQL SDK 互換 > 既存 Adlaire 後方互換 > 自己ホスト最適化 > 内製化都合 > Adlaire 独自拡張` の順で優先する。内部実装を育てることは目的であるが、外部契約を壊してまで内製化を進めてはならない。
 
 ---
 
@@ -506,7 +533,7 @@ Turso Cloud は Adlaire DB の互換参照実装である。Turso Cloud の挙�
 
 #### 3.5.4 内製化ロードマップ（Phase 19 以降）
 
-内製化の優先順位は「Adlaire の差別化に直結するか」と「libsql crate への依存切り離し効果が大きいか」で決める。
+内製化の優先順位は「Turso Cloud 互換を維持したまま Adlaire の差別化に直結するか」と「libsql crate への依存切り離し効果が大きいか」で決める。内製化は §1.5 の活用・進化方針に従い、外部契約を固定したまま adapter 境界の内側を育てる作業として扱う。
 
 | Phase | 対象コンポーネント | 実装可否 | 理由 |
 |-------|-------------------|----------|----|
@@ -516,7 +543,7 @@ Turso Cloud は Adlaire DB の互換参照実装である。Turso Cloud の挙�
 | Phase 19 | ストレージ層差し替え | readonly adapter と互換テスト追加のみ可 | production write path への切り替えは Phase 20 以降の仕様変更 PR が承認されるまで禁止 |
 | Phase 19 | SQL パーサ | 実装禁止 | Turso Cloud / SQLite 互換リスクが高いため、Phase 20 以降の仕様変更 PR が承認されるまで着手禁止 |
 
-内製化は I-5（段階的・計画的）に従い、**各フェーズで動作するテストスイートと Turso Cloud / libSQL SDK 互換テストが通ることを確認してから**次のコンポーネントに進む。内製化 PR は API、認証、metadata、エラー形式、SDK 互換挙動を変更してはならない。変更が必要な場合は、先に Turso Cloud 追従差分として仕様書を改訂する。
+内製化は I-5（段階的・計画的）と §1.5 に従い、**各フェーズで動作するテストスイートと Turso Cloud / libSQL SDK 互換テストが通ることを確認してから**次のコンポーネントに進む。内製化 PR は API、認証、metadata、エラー形式、SDK 互換挙動を変更してはならない。変更が必要な場合は、先に Turso Cloud 追従差分として仕様書を改訂する。Adlaire 独自拡張が必要な場合は、Turso 互換 mode と Adlaire 拡張 mode を分け、既定 mode の互換 snapshot に差分を出してはならない。
 
 #### 3.5.5 テスト・CI 方針
 
@@ -1804,7 +1831,7 @@ Step 5: 停止完了
 2. 同じ Phase 内の「スコープ」「対象外」「完了ゲート」を優先する
 3. 既存実装と仕様が違う場合は仕様を優先する。ただし仕様変更が必要な場合は作業ルールの変更承認フローに従う
 4. Phase に明記されていない機能は、その Phase では実装しない。必要なら次 Phase の対象として仕様に追記してから実装する
-5. 互換性判断で迷う場合は `Turso Cloud 互換 > 既存 Adlaire 後方互換 > 自己ホスト最適化 > 内製化都合` の順で優先する
+5. 互換性判断で迷う場合は §1.5 に従い、`Turso Cloud 互換 > libSQL SDK 互換 > 既存 Adlaire 後方互換 > 自己ホスト最適化 > 内製化都合 > Adlaire 独自拡張` の順で優先する
 6. libSQL/Turso の hrana ワイヤ互換、Turso Cloud の管理 API・metadata・auth・error 互換を優先する。ただしセルフホスト運用・データ永続性・セキュリティ制約を破ってはならない
 7. 内製化都合で API、レスポンス、認証、metadata、永続化形式、エラー形式を変更してはならない。変更が必要な場合は、先に Turso Cloud 追従差分として仕様書を改訂する
 8. エラー形式で迷う場合は §7.3 の `code` を使う。新しいエラーが必要な場合は先に §7.3 へ追加する
@@ -5081,6 +5108,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 
 ### 9.15 互換性ルール
 
+- 互換性判断で迷う場合は §1.5 の優先順位を正とし、Turso Cloud 互換と libSQL SDK 互換を内製化都合より優先する
 - hrana-http v2 と hrana-ws v3 の wire format は後方互換を維持する
 - `/v2/pipeline` は Phase 6 以降も常に `default` DB を対象とする
 - 新 field を response に追加する場合は、既存 field を削除・rename しない
@@ -5089,6 +5117,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 - error `code` を変更してはならない。message は詳細化してよいが、client が code で分岐できる状態を維持する
 - TypeScript `@libsql/client` 互換は Phase 5 以降の regression target とする
 - backup/restore/PITR/branch のファイル形式を変える場合は、旧形式読み込み可否と不可の場合の明示エラーを仕様化する
+- Adlaire 独自拡張を追加する場合は、Turso 互換 mode の response、metadata、error、SDK 挙動に差分を出さない。差分が必要な場合は mode 分離、互換 snapshot、migration、rollback を仕様化してから実装する
 
 ### 9.16 実装順序ルール
 
@@ -10123,8 +10152,10 @@ HTTP ステータス：503
 ### 基本方針
 - 内製化の単位はクレートとする
 - 外部クレートを内製クレートに段階的に差し替えることで内製化を進める
+- 内製化の目的は、Turso Cloud 互換の自己ホスト DB 管理基盤を維持したまま、内部実装を Adlaire 独自基盤へ育てることである
 - 内製化は Turso Cloud 互換を維持するための内部実装差し替えであり、Turso Cloud 追従を止める理由にしてはならない
 - API、認証、metadata、エラー、SDK 互換挙動は互換レイヤーとして固定し、その内側の実装から段階的に置き換える
+- Turso 互換 mode は常に既定 mode とし、Adlaire 独自拡張 mode を追加する場合も互換 mode の snapshot と SDK regression に差分を出してはならない
 - 既存の外部クレートで要件を満たせる場合は積極的に採用する
 - 既存クレートで不足する機能は、最初から内製クレートとして開発する
 - **外部クレートと内製クレートの併用パターンを初期段階から採用する**
