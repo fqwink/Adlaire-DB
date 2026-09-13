@@ -11,11 +11,11 @@
 
 ## 1. 概要
 
-`build_spec_v3.py` は、Adlaire DB 仕様書の Markdown ソースを単一の自己完結型 HTML ドキュメントへ変換する Python スクリプトである。外部ライブラリに依存せず、標準ライブラリ（`re`、`html`、`unicodedata`）のみで動作する。
+`build_spec_v3.py` は、Adlaire DB 仕様書の Markdown ソースを単一の自己完結型 HTML ドキュメントへ変換する Python スクリプトである。外部ライブラリに依存せず、標準ライブラリ（`re`、`html`、`unicodedata`、`pathlib`、`typing`）のみで動作する。
 
 ### 1.1 目的
 
-- 14,000 行超の大規模 Markdown 仕様書を、快適に閲覧できる HTML ドキュメントサイトへ変換する
+- 親仕様と Phase 分割ファイルを、快適に閲覧できる単一 HTML ドキュメントサイトへ変換する
 - CSS・JS をすべてインラインに埋め込み、単一 HTML ファイルとして配布可能にする
 - Adlaire Design System（ADS）のトークンを採用し、一貫したデザイン言語を維持する
 
@@ -34,8 +34,8 @@
 | 項目 | 内容 |
 |------|------|
 | Python バージョン | 3.9 以上（型ヒント `dict[str, int]`、`list[tuple]` を使用） |
-| 外部依存 | **なし** — `re`・`html`・`unicodedata` の標準ライブラリ 3 モジュールのみ使用。`pip install` 不要 |
-| 入力 | UTF-8 エンコードの Markdown ファイル |
+| 外部依存 | **なし** — `re`・`html`・`unicodedata`・`pathlib`・`typing` の標準ライブラリのみ使用。`pip install` 不要 |
+| 入力 | UTF-8 エンコードの Markdown ファイル。`docs/spec/adlaire-db-spec.md` から `docs/spec/phase-*.md` を include 展開する |
 | 出力 | UTF-8 エンコードの単一 HTML ファイル |
 
 ---
@@ -45,11 +45,13 @@
 スクリプト冒頭の定数で入出力パスを管理する。
 
 ```python
-SRC = "docs/adlaire-db-spec.md"      # 入力 Markdown
+SRC = "docs/spec/adlaire-db-spec.md"      # 入力 Markdown 親仕様
 OUT = "docs/Adlaire-db-spec.html"    # 出力 HTML
 ```
 
 別の環境で実行する場合はこの 2 変数を書き換える。
+
+親仕様内の `<!-- include: docs/spec/phase-01.md -->` 形式の行は、HTML 生成前に指定 Markdown ファイルの本文へ展開する。include はリポジトリルートからの相対パスで記述する。
 
 ---
 
@@ -57,7 +59,7 @@ OUT = "docs/Adlaire-db-spec.html"    # 出力 HTML
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│ 1. MDファイル読み込み（raw_lines）                              │
+│ 1. MDファイル読み込み・include 展開（raw_lines）                 │
 ├────────────────────────────────────────────────────────────────┤
 │ 2. 見出し抽出パス（フェンス内を除外）                           │
 │    → headings: list[(level, text, slug, line_number)]          │
