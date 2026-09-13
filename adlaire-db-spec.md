@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.119
+**バージョン：** V.120
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.119` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.120` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -5758,6 +5758,93 @@ Phase 4 は Phase 3 の hrana-http v2 surface に JWT HS256 認証と `token cre
 | `coverage_closure_result` | startup、auth、permission、token CLI、revoke、redaction、Phase 1〜3 regression の gap 0 件 |
 | `review_handoff_result` | 第三者が auth matrix、permission matrix、token create、restart、secret scan を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 4 で JWT secret 設定時に `/v2/pipeline` が認証必須になり、未設定時は開発用 auth disabled として動く release note |
+
+**Phase 5 完全実装精度固定契約：**
+
+Phase 5 は Phase 1〜4 の実装を、構造化ログ、統合テスト、SDK 互換、再起動永続化、secret redaction によって完了判定可能な品質ゲートへ固定する Phase である。Phase 5 では新規外部 API、metadata schema、JWT claim、DB routing、管理 API を追加してはならない。Phase 5 実装者は下表を Phase packet、atomic task ledger、scenario matrix、Done receipt、review handoff、operator behavior delta に転記してから実装する。
+
+| 項目 | Phase 5 固定仕様 |
+|------|------------------|
+| 実装範囲 | JSON Lines logging、HTTP request log、startup/shutdown log、Phase 1〜5 regression、TypeScript SDK CRUD、restart persistence、secret scan |
+| API surface | Phase 3/4 と同じ `GET /v2/health` と `POST /v2/pipeline` のみ。新規 route、stub route、管理 API 成功応答は禁止 |
+| persistence | 新規永続化 file は追加しない。既存 `default/data.db` と `meta/tokens.json` の再起動後復元を検証する |
+| log format | 1 行 1 JSON object の JSON Lines。複数行 JSON、plain text mixed log、非 JSON log は不可 |
+| required log fields | `timestamp`、`level`、`event`、`request_id`、`method`、`path`、`status`、`duration_ms`。HTTP request 以外は該当しない field を省略可 |
+| request_id | request ごとに生成し、response header または log correlation で追跡できる。Authorization、JWT、SQL、path 絶対値を request_id に含めない |
+| duration_ms | 非負整数または小数。clock 逆行で負値を出してはならない |
+| forbidden log fields | Authorization header、JWT、secret、raw claim、SQL args、生 SQL の bind 値、admin/platform/replication/HA token |
+| log redaction | 秘匿値は `<redacted-secret>`、SQL args は `<redacted>` に正規化する。hash 化しても秘匿値の代替出力として扱い不可 |
+| auth disabled log | JWT secret 未設定時は auth disabled WARN を出すが、secret 欠落以外の機密情報は出さない |
+| SDK compatibility | TypeScript `@libsql/client` で createClient、execute、CREATE、INSERT、SELECT、authToken あり/なしの transcript を保存する |
+| regression | Phase 1〜4 の CLI/config/data-dir/HTTP/hrana/JWT/token/revoke/permission/error tests をすべて再実行する |
+| restart persistence | INSERT 後に graceful stop と process abort 相当の両方を行い、同じ `--data` で SELECT 結果が残ることを証跡化する |
+| artifact policy | snapshot / transcript / log / test output は secret scan を通過したものだけを Done receipt に添付する |
+
+**Phase 5 atomic task ledger：**
+
+| Task ID | Goal | Input contracts | Change targets | Forbidden changes | Completion condition | Verification |
+|---------|------|-----------------|----------------|-------------------|----------------------|--------------|
+| `TASK-P5-1` | JSON Lines logging を固定する | §9.1.17、§12 | logging middleware | plain text 混在、複数行 JSON | すべての log line が JSON object | log parser test |
+| `TASK-P5-2` | HTTP request log を固定する | §9.1.17、§9.4 Phase 5 | logging middleware | Authorization / SQL args 出力 | method/path/status/duration_ms/request_id が出る | request log snapshot |
+| `TASK-P5-3` | startup/shutdown log を固定する | §8.1、§9.1.25 | runtime / logging | secret/path 過剰出力 | 起動・停止・lock 解放が追跡可能 | lifecycle log snapshot |
+| `TASK-P5-4` | Phase 1〜4 regression gate を固定する | §9.1.1、§9.8 | tests / CI | test skip、手動確認のみ | TC-1〜TC-6 と Phase 1〜4 matrix が pass | regression transcript |
+| `TASK-P5-5` | TypeScript SDK CRUD transcript を固定する | §9.1.1、§9.1.35 | tests / docker / artifact | curl だけで代替 | `@libsql/client` CRUD が pass | SDK transcript |
+| `TASK-P5-6` | restart persistence を固定する | §9.1.23、§9.1.35 | tests / artifact | in-memory 成功のみ | graceful/abort 後に SELECT できる | restart transcript |
+| `TASK-P5-7` | secret scan を固定する | §9.1.17、§9.1.18 | tests / artifact | JWT/secret 混入 | log/artifact に secret が残らない | secret scan result |
+| `TASK-P5-8` | unsupported API regression を固定する | §9.1.10、§9.5 | tests / snapshot | 未来 API 成功応答 | 管理 API / multi DB / WS が成功しない | unsupported snapshot |
+| `TASK-P5-9` | Phase 5 Done receipt / handoff / operator delta | §9.1.33、§9.1.51、§9.1.52 | docs / PR artifact | PR description だけの根拠 | 第三者が logs/SDK/restart を再現できる | handoff checklist |
+
+**Phase 5 scenario / oracle 固定表：**
+
+| Scenario ID | 入力 | 期待結果 | Evidence |
+|-------------|------|----------|----------|
+| `SCN-P5-1` | `GET /v2/health` | HTTP 200、request log が JSON Lines で出る | health log snapshot |
+| `SCN-P5-2` | `POST /v2/pipeline` SELECT | HTTP 200、method/path/status/duration_ms/request_id が log に出る | pipeline log snapshot |
+| `SCN-P5-3` | JWT secret 設定 + valid token | HTTP 200、JWT/Authorization/raw claim が log に出ない | auth redaction snapshot |
+| `SCN-P5-4` | JWT secret 設定 + invalid token | HTTP 401、token 値なしの denied log | auth failure log snapshot |
+| `SCN-P5-5` | SQL args あり INSERT | HTTP 200、SQL args と bind 値が log に出ない | SQL redaction snapshot |
+| `SCN-P5-6` | TypeScript `@libsql/client` auth なし CRUD | auth disabled mode で CREATE/INSERT/SELECT 成功 | SDK disabled transcript |
+| `SCN-P5-7` | TypeScript `@libsql/client` authToken あり CRUD | JWT auth mode で CREATE/INSERT/SELECT 成功 | SDK auth transcript |
+| `SCN-P5-8` | INSERT 後 graceful stop / restart | SELECT でデータが残る | graceful restart transcript |
+| `SCN-P5-9` | INSERT 後 process abort 相当 / restart | SQLite/WAL recovery 後 SELECT でデータが残る | abort restart transcript |
+| `SCN-P5-10` | Phase 1 CLI help/config tests | Phase 1 regression pass | regression output |
+| `SCN-P5-11` | Phase 2 data-dir/lock/WAL tests | Phase 2 regression pass | regression output |
+| `SCN-P5-12` | Phase 3 hrana/error tests | Phase 3 regression pass | regression output |
+| `SCN-P5-13` | Phase 4 auth/token/permission tests | Phase 4 regression pass | regression output |
+| `SCN-P5-14` | `/admin/v1/databases`、`/{db}/v2/pipeline`、`/v3/baton` | Phase 5 では成功応答なし | unsupported snapshot |
+| `SCN-P5-15` | log / transcript / artifact secret scan | JWT、Bearer、secret、SQL args、生 bind 値が残らない | secret scan result |
+
+**Phase 5 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| 新規 HTTP route、管理 API、multi DB route、WebSocket を成功応答にする | merge 不可 |
+| metadata schema、JWT claim、response wrapper、hrana wire shape を変更する | merge 不可 |
+| plain text log、複数行 JSON log、JSON Lines でない log を混在させる | merge 不可 |
+| Authorization header、JWT、secret、raw claim、SQL args、生 bind 値を log / artifact に出す | merge 不可 |
+| TypeScript SDK regression を curl / Rust test だけで代替する | Phase 未完了 |
+| restart persistence を graceful stop だけで完了扱いにする | Phase 未完了。abort 相当 recovery も必要 |
+| Phase 1〜4 regression の一部を skip して完了扱いにする | Phase 未完了 |
+| secret scan なしで snapshot / transcript を Done receipt に添付する | Phase 未完了 |
+| flaky test を retry だけで隠して完了扱いにする | Phase 未完了 |
+
+**Phase 5 Done receipt 最低 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `implemented_scope` | JSON Lines log、HTTP request log、startup/shutdown log、Phase 1〜5 regression、TypeScript SDK CRUD、restart persistence、secret scan |
+| `excluded_scope` | 新規 API、管理 API、multi DB routing、WebSocket、metadata schema 変更、JWT claim 変更 |
+| `atomic_task_result` | `TASK-P5-1`〜`TASK-P5-9` がすべて pass、open task 0 件 |
+| `scenario_matrix_result` | `SCN-P5-1`〜`SCN-P5-15` の pass/fail、artifact path |
+| `log_contract_result` | JSON Lines parse 結果、必須 field、duration_ms、request_id、forbidden field 不在 |
+| `sdk_compatibility_result` | TypeScript `@libsql/client` auth disabled / authToken CRUD transcript |
+| `restart_persistence_result` | graceful stop と abort 相当の両方で再起動後 SELECT が pass |
+| `regression_result` | Phase 1〜4 の CLI/config/data-dir/hrana/JWT/token/error/permission regression pass |
+| `unsupported_surface_result` | 管理 API、multi DB route、WebSocket、未来 Phase API が成功応答しない snapshot |
+| `secret_redaction_result` | stdout/stderr/log/snapshot/transcript/artifact の secret scan pass |
+| `coverage_closure_result` | log、SDK、restart、secret、unsupported、Phase 1〜4 regression の gap 0 件 |
+| `review_handoff_result` | 第三者が log parse、SDK CRUD、restart、secret scan、regression を再現できる command と artifact |
+| `operator_behavior_delta_result` | Phase 5 では API 機能追加はなく、運用ログと互換 regression が完了条件になる release note |
 
 **Phase 1〜5 の境界決定：**
 
