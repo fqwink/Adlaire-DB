@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.91
+**バージョン：** V.92
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.91` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.92` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.91` の次は `V.92` とし、以後 `V.93`、`V.94` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.92` の次は `V.93` とし、以後 `V.94`、`V.95` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -3798,6 +3798,106 @@ temp directory は data-dir 配下だけに作成する。request_id は §9.1.1
 
 backup / restore / PITR に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§9.1.21、§9.1.22、§9.1.24、§9.1.29、§9.6、§9.14、Phase 13 / 14 / 15 詳細節、manifest の Endpoint / Persistence / Security / Regression map、backup consistency artifact、restore rollback fixture、PITR replay fixture、recovery log を同時更新する。正常系だけが通っても、rollback、restart recovery、checksum、lock、quota/block precedence、redaction が固定されていない場合は Phase 完了扱いにしない。
 
+#### 9.1.31 Branch lifecycle / seed / isolation 固定契約
+
+branch 作成、branch 削除、Turso database seed、source DB 削除、branch routing に関係する Phase は、branch metadata、branch DB directory、runtime map、token scope、quota、source selector、restart recovery の関係を実装開始前に固定しなければならない。branch は通常 DB の別名ではなく、source から作成された独立 DB resource として扱う。
+
+**branch create 状態遷移：**
+
+| 状態 | 必須条件 | 次状態 |
+|------|----------|--------|
+| `creating` | name validation、source lookup、auth/scope、quota/block 判定、source lock 取得が完了 | `materializing` |
+| `materializing` | current backup または PITR replay で temp DB を構築中 | `verifying` |
+| `verifying` | integrity_check、source selector 記録、internal DB name 衝突確認 | `activating` または `rolled_back` |
+| `activating` | branch DB directory finalize、runtime open、`branches.json` atomic commit | `active` または `rolled_back` |
+| `active` | pipeline routing と admin list/detail に公開可能 | terminal |
+| `rolled_back` | temp/partial directory を cleanup し、metadata 未公開 | terminal |
+
+`branches.json` に `active` として commit する前に branch pipeline が成功してはならない。runtime map にだけ存在し metadata に存在しない branch は restart 後に消えるため、success response を返してはならない。
+
+**branch delete 状態遷移：**
+
+| 状態 | 必須条件 | 次状態 |
+|------|----------|--------|
+| `deleting` | branch lookup、auth/scope、branch exclusive lock 取得、new connection 拒否が完了 | `finalizing` |
+| `finalizing` | runtime map から除去、active connection close、directory を trash へ rename、`branches.json` atomic commit | `deleted` または `delete_failed` |
+| `deleted` | branch route は `DB_NOT_FOUND`。trash cleanup は完了または再試行可能 | terminal |
+| `delete_failed` | metadata / directory の片方だけが残る可能性を recovery log に記録 | 起動時 recovery |
+
+DELETE は Phase 15 では冪等 `204` とする。存在しない branch への DELETE は metadata と directory がどちらも存在しない場合だけ `204` とし、metadata 破損や directory だけ残る状態を silent success にしない。
+
+**identity / routing / metadata：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| branch name | §9.1.26 の `branch name` validation に従う。自動 lowercase / trim 禁止 |
+| internal DB name | `{source_db}___{branch_name}`。external DB create では `___` を含む name を常に `DB_RESERVED_NAME` |
+| metadata key | `source_db` + `branch_name` を logical key とし、internal DB name だけを primary key にしない |
+| route | `/{source}___{branch}/v2/pipeline` は `branches.json` active entry と DB directory の両方がある場合だけ許可 |
+| list order | §9.1.27 に従い、`created_at` 昇順、同値は `source_db`、`branch_name` 昇順 |
+| response | branch API は `branch_name`、`source_db`、`db_name`、`from`、`created_at`、`state` を返す。filesystem path は返さない |
+
+**source selector / Turso seed：**
+
+| 入力 | 固定仕様 |
+|------|----------|
+| `from:"current"` | source DB の Online Backup API 相当で snapshot を作る。source write はブロックしない |
+| `from:{timestamp}` | §9.1.30 の PITR timestamp selector と同じ解決規則を使う |
+| `from:{frame_no}` | §9.1.30 の PITR frame selector と同じ checksum / missing frame 規則を使う |
+| `/v1/* seed.type:"database"` | Phase 15 で有効化する場合、branch 名 field、source database field、group/org scope、Turso snapshot を同じ PR で固定する |
+| branch 名なし seed | `INVALID_REQUEST`。source DB と同名の暗黙 branch 作成は禁止 |
+| source not found | scope 判定後に `DB_NOT_FOUND`。存在漏洩は §9.1.18 に従う |
+
+**isolation / permission / quota：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| write isolation | branch write は source DB に反映しない。source write は既存 branch に反映しない |
+| token scope | source DB token は branch DB へ自動拡張しない。branch DB 用 token は別途発行する |
+| org/group/location | branch は source の organization、group、location を継承する。変更 API は Phase 15 対象外 |
+| quota | branch 作成時に organization/group quota と branch DB candidate size を判定する。database quota は source の値を初期値として copy |
+| source delete | active branch がある source DB delete は `403 ORG_SCOPE_DENIED`。cascade delete と orphan 化は禁止 |
+| source block_reads | branch create は `403 PERMISSION_DENIED` |
+| source block_writes | branch create は読み取り snapshot のため許可。ただし branch DB 作成先 quota / block policy は判定する |
+| delete_protection | source DB の delete_protection は branch create を禁止しない。branch 自身の delete_protection は branch delete を禁止する |
+
+**restart recovery：**
+
+| 状態 | 起動時挙動 |
+|------|------------|
+| metadata active + directory missing | 起動失敗。silent cleanup 禁止 |
+| metadata active + integrity_check failed | 起動失敗または branch disabled を Phase 節で明記。未定義なら起動失敗 |
+| directory exists + metadata missing | partial create として WARN、接続不可、cleanup 対象 |
+| trash exists + metadata deleted | cleanup 再試行。cleanup 失敗は WARN で起動継続 |
+| metadata deleting + directory exists | delete recovery を実行し、完了まで branch route は `DB_NOT_FOUND` |
+| duplicate branch key | metadata 破損として起動失敗。先勝ち/後勝ち禁止 |
+
+**必須 evidence：**
+
+| Evidence | 必須内容 |
+|----------|----------|
+| branch lifecycle fixture | creating/materializing/verifying/active/deleting/deleted の metadata sample |
+| branch race fixture | 同名 create、create 中 delete、source delete、concurrent route access |
+| restart recovery fixture | metadata active + missing dir、dir only、trash cleanup、duplicate key |
+| seed compatibility snapshot | `/admin/v1/*` branch API と `/v1/* seed.type:"database"` の成功/失敗差分 |
+| isolation matrix | source write、branch write、token scope、quota、block_reads/block_writes |
+| PITR branch fixture | timestamp/frame selector、missing frame、checksum corrupt、retention disabled |
+| redaction snapshot | branch path、absolute path、token、source selector raw body が log / artifact に出ないこと |
+
+**禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| metadata commit 前に branch route を成功させる | merge 不可 |
+| source DB token を branch DB に自動適用する | merge 不可 |
+| source DB delete で active branch を orphan 化する | merge 不可 |
+| directory だけ存在する branch を active 扱いする | merge 不可 |
+| branch create retry で二重 DB / 二重 quota charge を起こす | merge 不可 |
+| branch internal DB name を通常 DB create で受理する | merge 不可 |
+| branch path / absolute path を response、log、artifact に出す | merge 不可 |
+
+branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§9.1.21、§9.1.22、§9.1.26、§9.1.27、§9.1.29、§9.1.30、§9.5、§9.6、§9.14、Phase 8 / 14 / 15 詳細節、manifest の Endpoint / Persistence / Security / Compatibility / Regression map、branch lifecycle fixture、branch race fixture、restart recovery fixture、seed compatibility snapshot、isolation matrix を同時更新する。正常系だけが通っても、metadata/file commit 順序、restart recovery、source delete denial、token scope、quota、Turso seed 互換が固定されていない場合は Phase 完了扱いにしない。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -4436,6 +4536,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | 永続化 | §9.1.21 / §9.1.26 に従い、ファイル名、schema、atomic update、fsync、directory sync、rollback、破損時挙動、path normalization、recovery evidence が §9.6 に明記されている | 書き込み処理を実装しない |
 | 認証/認可 | §9.1.18 に従い、必要 token、scope、ro/rw、org/group、quota、block policy、拒否条件 precedence が明記されている | success response を返す API を公開しない |
 | Backup / restore / PITR | Phase 13〜15 の backup、restore、PITR、branch seed は §9.1.30 に従い、temp layout、lock、commit/rollback、checksum、quota/block precedence、recovery marker、redaction が固定されている | 破壊的 API を公開しない |
+| Branch lifecycle | Phase 15 の branch create/delete/seed/routing は §9.1.31 に従い、metadata/file commit 順序、source selector、isolation、token scope、quota、restart recovery が固定されている | branch API を公開しない |
 | ログ/秘匿 | §9.1.17、§12、§9.14 に従い、出力 field、request id、audit 相当記録、秘匿対象、redaction evidence が明記されている | request/SQL/token をログに出す実装を入れない |
 | 並行性 / job lifecycle | §9.1.16 / §9.1.25 / §9.1.28 に従い、同時 request、resource lock、idempotency、shutdown、transaction、SQL execution、long-running operation の扱いが定義されている | 並行実行で状態を変更する処理を入れない |
 | 後方互換 / Turso 追従 | §9.1.23 に従い、既存 endpoint/schema/config への影響、Turso 差分分類、SDK 影響、migration path が明記されている | 既存契約を変更しない |
@@ -8886,6 +8987,8 @@ T5-9: 統合テスト
 - 再起動後のブランチ DB 自動復元
 
 **Phase 15 branch 固定契約：**
+
+Phase 15 の branch create、delete、routing、Turso seed、restart recovery、isolation は §9.1.31 を正とする。下表は Phase 15 固有の入口条件であり、§9.1.31 と衝突する場合は同じ PR で解消してから実装する。
 
 | 項目 | 固定仕様 |
 |------|----------|
