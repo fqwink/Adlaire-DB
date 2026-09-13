@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.81
+**バージョン：** V.82
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.81` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.82` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.81` の次は `V.82` とし、以後 `V.83`、`V.84` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.82` の次は `V.83` とし、以後 `V.84`、`V.85` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -2843,6 +2843,99 @@ observability に関係する仕様変更は、manifest の `Security map`、`Re
 
 API schema に関係する仕様変更は、§6、§7、§9.5、manifest の `Endpoint map`、API 契約 ID、request fixture、response snapshot、validation error snapshot を同時更新する。正常系だけが通っても、invalid / unknown / null / body limit / serialization の証跡がない場合は Phase 完了扱いにしない。
 
+#### 9.1.21 Persistence atomicity / fsync / recovery 固定契約
+
+各 Phase 実装 PR は、追加・変更する永続化 file、directory、metadata JSON、SQLite DB、WAL archive、backup artifact、branch artifact、lock file、manifest の書き込み順序、fsync 境界、atomic rename、破損検出、復旧可否を実装開始前に固定しなければならない。永続化成功の定義が曖昧な状態で client へ成功応答を返してはならない。
+
+**atomic write 既定手順：**
+
+| Step | 必須処理 | 失敗時の扱い |
+|------|----------|--------------|
+| 1 | 対象 directory を canonicalize し、data dir 配下であることを確認する | 起動時または request 時に失敗。path を secret/path redaction 付きで記録 |
+| 2 | 同一 directory に一意な temporary file を作成する | 既存 file overwrite 禁止。失敗時は元 file を変更しない |
+| 3 | 完全な新内容を書き込む。部分更新、in-place truncate、append で metadata JSON を更新しない | 書き込み失敗時は temp を削除し、元 file を維持 |
+| 4 | temporary file を flush し、file fsync を行う | fsync 失敗時は成功応答禁止。元 file を維持 |
+| 5 | temporary file を target file へ atomic rename する | rename 失敗時は成功応答禁止。元 file または temp の状態を recovery 対象にする |
+| 6 | parent directory fsync を行う | fsync 失敗時は成功応答禁止。次回起動で recovery scan 必須 |
+| 7 | lock release 前に in-memory state と disk state の version / checksum を照合する | 不一致なら panic ではなく内部 error とし、成功応答禁止 |
+
+SQLite DB、WAL、backup binary のように library が内部で durability を管理する file は、library の commit 成功条件、checkpoint / sync mode、追加で必要な directory fsync、metadata 更新との順序を Phase 節に明記する。metadata だけ atomic でも、対応する DB/WAL/backup file が永続化されていない場合は成功扱いにしない。
+
+**metadata JSON 既定 schema 契約：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| schema_version | すべての metadata JSON に必須。初期値、増加条件、migration path を §9.6 に明記 |
+| generation | atomic update ごとに単調増加。restart 後に逆行してはならない |
+| checksum | file 内容または参照 artifact の checksum を保存する場合、対象 byte 範囲と algorithm を明記 |
+| created_at / updated_at | RFC3339 UTC 秒精度。更新順序の証跡に使う場合は snapshot 正規化する |
+| unknown field | 旧 version 互換で読み飛ばすか、破損扱いにするかを file ごとに固定 |
+| missing required field | 起動失敗または該当 resource disabled。default 補完は禁止。ただし migration 契約がある場合のみ可 |
+| duplicate logical key | DB 名、token id、backup id、branch id の重複は破損扱い。先勝ち/後勝ちは禁止 |
+
+**lock / concurrency 既定ルール：**
+
+| 対象 | 必須挙動 |
+|------|----------|
+| process lock | `--data` 単位で単一 writer を保証する。lock 取得不能時は起動失敗 |
+| resource lock | DB create/delete、token revoke、backup restore、branch create は対象 resource の排他範囲を仕様化 |
+| read during write | 読み取りが旧 state を見るか新 state を見るかを固定し、中間 temp state を見せない |
+| concurrent update | generation / compare-and-swap / mutex のいずれで競合検出するかを明記 |
+| shutdown during write | lock release、temp cleanup、未完了 operation の response 方針を固定 |
+| retry | 同じ request を retry した時に idempotent か、重複 error かを API 契約と揃える |
+
+**recovery 判定：**
+
+| 状態 | 必須挙動 |
+|------|----------|
+| temp file のみ残存 | target file が正しければ temp を削除。target 不在なら operation 種別ごとの recovery 可否で判断 |
+| target と temp が両方存在 | generation / checksum / manifest を比較し、勝者を deterministic に決める。判断不能なら起動失敗 |
+| metadata JSON parse 失敗 | 自動上書き修復禁止。backup copy または manifest から復旧できる場合のみ復旧 |
+| schema_version 未来値 | 起動失敗。downgrade / ignore 禁止 |
+| schema_version 過去値 | migration 契約がある場合だけ migrate。なければ起動失敗 |
+| checksum 不一致 | 対象 artifact を使用禁止にし、error code と recovery log を出す。成功応答禁止 |
+| DB integrity_check 失敗 | 対象 DB を degraded / unavailable とし、通常 read/write を許可しない |
+| recovery 失敗 | 部分的に成功したように見せず、起動失敗または対象 resource unavailable とする |
+
+**Phase 別の追加固定対象：**
+
+| Phase 範囲 | 対象 | 必須固定 |
+|------------|------|----------|
+| Phase 2 | data dir、default DB、lock、integrity marker | 初期化途中 crash、既存 file 衝突、integrity_check 失敗 |
+| Phase 4-7 | tokens.json、databases.json、revoke state | token 作成/失効、DB create/delete の atomicity と restart 後状態 |
+| Phase 8 | location / org / group / quota metadata | migration、quota usage 更新順序、Turso wrapper との整合 |
+| Phase 11-13 | WAL archive、snapshot、replication manifest | frame number、CRC、retention cleanup、manifest/files 整合 |
+| Phase 14-16 | backup、restore、PITR、branch | restore rollback、source snapshot 固定、branch metadata と DB file の commit 順序 |
+| Phase 17-18 | extension、HA state | signed artifact、term/leader persistence、split-brain recovery |
+| Phase 19+ | internal WAL/storage/executor state | libSQL 互換 path と内製 path の rollback、format marker |
+
+**必須 evidence：**
+
+| Evidence | 必須内容 |
+|----------|----------|
+| atomic trace | temp write、file fsync、rename、directory fsync、lock release の順序 |
+| crash fixture | 各 Step 中断時の再起動後状態。旧 state / 新 state / 起動失敗のいずれかを固定 |
+| corrupt fixture | JSON parse 失敗、missing field、future schema_version、checksum mismatch |
+| restart fixture | 成功応答後の再起動で state が保持されること |
+| concurrency fixture | 同一 resource への同時更新、reader during write、lock 取得不能 |
+| recovery log snapshot | recovery 実施 / 失敗時の log。secret、absolute path、raw SQL args を出さない |
+| manifest consistency | metadata が参照する artifact が存在し、checksum / size / generation と一致すること |
+
+**禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| metadata JSON を in-place truncate/write で更新する | merge 不可 |
+| file fsync または directory fsync の扱いが仕様にない | Phase 未完了 |
+| parse 失敗した metadata を空 default で再作成する | merge 不可 |
+| checksum 不一致 artifact を警告だけで使用する | merge 不可 |
+| success response 後の restart で state が消える | merge 不可 |
+| recovery の勝者判定が実装依存または timestamp だけに依存する | review failure |
+| temp file や absolute path を API response に出す | merge 不可 |
+| crash / corrupt fixture なしに Phase 完了扱いにする | Phase 未完了 |
+
+永続化に関係する仕様変更は、§9.6、§9.15、manifest の `Persistence map`、該当 Phase の storage 契約 ID、atomic trace、crash fixture、corrupt fixture、restart fixture を同時更新する。正常系の書き込みだけが通っても、fsync、rename、directory sync、破損検出、recovery 失敗時挙動が固定されていない場合は Phase 完了扱いにしない。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -3477,7 +3570,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | 設定解決 / validation | §9.1.19 に従い、CLI/env/TOML/default/secret file の優先順位、不正値、対象 Phase 前挙動、秘匿が固定されている | config 実装を開始しない |
 | API 契約 | §9.1.20 に従い、method/path/auth/request/success/error/schema/validation/serialization が §9.5 または各 API 節に明記されている | route を追加しない |
 | Error code | 失敗条件ごとの `code` が §7.3 / §9.7 に存在する | 先に error code を追加する |
-| 永続化 | ファイル名、schema、atomic update、rollback、破損時挙動が §9.6 に明記されている | 書き込み処理を実装しない |
+| 永続化 | §9.1.21 に従い、ファイル名、schema、atomic update、fsync、directory sync、rollback、破損時挙動、recovery evidence が §9.6 に明記されている | 書き込み処理を実装しない |
 | 認証/認可 | §9.1.18 に従い、必要 token、scope、ro/rw、org/group、quota、block policy、拒否条件 precedence が明記されている | success response を返す API を公開しない |
 | ログ/秘匿 | §9.1.17、§12、§9.14 に従い、出力 field、request id、audit 相当記録、秘匿対象、redaction evidence が明記されている | request/SQL/token をログに出す実装を入れない |
 | 並行性 | §9.1.16 に従い、同時 request、resource lock、idempotency、shutdown、transaction の扱いが定義されている | 並行実行で状態を変更する処理を入れない |
