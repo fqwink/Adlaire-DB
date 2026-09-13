@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.174
+**バージョン：** V.175
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.174` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.175` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -3360,6 +3360,26 @@ artifact の保存先は §9.1.11 に従い、Contract ID を path に含める�
 | secret scan を未実行のまま artifact を採用する | merge 不可 |
 | Docker と CI の差分理由が manifest にない | Phase 未完了 |
 
+**canonical configuration / environment closure audit：**
+
+configuration / environment は Phase 実装の再現性 gate であり、local で動いたこと、sample config の記載、または CI 成功ログだけで代替してはならない。対象 Phase の readiness packet と Done receipt は、以下の closure audit field を持ち、`configuration_environment_closure_result = pass` でなければ実装開始または Phase 完了に進めない。
+
+| Audit field | pass 条件 | fail 時の扱い |
+|-------------|----------|---------------|
+| `config_key_result` | 追加・変更する CLI flag、env name、TOML section/key、内部 field、type、unit、default、対象 Phase 前挙動が §9.1.19 / §9.13 / Phase 詳細節で一致している | 実装開始禁止 |
+| `config_precedence_result` | CLI / env / TOML / default / secret file の優先順位が固定され、差分理由なしの順位変更が 0 件である | 実装開始禁止 |
+| `invalid_config_result` | 範囲外、型違い、空文字、未知 enum、存在しない file/path、unknown key、unknown flag の期待 error / warning / exit code が fixture と stderr snapshot に接続されている | 実装開始禁止 |
+| `secret_path_validation_result` | secret value、secret file、data dir、extension path、primary URL、duration、bytes、enum の validation と redaction が artifact に接続されている | merge 不可 |
+| `target_phase_before_result` | 対象 Phase 前 key、sample config の commented key、unknown TOML / env / CLI の扱いが silent ignore なしで固定されている | Phase 未完了 |
+| `config_redaction_result` | secret、secret file contents、absolute path、env secret、raw URL secret が stdout / stderr / log / artifact に残らない scan 結果がある | merge 不可 |
+| `toolchain_result` | Rust、Cargo lock、Node、package lock、Docker image、OS / arch、timezone / locale、feature flag、dependency version が固定され floating が 0 件である | 実装開始禁止 |
+| `docker_ci_local_result` | local / Docker / CI / release-check の command、working directory、env subset、ports、data dir、network 方針、差分許容範囲が一致または根拠付きである | 実装開始禁止 |
+| `release_check_result` | release-check の worktree clean、spec version、lock drift、contract coverage、artifact existence、snapshot strictness、secret scan、regression、zero-bug gate が定義済みである | Phase 未完了 |
+| `environment_artifact_result` | `environment.txt`、`ci.txt`、`release-check.txt`、`secret-scan.txt`、`toolchain.json`、`flaky-report.txt` が artifact manifest と review handoff に接続されている | Phase 未完了 |
+| `configuration_environment_closure_result` | 上記 field がすべて `pass`。silent ignore、default fallback、secret leak、floating toolchain、Docker/CI/local 差分未説明、local only pass、release-check 欠落、environment artifact 未接続がすべて 0 件 | `pass` 以外は実装開始禁止 |
+
+`configuration_environment_closure_result` は readiness packet の `audit_results` と Done receipt に必ず含める。config / environment 影響がない Phase でも `configuration_environment_closure_result = pass` とし、`config_key:none`、`toolchain:unchanged`、`docker_ci_local:unchanged`、`release_check:unchanged`、および非対象理由を `closure_evidence` に記録する。これにより「設定・環境影響なし」の判断も、後続 Phase と reviewer が再現できる状態にする。
+
 CI / release-check に関係する仕様変更は、§3.5.5、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.8、manifest の `Regression set`、該当 Contract ID、`environment.txt`、`ci.txt`、`release-check.txt`、`secret-scan.txt` を同時更新する。検証 command が成功していても、環境、toolchain、artifact、secret scan、release-check の再現性が固定されていない場合は Phase 完了扱いにしない。
 
 #### 9.1.25 Long-running operation / job lifecycle 固定契約
@@ -4093,7 +4113,7 @@ Phase implementation packet は、実装開始前に以下の canonical key を�
 | `task_ids` | 対象 Phase の atomic task ID 一覧。各 task は入力契約、禁止変更、完了条件、verification command に接続する |
 | `scenario_ids` | 対象 Phase の scenario ID 一覧。各 scenario は expected result、artifact path、oracle に接続する |
 | `artifact_paths` | test、snapshot、fixture、log、manifest、review handoff、secret scan の保存先一覧 |
-| `audit_results` | §9.17 の `phase_packet_result`、`acceptance_manifest_result`、`oracle_result`、`scenario_matrix_result`、`schema_registry_result`、`decision_precedence_result`、`coverage_closure_result`、`artifact_paths_result`、`failure_remediation_result`、`transition_ready_result`、`review_handoff_result`、`operator_delta_result`、`precision_closure_index_result`、`change_impact_closure_result`、`rollout_readiness_closure_result`、`compatibility_baseline_closure_result`、`security_abuse_closure_result`、`phase_done_final_result`、`readiness_audit_result` を全て含む |
+| `audit_results` | §9.17 の `phase_packet_result`、`acceptance_manifest_result`、`oracle_result`、`scenario_matrix_result`、`schema_registry_result`、`decision_precedence_result`、`coverage_closure_result`、`artifact_paths_result`、`failure_remediation_result`、`transition_ready_result`、`review_handoff_result`、`operator_delta_result`、`precision_closure_index_result`、`change_impact_closure_result`、`rollout_readiness_closure_result`、`compatibility_baseline_closure_result`、`security_abuse_closure_result`、`configuration_environment_closure_result`、`phase_done_final_result`、`readiness_audit_result` を全て含む |
 | `blocking_items` | 実装開始前に残っている blocker 一覧。実装開始可能な packet では空配列または `none` |
 | `ready_to_implement` | 実装開始を許可する最終 boolean。`true` 以外は実装開始禁止 |
 
@@ -8261,8 +8281,9 @@ Phase 1〜19 の実装開始前に、実装者は対象 Phase の readiness pack
 | `rollout_readiness_closure_result` | §9.1.46 に従い、startup / shutdown / restart / rollback / health / operator / observability / compatibility / data safety / release blocker がすべて閉じている | 実装開始禁止 |
 | `compatibility_baseline_closure_result` | §9.1.47 に従い、Turso Cloud / libSQL SDK / hrana / legacy metadata / previous Phase baseline、snapshot version、SDK transcript、refresh trigger、diff reason、mode boundary がすべて閉じている | 実装開始禁止 |
 | `security_abuse_closure_result` | §9.1.48 に従い、attack surface、untrusted input、required control、bypass attempt、expected denial、redaction、audit/log、quota/rate、persistence no-op、security regression がすべて閉じている | 実装開始禁止 |
+| `configuration_environment_closure_result` | §9.1.19 / §9.1.24 に従い、config key、precedence、invalid config、secret/path validation、target Phase 前挙動、redaction、toolchain、Docker/CI/local、release-check、environment artifact がすべて閉じている | 実装開始禁止 |
 | `phase_done_final_result` | §9.1.33 に従い、Done receipt final audit の readiness、manifest、artifact、failure、regression、handoff、operator、precision closure、zero-bug がすべて pass である | Phase 完了扱い禁止 |
-| `readiness_audit_result` | 上記 18 field がすべて `pass`。ただし `phase_done_final_result` は実装完了時に評価する。`missing`、`partial`、`manual_only`、`not_run`、`N/A` 根拠なし、または値不一致が 0 件 | `pass` 以外は実装開始禁止 |
+| `readiness_audit_result` | 上記 19 field がすべて `pass`。ただし `phase_done_final_result` は実装完了時に評価する。`missing`、`partial`、`manual_only`、`not_run`、`N/A` 根拠なし、または値不一致が 0 件 | `pass` 以外は実装開始禁止 |
 
 `readiness_audit_result` は Phase 実装開始の入口 gate であり、実装後の Done receipt で初めて埋めてはならない。実装中に scope、API、schema、error、persistence、auth、compatibility、artifact path、review command、operator behavior のいずれかが変わる場合は、同じ PR で readiness packet、受入 manifest、oracle、scenario matrix、schema registry、precision closure を更新し、再度 `readiness_audit_result = pass` にする。更新しないまま code、test、snapshot、artifact だけを変更した場合は merge 不可とする。
 
@@ -8281,6 +8302,7 @@ Phase 1〜19 の実装開始前に、実装者は対象 Phase の readiness pack
 | rollout readiness の startup、shutdown、restart、rollback、health、operator、observability、compatibility、data safety、release blocker のいずれかが未評価または artifact 未接続である | 実装開始禁止 |
 | compatibility baseline の upstream source、observed behavior、Adlaire behavior、compatibility class、snapshot version、SDK transcript、refresh trigger、diff reason、mode boundary のいずれかが未確定または artifact 未接続である | 実装開始禁止 |
 | security abuse の attack surface、untrusted input、required control、bypass attempt、expected denial、redaction、audit/log、quota/rate、persistence no-op、security regression のいずれかが未確定または artifact 未接続である | 実装開始禁止 |
+| configuration / environment の config key、precedence、invalid config、secret/path validation、target Phase 前挙動、redaction、toolchain、Docker/CI/local、release-check、environment artifact のいずれかが未確定または artifact 未接続である | 実装開始禁止 |
 | artifact path、hash、secret scan、reviewer command が readiness packet、受入 manifest、Done receipt、artifact manifest、review handoff の間で一致しない | Phase 未完了 |
 | failure が未分類、root cause 未記載、再検証 command 未記載、artifact / regression / secret scan 再実行漏れのまま残る | Phase 未完了 |
 | source Phase の Done receipt、regression、artifact hash、compatibility baseline、operator delta、known blocker が target Phase readiness packet に継承されていない | 実装開始禁止 |
@@ -13970,7 +13992,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.174` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.175` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
