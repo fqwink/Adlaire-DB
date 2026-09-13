@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.148
+**バージョン：** V.149
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.148` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.149` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -7155,7 +7155,7 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 |-------|----------|
 | `handoff_id` | `HANDOFF-P{phase}-{number}` 形式の一意 ID |
 | `spec_version` | 対象仕様書 version。Phase Done 時点の `V.{累積番号}` と一致させる |
-| `reading_order` | レビュアーが読む順番。最低でも §0、§1.4、§9.1.51、§9.11.1〜§9.11.11、対象 Phase 詳細節、Phase packet、Done receipt |
+| `reading_order` | レビュアーが読む順番。最低でも §0、§1.4、§9.1.51、§9.11.1〜§9.11.12、対象 Phase 詳細節、Phase packet、Done receipt |
 | `reproduction_commands` | clean checkout から実行できる command。各 command は working directory、env、fixture、expected exit code を持つ |
 | `expected_artifacts` | command ごとの生成 artifact path、Contract ID、Scenario ID、snapshot / transcript / log の対応 |
 | `decision_criteria` | Done / Not Done / Spec correction required の判定条件。失敗時に参照する仕様節を含める |
@@ -7501,6 +7501,59 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 | negative scenario が normal scenario のみで代替されている | Phase 未完了 |
 | future Phase に昇格する場合、Scope in/out、unsupported 表、Contract ID、oracle、artifact を同じ PR で更新していない | merge 不可 |
 | `P{phase}-PRECISION-CLOSURE` に `negative_surface_failure_count = 0`、`unsupported_success_count = 0`、`denial_redaction_result = pass` がない | Phase 未完了 |
+
+### 9.11.12 Phase 1〜19 evidence integrity / artifact manifest closure 最低表
+
+本節は Phase 実装 PR の artifact が対象 Phase、Contract ID、生成 command、対象 commit、manifest、Done receipt と相互参照できることを証明する最低条件を定義する。古い artifact、別 commit の artifact、PR description だけの証跡、secret scan 対象外の artifact、Contract ID がない artifact を Phase 完了根拠にしてはならない。
+
+| Phase | evidence integrity 最低対象 |
+|-------|-----------------------------|
+| 1 | CLI help/error snapshot、config precedence fixture、no persistence evidence、Phase packet、Done receipt |
+| 2 | data-dir tree、lock fixture、metadata fixture、integrity/restart transcript、recovery log |
+| 3 | HTTP request/response snapshot、hrana wire fixture、SQL error snapshot、SDK transcript |
+| 4 | auth matrix、permission matrix、token create artifact、secret redaction scan、restart transcript |
+| 5 | JSONL log artifact、SDK CRUD transcript、unsupported surface snapshot、Phase 1〜4 regression output |
+| 6 | routing snapshot、DB isolation transcript、metadata/directory fixture、Phase 1〜5 regression output |
+| 7 | Admin API snapshot、token CRUD artifact、scope/revoke matrix、concurrency artifact、Phase 1〜6 regression output |
+| 8 | Turso Platform snapshot、legacy migration fixture、quota/usage artifact、compat diff、secret scan |
+| 9 | WebSocket transcript、transaction rollback artifact、store_sql snapshot、SDK WS transcript、secret scan |
+| 10 | ATTACH allow/deny fixture、path rejection snapshot、metrics counter artifact、redaction scan |
+| 11 | replication SSE transcript、snapshot artifact、frame/checksum fixture、heartbeat/status snapshot |
+| 12 | replica state fixture、redirect snapshot、primary down artifact、checksum mismatch transcript |
+| 13 | archive manifest、frame/snapshot checksum artifact、retention cleanup log、corruption fixture |
+| 14 | backup artifact、restore rollback log、PITR replay fixture、startup recovery log、secret scan |
+| 15 | branch metadata fixture、create/delete recovery log、routing isolation transcript、seed compatibility snapshot |
+| 16 | extension manifest、sha256 fixture、load/delete transcript、path/symlink denial snapshot、SQL rejection artifact |
+| 17 | metrics snapshot、Prometheus text artifact、counter restore fixture、quota/usage diff、label redaction scan |
+| 18 | HA state fixture、term/promotion log、split-brain artifact、partition transcript、restart recovery log |
+| 19 | shadow diff artifact、adapter selection log、rollback transcript、SDK compatibility transcript、performance baseline |
+
+**evidence_integrity_record 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `evidence_id` | `EVID-P{phase}-{surface}-{number}` 形式の一意 ID |
+| `phase` | 対象 Phase 番号 |
+| `commit_sha` | artifact を生成した commit SHA。Done receipt の commit SHA と一致させる |
+| `contract_id` | artifact が証明する Contract ID。複数 contract を含む場合は matrix で明示する |
+| `artifact_path` | repository 内の deterministic path。timestamp、random、local username、host 名、absolute path を含めない |
+| `artifact_kind` | snapshot、fixture、transcript、ci、release-check、secret-scan、compat-diff、recovery-log、performance-baseline、handoff のいずれか |
+| `generated_by_command` | artifact を生成した command、expected exit code、environment、normalization step |
+| `normalized` | `true` または `false`。`false` の場合は repository に保存不可 |
+| `secret_scan_result` | artifact 全体を対象にした secret scan の result と path |
+| `stale_check_result` | manifest、Done receipt、Contract ID、commit SHA、artifact mtime ではなく内容対応で stale でないことを示す結果 |
+
+**Evidence integrity 判定規則：**
+
+| 状態 | 判定 |
+|------|------|
+| artifact の `commit_sha` が Done receipt / PR commit と一致しない | Phase 未完了 |
+| manifest、Done receipt、Phase packet、artifact path、Contract ID が相互参照できない | merge 不可 |
+| stale artifact、過去 Phase artifact、別 branch artifact を再利用して pass にする | merge 不可 |
+| artifact path または artifact 内容に Contract ID がない | Phase 未完了 |
+| secret scan が artifact 全体ではなく一部 file だけを対象にしている | merge 不可 |
+| raw artifact を repository に保存する、または normalization 前後の対応がない | merge 不可 |
+| `P{phase}-PRECISION-CLOSURE` に `stale_artifact_count = 0`、`missing_evidence_integrity_count = 0`、`artifact_manifest_result = pass` がない | Phase 未完了 |
 
 ### 9.12 PR レビュー観点
 
@@ -13357,7 +13410,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.148` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.149` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
