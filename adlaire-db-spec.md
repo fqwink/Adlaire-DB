@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.89
+**バージョン：** V.90
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.89` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.90` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.89` の次は `V.90` とし、以後 `V.91`、`V.92` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.90` の次は `V.91` とし、以後 `V.92`、`V.93` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -3630,6 +3630,72 @@ read/write 判定は SQL text の単純な prefix だけに依存してはなら
 
 SQL execution に関係する仕様変更は、§6.2、§6.3、§7.3、§9.1.16、§9.1.18、§9.1.20、§9.1.21、§9.1.22、§9.1.23、§9.5、§9.14、該当 Phase 節、manifest の Endpoint / Security / Compatibility / Regression map、SDK transcript、result mapping snapshot、args conversion matrix、transaction fixture、batch / sequence matrix を同時更新する。正常系だけが通っても、SQL error surface、result mapping、transaction rollback、permission precedence、SDK transcript が固定されていない場合は Phase 完了扱いにしない。
 
+#### 9.1.29 Specification consistency / cross-reference 固定契約
+
+仕様書を更新する PR は、変更対象の本文だけでなく、関連する Phase 表、API 契約、error、永続化、テスト、evidence、manifest、実装前チェックリストの相互参照を同時に整合させなければならない。仕様本文に正しい内容を書いていても、別表や Phase 詳細が古いまま残る場合、その PR は仕様未確定として扱う。
+
+**識別子整合ルール：**
+
+| 識別子 | 固定仕様 |
+|--------|----------|
+| Phase 番号 | `Phase N` 表記を正とし、同一機能を別 Phase に移す場合は §9 の Phase 一覧、§9.2、§9.4、Phase 詳細節、§9.8、§9.11 を同時更新する |
+| TC ID | テストケース番号は該当 Phase 詳細節、§9 Phase 一覧、§9.8、evidence artifact 名で一致させる。欠番を残す場合は理由を明記する |
+| Task ID | 実装タスク番号は Phase 詳細節、§9 Phase 一覧、manifest の `Task map` で一致させる |
+| API 契約 ID | endpoint、request/response snapshot、error snapshot、compatibility snapshot、manifest の `Endpoint map` で同一 ID を使う |
+| Error code | §7.3、§9.1.22、endpoint 表、Phase 詳細節、error snapshot で同じ code / status / retry 方針を使う |
+| Persistence key | §9.6、Phase 詳細節、migration fixture、recovery evidence、manifest の `Persistence map` で同じ file 名 / schema version を使う |
+| Evidence 名 | §9.1.11、§9.1.24、Phase 詳細節、manifest の `Evidence map` で保存先と名前を一致させる |
+
+**変更種別ごとの同時更新必須箇所：**
+
+| 変更種別 | 同時更新必須箇所 |
+|----------|------------------|
+| 新 API / route | §6 または §9.5、§7.3、§9.1.20、§9.17、該当 Phase 詳細節、API 契約 ID、request/response/error snapshot |
+| 新 error code | §7.3、§9.1.22、該当 endpoint 表、該当 Phase 詳細節、error matrix、client action snapshot |
+| 新 metadata / file | §9.6、§9.1.21、該当 Phase 詳細節、migration plan、rollback / recovery fixture |
+| 新 auth / scope | §9.1.18、§9.14、該当 endpoint 表、JWT / token fixture、permission matrix |
+| 新 list API | §9.1.27、endpoint 表、pagination matrix、cursor fixture、order snapshot |
+| SQL execution 変更 | §9.1.28、§6.2 / §6.3、SDK transcript、result mapping snapshot、transaction fixture |
+| Phase スコープ変更 | §9 Phase 一覧、§9.2、§9.4、§9.8、§9.10、§9.11、該当 Phase 詳細節 |
+| Turso 互換変更 | §9.1.23、Phase 8 または該当 Phase 詳細節、compatibility diff、Turso snapshot source |
+
+**古い参照の扱い：**
+
+| 状態 | 扱い |
+|------|------|
+| 存在しない節番号を参照している | merge 不可 |
+| 古い Phase 名 / Phase 番号が残っている | 仕様未確定 |
+| TC 範囲と実際の TC 定義数が一致しない | Phase 未完了 |
+| Task 範囲と実装タスク表が一致しない | 実装開始禁止 |
+| endpoint 表と Phase 詳細節の status / body / error が違う | endpoint 表を正とせず、同じ PR で解消するまで実装禁止 |
+| error code が §7.3 にない | 新 code を使う実装禁止 |
+| snapshot 名だけ存在し、生成条件がない | evidence 不足 |
+| manifest だけ更新され本文がない | 仕様として扱わない |
+
+**PR self-check 必須項目：**
+
+| Check | 必須確認 |
+|-------|----------|
+| section reference scan | 追加・変更した `§` 参照が実在し、見出し番号と一致する |
+| Phase table scan | §9 の Phase 一覧、§9.2、§9.4、§9.8、§9.11 の対象 Phase 行が同じスコープを表す |
+| endpoint scan | method/path/auth/status/body/error が §6 / §9.5 / Phase 詳細節で一致する |
+| evidence scan | manifest、artifact path、snapshot 名、test ID が一致する |
+| compatibility scan | Turso / libSQL SDK 影響が §9.1.23 と該当 Phase 節に同じ分類で記録されている |
+| stale text scan | 旧バージョン番号、旧 Phase 境界、旧対象外理由、旧 API 名が残っていない |
+
+**禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| 本文だけ変更して Phase 表 / test matrix を更新しない | merge 不可 |
+| Phase 詳細節だけ変更して §9.2 / §9.8 / §9.11 を更新しない | merge 不可 |
+| error code を本文に書くが §7.3 に追加しない | merge 不可 |
+| API response を変えるが snapshot / SDK transcript を更新しない | Phase 未完了 |
+| 古い参照を「後で直す」として残す | 仕様未確定 |
+| PR description だけで整合性を説明し、仕様本文に反映しない | 仕様として扱わない |
+
+cross-reference に関係する仕様変更は、変更した節だけでなく、参照元、参照先、Phase 一覧、Phase 完了ゲート、test matrix、Definition of Ready / Done、manifest、evidence artifact を同時確認する。相互参照の機械確認が未整備の場合でも、PR 内で上記 self-check を完了し、未確認項目を `N/A` にしてはならない。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -4258,6 +4324,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Phase 受入 manifest | §9.1.10 の必須 fields が実装開始前に固定されている | 実装 PR として扱わない |
 | Evidence artifact | §9.1.11 の保存先、命名、正規化、secret scan が固定されている | 証跡生成まで完了扱いにしない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
+| 仕様内相互参照 | §9.1.29 に従い、Phase 番号、TC ID、Task ID、API 契約 ID、error code、persistence key、evidence 名、manifest 参照が一致している | 仕様修正 PR に戻す |
 | Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
 | Failure closure | §9.1.14 の失敗、flaky、未検証、artifact 欠落、secret 混入が同一 PR で閉じている | merge 不可 |
 | 後方互換 / migration | §9.1.15 の互換影響、migration plan、rollback、旧形式 fixture が固定されている | 既存契約を変更しない |
