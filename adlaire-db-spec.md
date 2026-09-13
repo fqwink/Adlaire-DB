@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.83
+**バージョン：** V.84
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.83` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.84` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.83` の次は `V.84` とし、以後 `V.85`、`V.86` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.84` の次は `V.85` とし、以後 `V.86`、`V.87` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -3030,6 +3030,99 @@ retry 可の error は、同一 request を再送した場合に二重作成、�
 
 error に関係する仕様変更は、§7.3、§9.5、§9.7、manifest の `Error map`、ERR 契約 ID、error matrix、triggering fixture、retry matrix、redaction snapshot を同時更新する。正常系だけが通っても、status、code、retry、client action、precedence、redaction が固定されていない場合は Phase 完了扱いにしない。
 
+#### 9.1.23 Turso Cloud tracking / compatibility diff / snapshot update 固定契約
+
+各 Phase 実装 PR は、Turso Cloud 互換対象に関係する API、wire schema、metadata、auth、quota、location、organization/group、error/status、SDK 挙動、snapshot を追加・変更する場合、Turso Cloud 追従状態、差分分類、snapshot 更新理由、既存 Adlaire 後方互換への影響を実装開始前に固定しなければならない。Turso Cloud 互換差分を実装者判断で暗黙に作ってはならない。
+
+**追従対象 surface：**
+
+| Surface | 追従対象 | 必須 evidence |
+|---------|----------|---------------|
+| hrana HTTP | request/response schema、SQL error surface、baton、pipeline semantics | libSQL SDK transcript、wire snapshot |
+| hrana WebSocket | message type、hello/open_stream/execute/sequence/store_sql、error message | WebSocket transcript、SDK regression |
+| Turso Platform `/v1/*` | method、path、query、request body、wrapper、field casing、status、error body | Turso snapshot、compat diff |
+| auth / JWT | claim 名、scope、ro/rw、expiration、revocation、token presentation | auth matrix、SDK token test |
+| location / org / group | slug/name/id、membership、routing metadata、ownership boundary | metadata fixture、Platform snapshot |
+| quota / usage | limit field、usage source、超過時 status/code、write denial | quota matrix、usage snapshot |
+| metadata | schema version、field casing、default、legacy migration | old/new fixture、migration transcript |
+| error/status | HTTP status、`code`、message 粒度、retry 可否 | error matrix、client action snapshot |
+| SDK behavior | TypeScript/Rust/Go libSQL client の接続、CRUD、auth、error observation | SDK transcript、regression command |
+
+**差分分類：**
+
+| Classification | 意味 | 実装可否 |
+|----------------|------|----------|
+| `follow` | Turso Cloud と同一挙動へ追従する | 可。snapshot と regression を更新 |
+| `intentional_diff` | 自己ホストの安全性・永続性・運用制約のため意図的に異なる | 可。ただし理由、SDK 影響、代替仕様、後方互換を明記 |
+| `unsupported` | Adlaire DB の対象外または未来 Phase として成功応答しない | 可。§9.4 または該当 Phase 節に 501/404/400 等を固定 |
+| `deferred` | 追従対象だが当該 PR では実装しない | 実装 PR では成功応答禁止。期限、Phase、stub error を固定 |
+| `unknown` | Turso Cloud 挙動を確認できていない | 実装禁止。snapshot 更新禁止 |
+
+**snapshot 更新許可条件：**
+
+| 条件 | 判定 |
+|------|------|
+| Turso Cloud 追従により期待値が変わり、compat diff に source / date / endpoint / 差分理由がある | 更新可 |
+| 仕様本文が先に更新され、変更対象 API / metadata / error の契約が明記されている | 更新可 |
+| dynamic 値だけが異なり、placeholder 正規化規則の不足が原因 | 正規化規則を先に更新してから snapshot 更新可 |
+| 実装都合で response wrapper、field casing、status、code が変わっただけ | 更新禁止 |
+| Turso Cloud の確認結果がないのに `/v1/*` snapshot を変更する | 更新禁止 |
+| secret、JWT、Bearer、absolute path、raw SQL args が snapshot に含まれる | 更新禁止。secret scan failure |
+
+**compat diff 必須項目：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `surface` | hrana HTTP、hrana WebSocket、Platform API、metadata、auth、quota など |
+| `reference` | Turso Cloud / libSQL SDK / hrana spec / legacy Adlaire のどれを参照したか |
+| `observed_at` | 確認日。PR 作成日と大きく離れる場合は再確認する |
+| `classification` | `follow` / `intentional_diff` / `unsupported` / `deferred` |
+| `request` | method、path、query、header subset、body または SDK call |
+| `reference_response` | status、header subset、body、error code、wire message |
+| `adlaire_response` | 期待する Adlaire の status、header subset、body、error code、wire message |
+| `diff_reason` | 差分理由。実装都合だけの理由は禁止 |
+| `sdk_impact` | 既存 SDK / CLI / client がどう観測するか |
+| `legacy_impact` | 既存 Adlaire metadata、config、API への影響 |
+| `migration_or_rollback` | migration、互換維持策、rollback flag、または不要理由 |
+
+**優先順位：**
+
+| Order | 判断軸 | 備考 |
+|-------|--------|------|
+| 1 | security / data durability / secret redaction | Turso 追従より優先。差分理由を必ず書く |
+| 2 | hrana wire / libSQL SDK 互換 | client 接続互換を最優先の互換面とする |
+| 3 | Turso Platform `/v1/*` 互換 | wrapper、status、field casing を固定 |
+| 4 | 既存 Adlaire 後方互換 | 既存 Phase の API、metadata、config を壊さない |
+| 5 | 自己ホスト運用最適化 | 上位互換を壊さない範囲で採用 |
+| 6 | 内製化都合 | API / wire / metadata 差分の理由にしてはならない |
+
+上位の判断軸と下位の判断軸が衝突する場合は、上位を優先し、compat diff と仕様本文に衝突内容、採用理由、テスト証跡を残す。
+
+**必須 evidence：**
+
+| Evidence | 必須内容 |
+|----------|----------|
+| Turso snapshot | `/v1/*` の status、header subset、body、wrapper、field casing |
+| SDK transcript | libSQL SDK の接続、CRUD、auth、error 観測結果 |
+| compat diff | 上記必須項目を満たす差分表 |
+| legacy regression | 既存 Adlaire endpoint、metadata、config、DB 名の後方互換 |
+| unsupported snapshot | 対象外 / deferred endpoint の 501/404/400 response |
+| redaction scan | snapshot / transcript / diff に secret、JWT、Bearer、raw path、SQL args がないこと |
+
+**禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| Turso Cloud 互換 endpoint の snapshot 差分理由が仕様本文にない | Phase 未完了 |
+| `/v1/*` の wrapper / field casing / status を実装都合で変更する | merge 不可 |
+| `unknown` 分類のまま成功応答を公開する | merge 不可 |
+| 自己ホスト都合の差分に SDK 影響と代替仕様がない | review failure |
+| snapshot を更新してから仕様本文を合わせる | review failure |
+| secret を含む snapshot / transcript を証跡として採用する | merge 不可 |
+| 内製化都合で API / wire / metadata / error 差分を作る | merge 不可 |
+
+Turso Cloud 互換に関係する仕様変更は、§1.4、§3.5.3、§6、§7、§9.4、§9.5、§9.8、§9.15、該当 Phase 節、manifest の `Compatibility map`、COMPAT 契約 ID、Turso snapshot、SDK transcript、compat diff、legacy regression を同時更新する。Turso snapshot が更新されていても、差分分類、SDK 影響、後方互換、redaction が固定されていない場合は Phase 完了扱いにしない。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -3668,7 +3761,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | 認証/認可 | §9.1.18 に従い、必要 token、scope、ro/rw、org/group、quota、block policy、拒否条件 precedence が明記されている | success response を返す API を公開しない |
 | ログ/秘匿 | §9.1.17、§12、§9.14 に従い、出力 field、request id、audit 相当記録、秘匿対象、redaction evidence が明記されている | request/SQL/token をログに出す実装を入れない |
 | 並行性 | §9.1.16 に従い、同時 request、resource lock、idempotency、shutdown、transaction の扱いが定義されている | 並行実行で状態を変更する処理を入れない |
-| 後方互換 | 既存 endpoint/schema/config への影響と migration path が明記されている | 既存契約を変更しない |
+| 後方互換 / Turso 追従 | §9.1.23 に従い、既存 endpoint/schema/config への影響、Turso 差分分類、SDK 影響、migration path が明記されている | 既存契約を変更しない |
 | テスト | §9.8 の該当 Phase 行に正常/異常/認可/永続化/障害系がある | 完了扱いにしない |
 | 運用 | config、metrics、health、rollback 手順が必要な Phase では明記されている | 運用 API を公開しない |
 
