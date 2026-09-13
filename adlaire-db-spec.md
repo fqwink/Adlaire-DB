@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.113
+**バージョン：** V.114
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.113` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.114` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -4007,6 +4007,7 @@ branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§
 | `security_abuse_matrix` | §9.1.48 の attack surface、untrusted input、bypass attempt、denial、redaction、audit、regression |
 | `ambiguity_closure_matrix` | §9.1.49 の implementation question、推奨決定、却下案、根拠、影響範囲、証跡 |
 | `atomic_task_ledger` | §9.1.50 の task ID、入力契約、変更対象、禁止変更、完了条件、検証、rollback |
+| `review_handoff_packet` | §9.1.51 の読む順番、再現 command、期待 artifact、判断基準、失敗分類、レビュー禁止事項 |
 | `completion_gate` | merge 前に満たす Done 条件と失敗時の扱い |
 
 **Phase group 粒度：**
@@ -4108,6 +4109,7 @@ Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§
 | `security_abuse_result` | §9.1.48 の security case ID ごとの bypass denial、redaction、audit/log、quota/rate/persistence、証跡 |
 | `ambiguity_closure_result` | §9.1.49 の ambiguity ID ごとの採用決定、却下案、仕様反映、証跡、open ambiguity 0 件 |
 | `atomic_task_result` | §9.1.50 の task ID ごとの完了条件、検証 command、証跡、rollback 可否、open task 0 件 |
+| `review_handoff_result` | §9.1.51 の第三者再現 command、artifact、判断結果、失敗分類、口頭補足なし証跡 |
 | `reviewer_decision` | `Done`、`Not Done`、`Spec correction required` のいずれか |
 
 **Phase group Done minimum：**
@@ -5269,6 +5271,61 @@ Phase ambiguity closure に関係する仕様変更は、§0、§7.3、§9.1.10�
 
 Phase atomic task ledger に関係する仕様変更は、§9.1.7、§9.1.8、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.1.16、§9.1.21、§9.1.24、§9.1.29、§9.1.32、§9.1.33、§9.1.34、§9.1.35、§9.1.38、§9.1.39、§9.1.40、§9.1.41、§9.1.42、§9.1.43、§9.1.44、§9.1.45、§9.1.46、§9.1.47、§9.1.48、§9.1.49、§9.2、§9.4、§9.5、§9.6、§9.7、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。atomic task ledger がない Phase 実装 PR は、実装粒度、変更境界、検証単位、rollback 単位、完了判定が未確定であるため、実装開始不可とする。
 
+#### 9.1.51 Phase review handoff / independent reproducibility 固定契約
+
+各 Phase の実装 PR は、実装者以外のレビュアーが仕様本文、Phase packet、artifact だけを使って同じ判断と検証を再現できる review handoff packet を固定しなければならない。口頭説明、チャット履歴、PR description だけの補足、実装者のローカル環境だけに依存する再現手順を完了根拠にしてはならない。
+
+**Review handoff packet 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `handoff_id` | `HANDOFF-P{phase}-{number}` 形式の一意 ID |
+| `phase` | handoff 対象 Phase |
+| `reading_order` | 第三者が読む順番。最低でも §9.2、§9.4、§9.8、§9.11、§9.17、Phase packet、Done receipt、該当 Phase 詳細節 |
+| `reproduction_commands` | local / Docker / CI の再現 command、expected exit code、必要 env、timeout、artifact path |
+| `expected_artifacts` | snapshot、fixture、log、secret scan、metadata before/after、compat transcript、release-check result |
+| `decision_criteria` | Done / Not Done / Spec correction required を判定する条件、error/status 差分の扱い |
+| `failure_classification` | 再現失敗時に defect、spec gap、oracle gap、environment gap、security gap、compatibility diff のどれに分類するか |
+| `reviewer_scope` | レビューで確認する API、persistence、security、compatibility、rollback、redaction、task ledger |
+| `out_of_scope` | レビュー対象外とする項目と仕様根拠。根拠なし N/Aは禁止 |
+| `oral_context_free_evidence` | 口頭補足、チャット履歴、実装者記憶なしで判断できる artifact / spec section |
+| `handoff_result_location` | review result、再現 log、差分メモ、未完了判定を保存する場所 |
+
+**Phase group handoff minimum：**
+
+| Phase group | 最低 handoff 対象 |
+|-------------|-------------------|
+| Phase 1〜5 | CLI/config、data-dir、HTTP pipeline、JWT、log redaction、SDK smoke、restart reproducibility |
+| Phase 6〜8 | admin API、Platform API、metadata migration、scope/quota、organization/group/location、legacy fixture |
+| Phase 9〜10 | WebSocket transcript、transaction rollback、ATTACH denial、metrics persistence、ro/rw enforcement |
+| Phase 11〜13 | replication frame、checksum、snapshot、archive manifest、retention、primary/replica recovery |
+| Phase 14〜15 | backup/restore/PITR、branch lifecycle、destructive rollback、seed isolation、quota/delete protection |
+| Phase 16〜18 | extension signature/load、metrics snapshot、Prometheus output、HA promote/demote、split-brain |
+| Phase 19 | shadow/active diff、fallback denial、performance baseline、rollback flag、Phase 1〜18 regression |
+
+**review handoff 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| レビュアーが PR description だけを読まないと判断できない | 仕様として扱わない |
+| 口頭説明、チャット履歴、実装者の記憶を完了根拠にする | merge 不可 |
+| 再現 command が local only で環境差分が固定されていない | Phase 未完了 |
+| expected artifact の保存先、正規化、secret scan がない | Phase 未完了 |
+| reviewer decision criteria が Done / Not Done / Spec correction required に写像されていない | review failure |
+| 再現失敗時の分類先がない | Phase 未完了 |
+| レビュアー判断任せで N/A、差分許容、snapshot 更新を決める | merge 不可 |
+| handoff result が Done receipt と接続していない | Phase 未完了 |
+
+**Done receipt への反映：**
+
+| Done receipt field | 必須内容 |
+|--------------------|----------|
+| `review_handoff_result` | handoff ID ごとの reading order、reproduction command、expected artifact、decision criteria、review result |
+| `independent_reproduction_result` | 実装者以外が再実行できる command、exit code、artifact、環境差分、再現可否 |
+| `oral_context_free_result` | 口頭補足なしで Done / Not Done / Spec correction required を判定できる証跡 |
+
+Phase review handoff に関係する仕様変更は、§9.1.3、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.1.24、§9.1.29、§9.1.32、§9.1.33、§9.1.34、§9.1.35、§9.1.36、§9.1.44、§9.1.45、§9.1.46、§9.1.47、§9.1.48、§9.1.49、§9.1.50、§9.2、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。review handoff packet がない Phase 実装 PR は、第三者再現性、レビュー判断基準、artifact 完備性、失敗分類が未確定であるため、Phase 完了扱いにしない。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -5933,6 +5990,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Security abuse / bypass resistance | §9.1.48 に従い、attack surface、untrusted input、required control、bypass attempt、expected denial、redaction、audit/log、quota/rate、persistence no-op が固定されている | 実装開始禁止。auth/scope/quota bypass、secret 漏洩、path traversal、commit 後拒否、replay 二重処理、manual only security case がある場合は Phase 完了扱いにしない |
 | Ambiguity closure / implementation decision | §9.1.49 に従い、implementation question、candidate options、selected decision、rejected options、decision basis、affected contracts、edge cases、reopen trigger が固定されている | 実装開始禁止。TBD、実装判断、根拠なし N/A、open ambiguity、error/status/commit order/redaction の未決定がある場合は Phase 完了扱いにしない |
 | Atomic implementation task ledger | §9.1.50 に従い、task ID、input contracts、change targets、forbidden changes、completion condition、verification command、rollback condition、dependency が固定されている | 実装開始禁止。巨大 task、task ID なし差分、検証なし task、task 外変更、rollback 未定義、open task がある場合は Phase 完了扱いにしない |
+| Review handoff / independent reproducibility | §9.1.51 に従い、reading order、reproduction commands、expected artifacts、decision criteria、failure classification、oral context free evidence が固定されている | Phase 完了扱いにしない。口頭説明、PR description だけの根拠、local only 再現、artifact 欠落、レビュアー判断任せの N/A / snapshot 更新は禁止 |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | 仕様内相互参照 | §9.1.29 に従い、Phase 番号、TC ID、Task ID、API 契約 ID、error code、persistence key、evidence 名、manifest 参照が一致している | 仕様修正 PR に戻す |
 | Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
