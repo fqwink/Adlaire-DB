@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.116
+**バージョン：** V.117
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.116` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.117` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -5515,6 +5515,77 @@ Phase 1 は「実行可能な CLI skeleton と config 解決の土台」を完�
 | `coverage_closure_result` | help、invalid flag、config precedence、no persistence の coverage gap 0 件 |
 | `review_handoff_result` | 第三者が build/help/config/no persistence を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 1 は CLI skeleton 追加のみ。DB/HTTP/JWT は利用不可である release note |
+
+**Phase 2 完全実装精度固定契約：**
+
+Phase 2 は data-dir、単一 default DB、metadata 初期値、process lock、libSQL open を完成させる Phase である。外部 HTTP API、JWT、管理 API、マルチ DB routing はまだ公開してはならない。Phase 2 実装者は下表を Phase packet、atomic task ledger、scenario matrix、Done receipt、review handoff、operator behavior delta に転記してから実装する。
+
+| 項目 | Phase 2 固定仕様 |
+|------|------------------|
+| 実装範囲 | `{data-dir}` tree 初期化、`.lock` 排他、metadata 初期化、`default/data.db` open、WAL / busy_timeout / synchronous / integrity_check |
+| directory layout | `{data-dir}/meta/`、`{data-dir}/databases/default/` を作成する。permission は §10 の方針に従い、危険な permission は WARN |
+| process lock | `{data-dir}/.lock` を open + flock `LOCK_EX | LOCK_NB`。取得失敗は起動失敗。`.lock` の内容に意味を持たせない |
+| metadata initial schema | `meta/databases.json={"databases":[]}`、`meta/tokens.json={"tokens":[]}`、`meta/branches.json={"branches":[]}` を初期値とする |
+| metadata parse failure | 既存 metadata が parse 不可なら起動失敗。空初期値で上書きしてはならない |
+| default DB path | `{data-dir}/databases/default/data.db` 固定。Phase 2 では DB 名変更、複数 DB、path-based routing を実装しない |
+| SQLite/libSQL settings | open 後に WAL、busy_timeout、synchronous=NORMAL、integrity_check を適用する |
+| integrity check | `--skip-integrity-check=false` なら `PRAGMA integrity_check` が `ok` の場合だけ起動成功。skip 時は WARN を出す |
+| HTTP/API exposure | Phase 2 は HTTP listener を bind しない。`/v2/health`、`/v2/pipeline`、管理 API は成功応答を返さない |
+| restart behavior | 同じ data-dir で再起動して同じ default DB を open し、metadata を保持する |
+| rollback / recovery | 初期化途中失敗時は成功扱いにしない。partial metadata は次回起動で parse できる形式か、起動失敗にする |
+
+**Phase 2 atomic task ledger：**
+
+| Task ID | Goal | Input contracts | Change targets | Forbidden changes | Completion condition | Verification |
+|---------|------|-----------------|----------------|-------------------|----------------------|--------------|
+| `TASK-P2-1` | data-dir tree を初期化する | §8.1、§9.1.21、§9.6 | `data_dir.rs` | HTTP bind、DB routing | `meta/` と `databases/default/` が作成される | tree fixture |
+| `TASK-P2-2` | process lock を取得し二重起動を拒否する | §9.1.16、§9.1.41 | `data_dir.rs` | stale lock 削除、lock 無視 | 2 process 目が非 0 exit | lock conflict test |
+| `TASK-P2-3` | metadata 初期値を atomic に作る | §9.1.21、§9.1.42、§9.6 | `db/meta.rs` | parse 失敗時の空上書き | 3 metadata file が schema 通り存在 | metadata fixture |
+| `TASK-P2-4` | default DB を libSQL local で open する | §3.2、§8.1、§9.1.37 | `db/sqld_adapter.rs` | multi DB、HTTP API | `databases/default/data.db` が open される | DB open test |
+| `TASK-P2-5` | WAL / busy_timeout / synchronous を適用する | §3.6、§9.1.35 | `db/sqld_adapter.rs` | unsupported PRAGMA 先送り | PRAGMA 結果が snapshot と一致 | PRAGMA snapshot |
+| `TASK-P2-6` | integrity_check と skip warning を固定する | §7.3、§9.1.22、§9.1.37 | `db/sqld_adapter.rs`、`config.rs` | integrity 失敗を成功扱い | ok なら起動成功、NG なら起動失敗、skip は WARN | integrity fixture |
+| `TASK-P2-7` | restart persistence を確認する | §9.1.39、§9.1.44 | test / artifact | DB 再作成、metadata 初期化し直し | 再起動後も同じ default DB と metadata | restart fixture |
+| `TASK-P2-8` | Phase 2 Done receipt / handoff / operator delta | §9.1.33、§9.1.51、§9.1.52 | docs / PR artifact | PR description だけの根拠 | 第三者が init/lock/open/restart を再現できる | handoff checklist |
+
+**Phase 2 scenario / oracle 固定表：**
+
+| Scenario ID | 入力 | 期待結果 | Evidence |
+|-------------|------|----------|----------|
+| `SCN-P2-1` | empty data-dir で `serve --data` | tree、metadata、default DB、`.lock` が作成され起動成功 | tree snapshot |
+| `SCN-P2-2` | 同じ data-dir で二重起動 | 2 process 目は起動失敗、既存 process は継続 | lock conflict log |
+| `SCN-P2-3` | 再起動 | metadata を保持し default DB を再 open | restart transcript |
+| `SCN-P2-4` | 壊れた `databases.json` | 起動失敗。空 metadata で上書きしない | metadata parse error fixture |
+| `SCN-P2-5` | default DB open failure | 起動失敗。HTTP/API は公開されない | DB open error snapshot |
+| `SCN-P2-6` | integrity_check `ok` | 起動成功 | integrity ok artifact |
+| `SCN-P2-7` | integrity_check failure | 起動失敗。read/write 成功応答なし | integrity failure artifact |
+| `SCN-P2-8` | `--skip-integrity-check` | 起動成功可、WARN log 必須 | skip warning log |
+| `SCN-P2-9` | Phase 2 起動中に HTTP endpoint へ接続試行 | HTTP listener なし、成功応答なし | no HTTP exposure evidence |
+
+**Phase 2 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| HTTP listener を bind する、または `/v2/health` / `/v2/pipeline` が成功応答を返す | merge 不可。HTTP は Phase 3 |
+| JWT 検証、JWT 発行、`token create` の実発行を行う | merge 不可。JWT は Phase 4 |
+| 管理 API route を追加する | merge 不可。管理 API は Phase 7 以降 |
+| default 以外の DB routing、DB create/list/delete を公開する | merge 不可。マルチ DB は Phase 6 |
+| metadata parse 失敗時に空 JSON で上書きする | merge 不可 |
+| lock 取得失敗、DB open 失敗、integrity_check 失敗を起動成功扱いにする | merge 不可 |
+| `.lock` file の削除を lock 解放手段として要求する | review failure。flock を正とする |
+| PR description だけで WAL / integrity / restart を説明する | 仕様として扱わない |
+
+**Phase 2 Done receipt 最低 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `implemented_scope` | data-dir 初期化、process lock、metadata 初期値、default DB open、WAL/busy_timeout/synchronous/integrity_check |
+| `excluded_scope` | HTTP API、JWT、管理 API、multi DB routing、replication、backup |
+| `atomic_task_result` | `TASK-P2-1`〜`TASK-P2-8` がすべて pass、open task 0 件 |
+| `scenario_matrix_result` | `SCN-P2-1`〜`SCN-P2-9` の pass/fail、artifact path |
+| `resource_lifecycle_result` | data-dir、lock、metadata、default DB の state / transition / recovery 証跡 |
+| `coverage_closure_result` | tree、metadata、lock、DB open、PRAGMA、integrity、restart、no HTTP exposure の coverage gap 0 件 |
+| `review_handoff_result` | 第三者が init/lock/open/restart/no HTTP を再現できる command と artifact |
+| `operator_behavior_delta_result` | Phase 2 で data-dir と default DB が作成されるが外部 HTTP API はまだ使えない release note |
 
 **Phase 1〜5 の境界決定：**
 
