@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.142
+**バージョン：** V.143
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.142` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.143` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -7155,7 +7155,7 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 |-------|----------|
 | `handoff_id` | `HANDOFF-P{phase}-{number}` 形式の一意 ID |
 | `spec_version` | 対象仕様書 version。Phase Done 時点の `V.{累積番号}` と一致させる |
-| `reading_order` | レビュアーが読む順番。最低でも §0、§1.4、§9.1.51、§9.11.1〜§9.11.5、対象 Phase 詳細節、Phase packet、Done receipt |
+| `reading_order` | レビュアーが読む順番。最低でも §0、§1.4、§9.1.51、§9.11.1〜§9.11.6、対象 Phase 詳細節、Phase packet、Done receipt |
 | `reproduction_commands` | clean checkout から実行できる command。各 command は working directory、env、fixture、expected exit code を持つ |
 | `expected_artifacts` | command ごとの生成 artifact path、Contract ID、Scenario ID、snapshot / transcript / log の対応 |
 | `decision_criteria` | Done / Not Done / Spec correction required の判定条件。失敗時に参照する仕様節を含める |
@@ -7182,6 +7182,67 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 | reviewer が PR description、チャット履歴、口頭説明を読まないと判定できない | Phase 未完了 |
 | `reviewer_result` に open item、unknown、not reproduced、manual only が残る | merge 不可 |
 | `P{phase}-PRECISION-CLOSURE` が review handoff result を参照しない | Phase 未完了 |
+
+### 9.11.6 Phase 1〜19 N/A / manual exception / skip closure 最低表
+
+本節は Phase 実装 PR で `N/A`、`not_applicable`、`manual only`、`skip`、`環境都合で未実行` を使う場合の最低閉鎖条件を定義する。実装者は対象 Phase の必須 contract、scenario、verification、artifact を省略してはならない。省略が許されるのは、仕様本文で対象外と固定済み、または該当 Phase では到達不能であることを証跡付きで示せる場合だけである。
+
+| Phase | N/A / skip closure 最低対象 |
+|-------|-----------------------------|
+| 1 | DB / HTTP / JWT / metadata 永続化を N/A にする根拠、CLI / config / no persistence の manual only 禁止 |
+| 2 | HTTP / JWT / multi DB を N/A にする根拠、data-dir / lock / metadata / restart 検証の skip 禁止 |
+| 3 | JWT / WebSocket / Admin API / path DB route を N/A にする根拠、hrana HTTP / SDK smoke の manual only 禁止 |
+| 4 | Admin API / DB scope / WebSocket を N/A にする根拠、auth / permission / redaction 検証の skip 禁止 |
+| 5 | 新規 API / metadata 変更を N/A にする根拠、SDK / log / restart / secret scan の manual only 禁止 |
+| 6 | 管理 API / Turso API / WebSocket を N/A にする根拠、routing / isolation / metadata restart の skip 禁止 |
+| 7 | Turso Platform API / organization / quota を N/A にする根拠、Admin auth / scope / revoke / concurrency の skip 禁止 |
+| 8 | WebSocket / ATTACH / replication / backup を N/A にする根拠、Turso wrapper / migration / quota / secret scan の manual only 禁止 |
+| 9 | ATTACH / metrics / replication を N/A にする根拠、WebSocket transaction / rollback / SDK WS の skip 禁止 |
+| 10 | replication / backup / Prometheus を N/A にする根拠、ATTACH denial / path rejection / metrics counter の skip 禁止 |
+| 11 | replica apply / HA / backup を N/A にする根拠、primary replication API / snapshot / checksum の manual only 禁止 |
+| 12 | archive / PITR / branch / HA を N/A にする根拠、primary + replicas / redirect / checksum mismatch の skip 禁止 |
+| 13 | restore / branch / extension を N/A にする根拠、archive manifest / retention / corruption / restart の skip 禁止 |
+| 14 | branch / extension / HA を N/A にする根拠、backup / restore rollback / PITR / startup recovery の manual only 禁止 |
+| 15 | merge / diff / COW / extension を N/A にする根拠、branch lifecycle / source delete denial / seed compatibility の skip 禁止 |
+| 16 | upload / Wasm / runtime global load を N/A にする根拠、extension allowlist / path rejection / SQL bypass の skip 禁止 |
+| 17 | alerting / remote write / HA を N/A にする根拠、metrics snapshot / Prometheus / quota / redaction の manual only 禁止 |
+| 18 | multi-primary / internal adapter を N/A にする根拠、promote / demote / split-brain / partition / restart の skip 禁止 |
+| 19 | 外部 API 変更 / metadata migration を N/A にする根拠、shadow / active / rollback / SDK / performance / crash recovery の skip 禁止 |
+
+**N/A record 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `na_id` | `NA-P{phase}-{surface}-{number}` 形式の一意 ID |
+| `phase` | 対象 Phase 番号 |
+| `target_contract` | N/A にする Contract ID、Scenario ID、verification command、artifact のいずれか |
+| `reason_section` | N/A の根拠となる仕様本文 section。PR description だけの理由は禁止 |
+| `why_not_required` | 対象外、未来 Phase、到達不能、別 contract で完全代替のいずれかを選び、理由を 1 つに固定する |
+| `risk_if_wrong` | N/A 判断が誤っていた場合の互換、永続化、security、運用、データ損失リスク |
+| `alternative_evidence` | 代替 test、snapshot、artifact、または到達不能を証明する unsupported / denial artifact |
+| `reopen_trigger` | Turso Cloud / SDK 変更、Phase scope 変更、metadata schema 変更、error/status 変更、operator behavior 変更など |
+| `reviewer_result` | 第三者が N/A 根拠、代替証跡、open item 0 件を確認した結果 |
+
+**manual exception / skip 固定規則：**
+
+| 対象 | 固定仕様 |
+|------|----------|
+| `manual only` | 自動化できない外部サービス状態の補助証跡に限る。Phase 完了の主証跡にはできない |
+| `skip` | 仕様本文に skip 条件、代替 artifact、再実行条件、reopen trigger がある場合だけ許可する |
+| `not_applicable` | `NA-P{phase}-{surface}-{number}` と仕様本文 section を持たない場合は無効 |
+| `environment unavailable` | CI / Docker / local のいずれかで代替 command が固定されていない限り N/A 理由にできない |
+| `future phase` | 未来 Phase の節番号、拒否 status/body、unsupported scenario artifact を必ず示す |
+
+**N/A / manual / skip 判定規則：**
+
+| 状態 | 判定 |
+|------|------|
+| 仕様本文根拠なしに `N/A`、`not_applicable`、`skip` を使う | Phase 未完了 |
+| regression、security、persistence、compatibility、redaction、rollback を manual only で pass にする | merge 不可 |
+| `後で検証`、`環境がない`、`時間がない`、`今回は不要`、`実装者判断` を N/A 理由にする | merge 不可 |
+| skip した verification に代替 artifact または unsupported / denial artifact がない | Phase 未完了 |
+| N/A record が Done receipt、Phase packet、review handoff、precision closure と相互参照できない | Phase 未完了 |
+| `P{phase}-PRECISION-CLOSURE` に `open_na_without_spec_reason = 0`、`manual_only_pass = 0`、`skipped_required_verification = 0` がない | Phase 未完了 |
 
 ### 9.12 PR レビュー観点
 
@@ -13038,7 +13099,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.142` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.143` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
