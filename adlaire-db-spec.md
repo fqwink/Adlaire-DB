@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.95
+**バージョン：** V.96
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.95` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.96` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.95` の次は `V.96` とし、以後 `V.97`、`V.98` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.96` の次は `V.97` とし、以後 `V.98`、`V.99` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -4003,6 +4003,7 @@ Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§
 | `compatibility_result` | Turso Cloud / libSQL SDK / legacy metadata / previous Phase への差分分類 |
 | `redaction_result` | log、artifact、PR description、error body に secret / token / raw path / SQL args が残っていない根拠 |
 | `release_check_result` | local / Docker / CI の実行コマンド、環境差分、再実行条件 |
+| `oracle_result` | §9.1.35 の oracle 名、version、path、比較 command、exit code、差分理由 |
 | `reviewer_decision` | `Done`、`Not Done`、`Spec correction required` のいずれか |
 
 **Phase group Done minimum：**
@@ -4121,6 +4122,83 @@ Phase completion gate に関係する仕様変更は、§9.1.9、§9.1.10、§9.
 | handoff state なしで途中作業を引き継ぐ | Phase 未完了 |
 
 Phase execution sequence に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§9.1.14、§9.1.32、§9.1.33、§9.2、§9.4、§9.8、§9.11、§9.16、§9.17、該当 Phase 詳細節を同時更新する。実装者が現在 step、次 step、禁止変更を仕様本文だけで判断できない場合は、実装開始不可とする。
+
+#### 9.1.35 Phase acceptance oracle / golden fixture 固定契約
+
+各 Phase の完了判定には、実装結果を照合する acceptance oracle を持たなければならない。oracle は「実装が出した結果」ではなく「仕様が要求する正解」であり、snapshot、fixture、transcript、manifest、baseline のいずれかとして保存する。実装者が期待値を実装後に都合よく作る、snapshot 更新で差分を隠す、手元目視だけで一致扱いにすることは禁止する。
+
+**Oracle 必須 artifact：**
+
+| Artifact | 必須内容 | 適用 Phase |
+|----------|----------|------------|
+| API snapshot | method、path、status、headers subset、body schema、error body、content type | API を公開する全 Phase |
+| error snapshot | error code、HTTP status、wire surface、retry、client action、precedence | 全 Phase |
+| persistence fixture | metadata JSON、DB/file layout、atomic update 後状態、破損 fixture、recovery 後状態 | 永続化を変更する全 Phase |
+| migration fixture | old format、new format、missing field、unknown field、corrupt file、rollback marker | metadata schema を変更する Phase |
+| SDK transcript | TypeScript SDK / libSQL SDK / WebSocket client の request/response transcript | Phase 5 以降、WebSocket は Phase 9 以降 |
+| unsupported snapshot | 未来 Phase、対象外 API、未対応 field、未対応 config、stub route の拒否結果 | 全 Phase |
+| security fixture | auth failure、scope denial、quota denial、redaction、secret scan 結果 | auth / admin / quota / replication / HA / extension Phase |
+| compatibility baseline | Turso Cloud、libSQL SDK、legacy metadata、previous Phase との差分分類 | Phase 5 以降 |
+| regression baseline | 該当 Phase より前の TC / command / snapshot の再実行結果 | 全 Phase |
+
+**Phase group oracle minimum：**
+
+| Phase group | 最低 oracle |
+|-------------|-------------|
+| Phase 1〜5 | CLI help snapshot、config precedence fixture、hrana-http snapshot、JWT/auth error snapshot、log redaction fixture、TypeScript SDK transcript |
+| Phase 6〜8 | admin API snapshot、Turso Platform API snapshot、metadata migration fixture、org/group/location/quota fixture、scope denial matrix、legacy fallback fixture |
+| Phase 9〜10 | hrana-ws transcript、transaction commit/rollback fixture、store_sql cache snapshot、ATTACH allow/deny fixture、metrics counter baseline |
+| Phase 11〜13 | replication log/snapshot transcript、frame checksum fixture、replica catchup fixture、archive manifest fixture、retention cleanup fixture |
+| Phase 14〜15 | backup snapshot manifest、restore rollback fixture、PITR selector fixture、branch seed fixture、branch isolation/restart fixture |
+| Phase 16〜18 | extension manifest/signature fixture、extension load failure snapshot、metrics snapshot/prometheus baseline、HA term/leader fixture、split-brain rejection transcript |
+| Phase 19 | adapter shadow/active/rollback baseline、wire/API diff snapshot、performance baseline、Phase 1〜18 regression baseline |
+
+**Snapshot / fixture 更新条件：**
+
+| 状態 | 判定 |
+|------|------|
+| 仕様変更 commit なしに expected snapshot を更新する | merge 不可 |
+| 実装差分だけを理由に oracle を更新する | merge 不可 |
+| dynamic 値を placeholder 正規化せずに snapshot 化する | Phase 未完了 |
+| secret、token、JWT signature、raw path、SQL args、backup body が oracle に残る | merge 不可 |
+| failed / skipped / flaky の artifact を oracle として採用する | Phase 未完了 |
+| body schema だけで status、header、error code を比較しない | Phase 未完了 |
+| snapshot 差分理由が仕様本文にない | 仕様修正 PR に戻す |
+| oracle 更新と実装修正を同じ PR で行う場合に差分理由がない | review failure |
+
+**Oracle 正規化ルール：**
+
+| 値 | 正規化 |
+|----|--------|
+| timestamp | `<timestamp:rfc3339>`。秒精度より細かい値は比較対象にしない |
+| UUID / generated id | `<id:{prefix}>`。prefix と形式だけ比較する |
+| request id | `<request_id>` |
+| token / JWT / secret | `<redacted>`。生値が残る場合は failure |
+| data-dir / absolute path | `<data_dir>` または `<tmp_dir>` |
+| SQL args / backup body | `<redacted>`。値の有無と型だけ比較する |
+| JSON object key order | 辞書順へ正規化する |
+| array order | API 契約で定義した順序を保持する。test 側で sort し直さない |
+
+**Done receipt への反映：**
+
+| Done receipt field | 必須内容 |
+|--------------------|----------|
+| `oracle_result` | 使用した oracle 名、version、path、生成/比較 command、exit code |
+| `oracle_diff` | 差分なし、または仕様変更に基づく差分理由と参照 commit |
+| `oracle_update_policy` | snapshot / fixture を更新した場合の仕様変更参照。更新なしなら `not updated` |
+
+**Oracle 禁止事項：**
+
+| 禁止事項 | 判定 |
+|----------|------|
+| production code の現在出力をそのまま expected として採用する | merge 不可 |
+| regression failure を snapshot 更新で消す | merge 不可 |
+| Turso Cloud / libSQL SDK 互換差分を自己ホスト都合だけで許容する | 仕様修正 PR に戻す |
+| unsupported API の success response を snapshot として固定する | merge 不可 |
+| human-readable log だけを正解 artifact にする | Phase 未完了 |
+| oracle なしで Done receipt を作成する | Phase 未完了 |
+
+Phase acceptance oracle に関係する仕様変更は、§9.1.3、§9.1.10、§9.1.11、§9.1.23、§9.1.24、§9.1.27、§9.1.28、§9.1.29、§9.1.33、§9.2、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。oracle が固定されていない機能は、実装が動作していても Phase 完了扱いにしない。
 
 ### 9.2 Phase 別完了ゲート
 
@@ -4756,6 +4834,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Evidence artifact | §9.1.11 の保存先、命名、正規化、secret scan が固定されている | 証跡生成まで完了扱いにしない |
 | Phase Done receipt | §9.1.33 に従い、packet、manifest、contract map、evidence index、regression result、failure closure、compatibility / redaction result が一致している | Phase 完了扱いにしない |
 | Phase execution state | §9.1.34 に従い、current step、completed/open contracts、last command、allowed/forbidden changes、next command、blocking decision が明記されている | 中断・引継ぎ・再開を行わない |
+| Acceptance oracle | §9.1.35 に従い、API/error/persistence/migration/SDK/unsupported/security/compatibility/regression の正解 artifact、正規化、更新条件が固定されている | snapshot / fixture / expected を更新しない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | 仕様内相互参照 | §9.1.29 に従い、Phase 番号、TC ID、Task ID、API 契約 ID、error code、persistence key、evidence 名、manifest 参照が一致している | 仕様修正 PR に戻す |
 | Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
