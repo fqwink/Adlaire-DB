@@ -10,7 +10,7 @@ import re, html, unicodedata
 from pathlib import Path
 from typing import Optional
 
-SRC = "docs/spec/adlaire-db-spec.md"
+SRC = "docs/spec/spec.md"
 OUT = "docs/Adlaire-db-spec.html"
 
 INCLUDE_RE = re.compile(r'^<!--\s*include:\s*([^>]+?)\s*-->\s*$')
@@ -351,7 +351,7 @@ PAGE = f'''<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Adlaire DB 仕様書</title>
+<title>Adlaire DB 仕様憲章</title>
 <style>
 /* ══ ADLAIRE DESIGN SYSTEM TOKENS ══════════════════════════════════════════
    Conforms to: https://github.com/fqwink/Adlaire-Design-System  (Tokens/)
@@ -792,7 +792,7 @@ a:focus-visible {{
   </button>
   <span class="hdr-title">Adlaire DB</span>
   <span class="hdr-sep">/</span>
-  <span class="hdr-title" style="color:rgba(255,255,255,.7);font-weight:400">仕様書</span>
+  <span class="hdr-title" style="color:rgba(255,255,255,.7);font-weight:400">仕様憲章</span>
   <span class="hdr-ver">V.205</span>
 </header>
 
