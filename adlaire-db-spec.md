@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.75
+**バージョン：** V.76
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.75` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.76` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.75` の次は `V.76` とし、以後 `V.77`、`V.78` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.76` の次は `V.77` とし、以後 `V.78`、`V.79` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -2454,6 +2454,54 @@ failure closure は「失敗を隠す」ことではなく、失敗の原因、�
 
 failure closure の追跡表は PR description または `docs/phase-evidence/phase-{phase}.md` に残す。closure artifact が存在しない失敗は、修正済みであっても Phase 完了根拠として扱わない。失敗を見つけた後に仕様変更で対象外へ移す場合も、§9.1.12 に従って仕様本文、manifest、Contract ID、test、artifact を同時更新しなければならない。
 
+#### 9.1.15 Backward compatibility / migration 固定契約
+
+既存 endpoint、wire schema、metadata schema、config default、error code、JWT claim、SDK 互換挙動、永続化 file path を変更する Phase 実装 PR は、実装開始前に後方互換と migration の契約を固定しなければならない。既存データ、既存 config、既存 client request が存在する状態で起動・接続・操作できることを完了条件に含める。
+
+後方互換は「新規環境で動く」ことではない。旧仕様で生成された metadata / config / token / DB path / request fixture を読み、必要な migration を行い、失敗時に安全に rollback または起動失敗できることを意味する。
+
+**互換影響の分類：**
+
+| 変更対象 | 必須互換契約 | 必須 evidence |
+|----------|--------------|---------------|
+| API endpoint | 旧 method/path/query/body/header の扱い、deprecated field、unknown field 方針、status/error mapping | old/new request fixture、response snapshot、SDK regression |
+| hrana wire schema | 旧 SDK request、unknown field、baton/stream/args 互換、error response 互換 | libSQL SDK transcript、wire snapshot |
+| metadata schema | schema version、追加 field default、旧形式 migration、破損時挙動、rollback | old/new/corrupt fixture、migration log、restart test |
+| config default / priority | 旧 config 読み込み、default 変更理由、CLI/env/TOML 優先順位、invalid value | old/new config fixture、stderr/log snapshot |
+| error code / status | 旧 client が期待する status/code、retry 可否、Turso Cloud 差分 | error snapshot、client action matrix |
+| JWT / token claims | 旧 token の扱い、claim 追加時 default、scope 解決順、revoke 互換 | old/new token fixture、auth denial test |
+| persistence path | 旧 directory/file 名、移動手順、fsync、rollback、partial migration 検出 | path fixture、failure injection、recovery log |
+| SDK / Turso compatibility | 旧 SDK version、Turso snapshot 差分、自己ホスト差分理由 | SDK transcript、compat diff |
+
+**migration plan 必須項目：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `Migration ID` | `MIG-P{phase}-{name}` の形式 |
+| `Source schema` | 旧 schema version、旧 file path、旧 field 一覧 |
+| `Target schema` | 新 schema version、新 field、default、必須/任意 |
+| `Trigger` | 起動時、API 実行時、admin command 実行時のいずれで migration するか |
+| `Atomicity` | tmp write、fsync、rename、commit marker、multi-file commit 順序 |
+| `Rollback` | commit 前失敗、commit 後失敗、再起動後検出時の扱い |
+| `Idempotency` | 再実行時に二重変換・二重削除・二重課金を起こさない条件 |
+| `Compatibility window` | 旧形式を読み続ける Phase、または削除禁止理由 |
+| `Evidence` | old/new/corrupt fixture、restart test、rollback log、CI output |
+
+**禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| 旧 metadata / config / token を手動修正前提にする | Phase 未完了 |
+| 新規環境だけで test し、旧形式 fixture がない | Phase 未完了 |
+| migration 失敗時に部分更新済み状態で起動成功する | merge 不可 |
+| rollback plan なしで destructive operation を行う | merge 不可 |
+| 旧 endpoint / field を仕様本文なしに削除する | review failure |
+| error status / code を変更し、旧 client action を定義しない | Phase 未完了 |
+| Turso Cloud 互換差分を自己ホスト都合だけで隠す | merge 不可 |
+| migration artifact が Contract ID / Migration ID と紐づかない | Phase 未完了 |
+
+破壊的変更が必要な場合は、同じ PR で §9.2、§9.5、§9.6、§9.7、§9.13、§9.14、該当 Phase 詳細、manifest、test、artifact を更新し、既存利用者への互換維持策または段階的移行策を明記する。互換維持策がない破壊的変更は、実装都合があっても Phase 完了として扱わない。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -3084,6 +3132,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | Verification command | §9.1.13 の command 分類、順序、exit code、artifact が固定されている | 検証完了扱いにしない |
 | Failure closure | §9.1.14 の失敗、flaky、未検証、artifact 欠落、secret 混入が同一 PR で閉じている | merge 不可 |
+| 後方互換 / migration | §9.1.15 の互換影響、migration plan、rollback、旧形式 fixture が固定されている | 既存契約を変更しない |
 | API 契約 | method/path/auth/request/success/error が §9.5 または各 API 節に明記されている | route を追加しない |
 | Error code | 失敗条件ごとの `code` が §7.3 / §9.7 に存在する | 先に error code を追加する |
 | 永続化 | ファイル名、schema、atomic update、rollback、破損時挙動が §9.6 に明記されている | 書き込み処理を実装しない |
