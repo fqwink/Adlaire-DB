@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.109
+**バージョン：** V.110
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.109` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.110` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -4003,6 +4003,7 @@ branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§
 | `coverage_closure_matrix` | §9.1.44 の Contract ID / source matrix / test / artifact / oracle / N/A reason の網羅完了表 |
 | `change_impact_matrix` | §9.1.45 の実装中変更に対する影響範囲、同時更新対象、承認状態、drift closure |
 | `rollout_readiness_matrix` | §9.1.46 の起動、停止、再起動、rollback、health、operator action、release 可否 |
+| `compatibility_baseline_matrix` | §9.1.47 の Turso Cloud / libSQL SDK 互換 baseline、refresh trigger、差分分類、証跡 |
 | `completion_gate` | merge 前に満たす Done 条件と失敗時の扱い |
 
 **Phase group 粒度：**
@@ -4100,6 +4101,7 @@ Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§
 | `coverage_closure_result` | §9.1.44 の coverage ID ごとの pass/fail/N/A、gap 0 件、test/artifact/oracle 実在証跡 |
 | `change_impact_result` | §9.1.45 の change ID ごとの affected sections/matrices/tests/artifacts 更新完了、drift 0 件、承認証跡 |
 | `rollout_readiness_result` | §9.1.46 の rollout ID ごとの startup/shutdown/restart/rollback/health/operator/compat/data safety 証跡 |
+| `compatibility_baseline_result` | §9.1.47 の baseline ID ごとの upstream source、snapshot / SDK version、差分分類、refresh 可否、証跡 |
 | `reviewer_decision` | `Done`、`Not Done`、`Spec correction required` のいずれか |
 
 **Phase group Done minimum：**
@@ -5033,6 +5035,63 @@ Phase change impact / drift control に関係する仕様変更は、§0、§7.3
 
 Phase rollout readiness に関係する仕様変更は、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.1.15、§9.1.24、§9.1.32、§9.1.33、§9.1.37、§9.1.39、§9.1.41、§9.1.44、§9.1.45、§9.2、§9.4、§9.6、§9.8、§9.11、§9.15、§9.16、§9.17、該当 Phase 詳細節を同時更新する。rollout readiness matrix がない Phase 実装 PR は、実装完了後の起動・再起動・rollback・health・operator 判断の欠落による後続バグ修正を防げないため、release / deploy / production enable 不可とする。
 
+#### 9.1.47 Phase compatibility baseline / upstream refresh matrix 固定契約
+
+各 Phase の実装 PR は、Turso Cloud、libSQL SDK、hrana wire format、legacy metadata、previous Phase response を互換 baseline として固定しなければならない。互換 baseline は「現在の実装出力」ではなく「Adlaire DB が追従または明示差分化する外部基準」である。実装都合で snapshot、oracle、SDK transcript、expected を更新して互換差分を消すことは禁止する。
+
+**Compatibility baseline matrix 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `baseline_id` | `BASE-P{phase}-{surface}` 形式の一意 ID |
+| `phase` | baseline を固定する Phase |
+| `upstream_source` | Turso Cloud API、libSQL SDK、hrana spec、legacy Adlaire artifact、previous Phase snapshot のいずれか |
+| `observed_behavior` | upstream または previous Phase で観測した path、method、request、response、error、metadata、SDK behavior |
+| `adlaire_behavior` | Adlaire DB が採用する挙動。差分がある場合は mode、error mapping、client impact を明記 |
+| `compatibility_class` | `match`、`intentional_self_host_diff`、`unsupported_until_phase`、`upstream_changed`、`sdk_regression`、`adlaire_extension_mode_only` |
+| `snapshot_version` | snapshot / fixture / transcript の version、生成 commit、正規化 rule |
+| `sdk_version` | 対象 SDK 名と version。SDK 対象外なら本文根拠付き `not_applicable` |
+| `refresh_trigger` | upstream changelog、SDK update、Turso behavior diff、spec change、regression failure、security/persistence reason |
+| `refresh_allowed_by` | refresh を許可する根拠。仕様変更 commit、Turso 追従記録、SDK changelog、承認済み change ID |
+| `diff_reason` | 差分理由。差分なしなら `none` |
+| `migration_impact` | metadata、config、JWT claim、artifact、client migration の要否 |
+| `regression_scope` | refresh 後に再実行する Phase regression、SDK transcript、Turso snapshot、legacy fixture |
+| `evidence` | upstream observation、snapshot diff、SDK transcript、compat diff、changelog reference、artifact path |
+
+**compatibility class 固定表：**
+
+| Class | 意味 | 完了条件 |
+|-------|------|----------|
+| `match` | upstream / SDK / previous Phase と client-visible behavior が一致 | snapshot / transcript 差分ゼロ |
+| `intentional_self_host_diff` | security、persistence、operation の理由で自己ホスト差分を採用 | diff reason、client impact、代替仕様、regression が必須 |
+| `unsupported_until_phase` | 将来 Phase まで明示的に未対応 | unsupported behavior、error/status、対象 Phase、snapshot が必須 |
+| `upstream_changed` | Turso Cloud / SDK 側の変更に追従する必要がある | upstream 証跡、仕様更新、migration/rollback 評価が必須 |
+| `sdk_regression` | SDK 互換が壊れた | Phase 未完了。修正または仕様差分化まで Done 禁止 |
+| `adlaire_extension_mode_only` | Adlaire 独自 mode のみの挙動 | Turso 互換 mode への混入なし、mode boundary snapshot が必須 |
+
+**baseline refresh 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| 実装変更だけを理由に互換 snapshot / oracle / expected を更新する | merge 不可 |
+| upstream 変更を確認せず `upstream_changed` とする | review failure |
+| SDK transcript なしに SDK 互換を `match` とする | Phase 未完了 |
+| Turso Cloud 差分を `INTERNAL_ERROR`、generic 500、ログだけで隠す | merge 不可 |
+| 自己ホスト差分に diff reason、client impact、代替仕様がない | 実装開始禁止 |
+| 古い baseline のまま Phase Done / rollout ready と扱う | Phase 未完了 |
+| Adlaire extension mode の field / auth / metadata が Turso 互換 mode に混入する | merge 不可 |
+| refresh 後の previous Phase regression を実行しない | rollout ready 不可 |
+
+**Done receipt への反映：**
+
+| Done receipt field | 必須内容 |
+|--------------------|----------|
+| `compatibility_baseline_result` | baseline ID ごとの compatibility class、snapshot version、SDK version、diff reason、refresh trigger、evidence |
+| `upstream_refresh_result` | refresh がある場合の upstream observation、許可根拠、migration / rollback / regression 結果。ない場合は `none` |
+| `compatibility_mode_boundary_result` | Turso 互換 mode と Adlaire extension mode の差分、混入なし、snapshot 証跡 |
+
+Phase compatibility baseline に関係する仕様変更は、§1.4、§1.5、§3.5.3、§7.3、§9.1.10、§9.1.11、§9.1.15、§9.1.23、§9.1.24、§9.1.32、§9.1.33、§9.1.35、§9.1.39、§9.1.40、§9.1.43、§9.1.44、§9.1.45、§9.1.46、§9.2、§9.4、§9.5、§9.6、§9.7、§9.8、§9.15、§9.17、該当 Phase 詳細節を同時更新する。compatibility baseline matrix がない Phase 実装 PR は、互換基準、snapshot 更新条件、SDK transcript、upstream 追従差分、自己ホスト例外の根拠が未確定であるため、実装開始不可とする。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -5693,6 +5752,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Coverage closure | §9.1.44 に従い、全 Contract ID / schema ID / scenario ID / decision ID が test、artifact、oracle、regression、N/A 理由へ対応している | 実装開始禁止。coverage gap、manual only pass、根拠なし N/A、旧 Phase regression 漏れがある場合は Phase 完了扱いにしない |
 | Change impact / drift control | §9.1.45 に従い、実装中の scope、API、schema、error、metadata、auth、test、oracle、compatibility 変更が change ID、同時更新範囲、承認状態、closure evidence で閉じている | 実装開始禁止。packet freeze 後の暗黙変更、snapshot だけ更新、互換影響未評価、migration / rollback 未評価がある場合は Phase 完了扱いにしない |
 | Rollout readiness | §9.1.46 に従い、startup、shutdown、restart、rollback、health、operator action、compatibility、data safety、blocked release reason が固定されている | release / deploy / production enable 禁止。Phase Done だけで rollout ready 扱い、rollback 未検証、operator_required 隠蔽、環境差分未記録の場合は運用投入不可 |
+| Compatibility baseline | §9.1.47 に従い、Turso Cloud、libSQL SDK、hrana、legacy metadata、previous Phase の baseline、snapshot / SDK version、refresh trigger、差分分類、証跡が固定されている | 実装開始禁止。実装都合の snapshot 更新、SDK transcript 欠落、upstream 未確認、自己ホスト差分理由なし、古い baseline のまま Done / rollout ready は不可 |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | 仕様内相互参照 | §9.1.29 に従い、Phase 番号、TC ID、Task ID、API 契約 ID、error code、persistence key、evidence 名、manifest 参照が一致している | 仕様修正 PR に戻す |
 | Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
