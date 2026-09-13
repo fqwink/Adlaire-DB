@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.146
+**バージョン：** V.147
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.146` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.147` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -7155,7 +7155,7 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 |-------|----------|
 | `handoff_id` | `HANDOFF-P{phase}-{number}` 形式の一意 ID |
 | `spec_version` | 対象仕様書 version。Phase Done 時点の `V.{累積番号}` と一致させる |
-| `reading_order` | レビュアーが読む順番。最低でも §0、§1.4、§9.1.51、§9.11.1〜§9.11.9、対象 Phase 詳細節、Phase packet、Done receipt |
+| `reading_order` | レビュアーが読む順番。最低でも §0、§1.4、§9.1.51、§9.11.1〜§9.11.10、対象 Phase 詳細節、Phase packet、Done receipt |
 | `reproduction_commands` | clean checkout から実行できる command。各 command は working directory、env、fixture、expected exit code を持つ |
 | `expected_artifacts` | command ごとの生成 artifact path、Contract ID、Scenario ID、snapshot / transcript / log の対応 |
 | `decision_criteria` | Done / Not Done / Spec correction required の判定条件。失敗時に参照する仕様節を含める |
@@ -7397,6 +7397,58 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 | list / map / JSON field / Prometheus line / manifest entry の順序が未定義 | Phase 未完了 |
 | flaky 原因、失敗ログ、deterministic 化修正、再実行 artifact が揃っていない | merge 不可 |
 | `P{phase}-PRECISION-CLOSURE` に `flaky_count = 0`、`nondeterministic_artifact_count = 0`、`determinism_result = pass` がない | Phase 未完了 |
+
+### 9.11.10 Phase 1〜19 assertion / oracle binding closure 最低表
+
+本節は Phase 実装 PR の test、snapshot、fixture、transcript が、仕様上の oracle と具体的な assertion で結び付いていることを証明する最低条件を定義する。test が存在していても、重要 field を assert していない、expected と actual の対応がない、snapshot 更新だけで差分を吸収している場合は Phase 完了扱いにしない。
+
+| Phase | assertion / oracle binding 最低対象 |
+|-------|-------------------------------------|
+| 1 | CLI exit code、stdout/stderr、help text、invalid flag error、config precedence、no persistence file count |
+| 2 | data-dir layout、lock conflict status、metadata before/after、DB file/WAL existence、integrity result、restart result |
+| 3 | HTTP status、Content-Type、hrana response schema、SQL error body、close behavior、SDK transcript |
+| 4 | auth status/error code、Bearer header handling、JWT claim、ro/rw permission、token create output、redaction |
+| 5 | JSONL field set、request_id、SDK CRUD result、restart data equality、unsupported response、secret scan result |
+| 6 | route selected DB、default compatibility、DB name validation、isolation query result、metadata/directory consistency |
+| 7 | Admin status/body、DB CRUD metadata、token CRUD response、DB scope denial、revoke effect、concurrency result |
+| 8 | Turso wrapper schema、organization/group/location/quota fields、usage response、legacy migration artifact、scope/quota denial |
+| 9 | WebSocket upgrade headers、message schema、stream state、transaction commit/rollback、store_sql behavior、SDK WS transcript |
+| 10 | ATTACH allow/deny result、arbitrary path denial、metrics counter values、auth/scope denial、redaction |
+| 11 | replication status/body、SSE event fields、frame_no/checksum、snapshot headers/body、heartbeat/status response |
+| 12 | replica state before/after、redirect status/header/body、primary down behavior、checksum mismatch error、multi replica result |
+| 13 | archive manifest fields、frame filename/checksum、retention deletion set、corrupt/orphan response、disabled mode response |
+| 14 | backup body checksum、restore temp/commit/rollback trace、PITR selected frame、corrupt/range error、startup recovery |
+| 15 | branch metadata fields、source selector、routing isolation query、delete recovery artifact、seed compatibility response |
+| 16 | extension manifest fields、sha256 check、load/delete result、path/symlink denial、SQL bypass denial、restart state |
+| 17 | metrics snapshot fields、Prometheus text lines、counter restore values、quota/usage consistency、label redaction |
+| 18 | HA state fields、term monotonicity、promote/demote response、redirect behavior、split-brain denial、partition result |
+| 19 | adapter flag parsing、shadow diff artifact、active gate assertion、rollback transcript、SDK compatibility、performance threshold |
+
+**assertion_binding_record 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `assertion_id` | `ASSERT-P{phase}-{surface}-{number}` 形式の一意 ID |
+| `phase` | 対象 Phase 番号 |
+| `owner_contract` | 対応する Contract ID。複数 contract を曖昧にまとめない |
+| `oracle_path` | expected snapshot、fixture、transcript、baseline、manifest など正解 artifact の path |
+| `actual_artifact_path` | 実行結果 artifact の path。oracle と 1 対 1 または明示 matrix で対応させる |
+| `asserted_fields` | status、code、headers、body schema、metadata、file state、log、metric、redaction など実際に assert する field |
+| `normalization_rules` | 比較前に適用する正規化規則。正規化で意味差分を消してはならない |
+| `comparison_command` | expected と actual を比較する command、expected exit code、差分保存先 |
+| `result` | `pass` または `fail`。`not_asserted`、`snapshot_updated_only`、`manual_checked` は禁止 |
+
+**Assertion / oracle binding 判定規則：**
+
+| 状態 | 判定 |
+|------|------|
+| test は存在するが status だけ、または process exit code だけを assert している | Phase 未完了 |
+| snapshot / fixture / expected を更新したが assertion ID、oracle path、comparison command を更新していない | merge 不可 |
+| expected と actual の artifact path が対応しない | Phase 未完了 |
+| error、auth、persistence、redaction、compatibility、rollback の assertion が欠落している | merge 不可 |
+| `actual` をそのまま `expected` にコピーして oracle とする | merge 不可 |
+| assertion failure を snapshot 更新で消し、仕様本文の差分理由を残さない | merge 不可 |
+| `P{phase}-PRECISION-CLOSURE` に `missing_assertion_count = 0`、`oracle_binding_result = pass` がない | Phase 未完了 |
 
 ### 9.12 PR レビュー観点
 
@@ -13253,7 +13305,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.146` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.147` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
