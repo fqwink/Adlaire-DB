@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.102
+**バージョン：** V.103
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.102` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.103` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -3996,6 +3996,7 @@ branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§
 | `unsupported_behavior` | 未来 Phase、stub、501/400/404/405 の固定挙動 |
 | `dependency_graph` | API、persistence、security、compatibility、oracle、evidence、operational state の prerequisite |
 | `invariant_ledger` | §9.1.39 の invariant ID、scope、before/after 条件、violation signal、regression guard |
+| `scenario_matrix` | §9.1.40 の normal/error/auth/persistence/rollback/concurrency/compatibility/unsupported/redaction/operational scenario |
 | `completion_gate` | merge 前に満たす Done 条件と失敗時の扱い |
 
 **Phase group 粒度：**
@@ -4059,7 +4060,7 @@ branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§
 | cross-reference scan | §9.1.29 の self-check 結果 |
 | redaction scan | packet / artifact / log に secret、token、raw path、SQL args、backup body がないこと |
 
-Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.1.29、§9.1.39、§9.2、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。Phase 単位で何を実装し、何を実装しないか、何をもって完了とするかが 1 箇所で読めない場合は、実装精度不足として Phase 未完了扱いにする。
+Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.1.29、§9.1.39、§9.1.40、§9.2、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。Phase 単位で何を実装し、何を実装しないか、何をもって完了とするかが 1 箇所で読めない場合は、実装精度不足として Phase 未完了扱いにする。
 
 #### 9.1.33 Phase completion gate / Done evidence / bug-zero acceptance 固定契約
 
@@ -4086,6 +4087,7 @@ Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§
 | `operational_state_result` | §9.1.37 の state matrix、health snapshot、API behavior、recovery runbook |
 | `dependency_graph_result` | §9.1.38 の prerequisite がすべて satisfied である証跡 |
 | `invariant_result` | §9.1.39 の invariant ID ごとの pass/fail、violation 0 件、regression guard、evidence path |
+| `scenario_matrix_result` | §9.1.40 の scenario ID ごとの pass/fail、not_applicable reason、evidence path、manual only 0 件 |
 | `reviewer_decision` | `Done`、`Not Done`、`Spec correction required` のいずれか |
 
 **Phase group Done minimum：**
@@ -4563,6 +4565,77 @@ Phase dependency graph に関係する仕様変更は、§9.1.7、§9.1.8、§9.
 | `non_regression_closure` | 過去 Phase invariant が再実行され、互換差分が 0 件または仕様化済みであること |
 
 Phase invariant ledger に関係する仕様変更は、§9.1.7、§9.1.10、§9.1.11、§9.1.14、§9.1.15、§9.1.23、§9.1.24、§9.1.32、§9.1.33、§9.1.35、§9.1.36、§9.1.37、§9.1.38、§9.2、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。invariant ledger がない Phase 実装 PR は、バグ修正ゼロ判定に必要な非退行条件が未確定として扱い、実装開始不可とする。
+
+#### 9.1.40 Phase scenario matrix / implementation blueprint 固定契約
+
+各 Phase の実装 PR は、実装開始前に Phase scenario matrix を固定しなければならない。scenario matrix は、その Phase で実装・拒否・検証する全シナリオの実装設計図である。正常系だけを実装してから異常系、権限、永続化、互換、rollback、unsupported を後追いで補う進め方は禁止する。
+
+**Scenario matrix 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `scenario_id` | `SCN-P{phase}-{category}-{number}` 形式の一意 ID |
+| `category` | normal / invalid_request / auth_scope_quota / persistence_restart / rollback_recovery / concurrency_idempotency / compatibility / unsupported / redaction / operational |
+| `entrypoint` | API path、WebSocket message、CLI command、config key、startup path、background job、internal adapter |
+| `precondition` | data-dir、metadata、token、config、DB state、Phase prerequisite、operator state |
+| `input` | request body、query、header、SQL、config、fixture、failure injection |
+| `expected_behavior` | HTTP status、error code、response body、metadata/file state、health、log、retry 可否 |
+| `persistence_effect` | no-write、atomic write、fsync、rollback、migration、recovery marker、not_applicable のいずれか |
+| `security_effect` | auth required、scope check、quota check、redaction、not_applicable のいずれか |
+| `compatibility_effect` | Turso snapshot、libSQL SDK transcript、legacy fixture、previous Phase regression、not_applicable のいずれか |
+| `evidence` | test ID、command、snapshot、fixture、artifact path |
+| `owner_contract` | API / persistence / security / compatibility / operational Contract ID |
+| `not_applicable_reason` | `not_applicable` の場合のみ、仕様本文の根拠 |
+
+**Scenario category 固定表：**
+
+| Category | 必ず固定すること | 未定義時の扱い |
+|----------|------------------|----------------|
+| `normal` | 成功条件、response、永続化後状態、idempotency | 実装開始禁止 |
+| `invalid_request` | malformed body、unknown field、invalid name、bad type、size limit、unsupported query | validation 実装禁止 |
+| `auth_scope_quota` | token なし、token 不正、scope 不一致、quota 超過、block policy | success response 禁止 |
+| `persistence_restart` | file path、schema、fsync、再起動後復元、破損検出 | 書き込み処理禁止 |
+| `rollback_recovery` | 途中失敗、crash、rollback marker、operator_required、retry | destructive operation 公開禁止 |
+| `concurrency_idempotency` | 同時 create/delete/write、retry、duplicate request、lock timeout | 状態変更処理禁止 |
+| `compatibility` | Turso Cloud snapshot、libSQL SDK transcript、legacy metadata、previous Phase 差分 | 互換対象 API 公開禁止 |
+| `unsupported` | future Phase、対象外 field/config/route/operation の拒否 status/body | stub / route 追加禁止 |
+| `redaction` | token、secret、raw path、SQL args、backup body、private metadata の非露出 | artifact / log 完了不可 |
+| `operational` | health、degraded、unavailable、recovering、operator_required、write policy | failure path 実装禁止 |
+
+**Phase group scenario minimum：**
+
+| Phase group | 最低 scenario |
+|-------------|----------------|
+| Phase 1〜5 | CLI help/error、config precedence、data-dir lock/open、default DB restart、hrana normal/error、JWT allow/deny、log redaction、SDK smoke |
+| Phase 6〜8 | DB create/delete/list/detail、invalid DB name、admin auth、Turso Platform wrapper、organization/group/location/quota、metadata migration、legacy fallback |
+| Phase 9〜10 | WebSocket hello/auth/order、transaction commit/rollback/disconnect、managed ATTACH allow/deny、metrics counter/read、arbitrary path denial |
+| Phase 11〜13 | replication token/range/checksum、primary/replica lag、redirect、archive manifest/snapshot/frame、retention cleanup、corrupt frame |
+| Phase 14〜15 | backup stream、restore integrity、PITR selector、restore rollback、branch create/delete/routing/source isolation、seed compatibility、restart recovery |
+| Phase 16〜18 | extension register/load/delete/signature、metrics persistence/Prometheus、HA leader/follower/failover/split-brain/operator_required |
+| Phase 19 | internal adapter disabled/shadow/active/rollback、wire/API diff zero、metadata no-migration、performance baseline、crash recovery、Phase 1〜18 full regression |
+
+**Scenario coverage 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| scenario matrix がない | 実装開始禁止 |
+| category が normal だけで error/auth/persistence/compatibility/unsupported がない | Phase 未完了 |
+| scenario が `manual only`、`not run`、`todo`、`later`、空欄のまま | Phase 未完了 |
+| `not_applicable` の仕様本文根拠がない | Phase 未完了 |
+| unsupported / future feature の scenario が success response を期待する | merge 不可 |
+| persistence effect があるのに rollback / restart scenario がない | merge 不可 |
+| compatibility effect があるのに Turso / SDK / legacy / previous Phase evidence がない | merge 不可 |
+| scenario matrix と Phase packet / manifest / Done receipt の Contract ID が一致しない | Phase 未完了 |
+
+**Done receipt への反映：**
+
+| Done receipt field | 必須内容 |
+|--------------------|----------|
+| `scenario_matrix_result` | scenario ID ごとの category、pass/fail、evidence path、not_applicable reason、manual only 0 件 |
+| `scenario_coverage` | category 別件数、未実行 0 件、not_applicable の仕様本文参照 |
+| `implementation_blueprint_closure` | scenario matrix の全 owner Contract ID が packet、manifest、oracle、invariant、test、artifact と一致すること |
+
+Phase scenario matrix に関係する仕様変更は、§9.1.7、§9.1.10、§9.1.11、§9.1.14、§9.1.24、§9.1.32、§9.1.33、§9.1.35、§9.1.36、§9.1.37、§9.1.38、§9.1.39、§9.2、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。scenario matrix がない Phase 実装 PR は、ケース漏れによる後続バグ修正を防げないため、実装開始不可とする。
 
 ### 9.2 Phase 別完了ゲート
 
@@ -5217,6 +5290,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Operational state / recovery runbook | §9.1.37 に従い、healthy、degraded、unavailable、recovering、rollback_required、operator_required、blocked の API / write / health / log / operator action が固定されている | failure path を実装しない |
 | Dependency graph | §9.1.38 に従い、各 Contract ID の prerequisite、blocks、status、evidence、not_applicable reason が固定され、未完了 prerequisite が 0 件になっている | dependent contract を実装・公開・完了扱いにしない |
 | Invariant ledger | §9.1.39 に従い、durability、metadata/file consistency、auth/scope/quota、compatibility、error surface、operational state、redaction、dependency/prerequisite の invariant と regression guard が固定され、violation が 0 件になっている | 実装開始禁止。違反がある場合は Phase 完了扱いにしない |
+| Scenario matrix | §9.1.40 に従い、normal、invalid request、auth/scope/quota、persistence/restart、rollback/recovery、concurrency/idempotency、compatibility、unsupported、redaction、operational の scenario と evidence が固定され、manual only / not run / 根拠なし N/A が 0 件になっている | 実装開始禁止。ケース漏れがある場合は Phase 完了扱いにしない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | 仕様内相互参照 | §9.1.29 に従い、Phase 番号、TC ID、Task ID、API 契約 ID、error code、persistence key、evidence 名、manifest 参照が一致している | 仕様修正 PR に戻す |
 | Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
