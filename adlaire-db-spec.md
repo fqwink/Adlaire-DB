@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.125
+**バージョン：** V.126
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.125` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.126` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -6370,6 +6370,100 @@ Phase 10 は管理下 DB 間の ATTACH と、Phase 1〜10 の HTTP/WebSocket/DB 
 | Phase 13 | `wal/archive.rs`, `wal/manifest.rs`, cleanup task, `config.rs` | 外部 API 追加は不要。archive/cleanup は内部機能 | `wal-archive/manifest.json`, frame files, snapshot file を atomic update。retention cleanup は manifest と file を同時整合 | manifest 破損は起動失敗。frame missing は ERROR。cleanup の削除件数を INFO log | TC-5-8。retention、manifest/files consistency、CRC mismatch detection |
 | Phase 14 | `http/admin/backup.rs`, restore service, PITR service | backup/restore/PITR API を §6.4 通り実装する。restore/PITR は admin auth 必須 | restore 前に元 DB を退避し、失敗時は必ず rollback。PITR は snapshot + WAL replay | `PITR_NOT_ENABLED`, `FRAME_NOT_FOUND`, `RESTORE_INTEGRITY_FAILED`, `RESTORE_FRAME_CORRUPT` を使用 | TC-5-1〜TC-5-7。同時書き込み、不正 file、範囲外、CRC 破壊、rollback |
 | Phase 15 | `http/admin/branches.rs`, branch metadata, `db/manager.rs`, PITR helper | branch CRUD API を実装し、branch DB は `{db}___{branch}` として通常 pipeline でアクセスする | `meta/branches.json` と branch DB directory を atomic に整合。削除時は metadata と directory の両方を消す | branch 名不正は `INVALID_DB_NAME`、`___` 衝突は `DB_RESERVED_NAME`。削除済み branch pipeline は `DB_NOT_FOUND` | TC-6-1〜TC-6-7。current/timestamp/frame branch、独立書き込み、再起動復元 |
+
+**Phase 11 完全実装精度固定契約：**
+
+Phase 11 は primary role の replication 送信側 API を完成させる Phase である。Phase 11 で成功応答してよい新規外部 API は primary port 上の `/replication/v1/log`、`/replication/v1/snapshot`、`/replication/v1/heartbeat`、`/replication/v1/status` のみであり、replica apply、write redirect、replica health lag、WAL archive retention、backup/restore、branch、HA を実装してはならない。Phase 11 実装者は下表を Phase packet、atomic task ledger、scenario matrix、Done receipt、review handoff、operator behavior delta に転記してから実装する。
+
+| 項目 | Phase 11 固定仕様 |
+|------|-------------------|
+| 実装範囲 | `--role primary`、primary port、replication token auth、WAL frame stream、snapshot stream、heartbeat receive、primary status |
+| role | `standalone` は既定。`primary` のみ replication API を起動する。`replica` は Phase 12 まで起動拒否または明示 unsupported |
+| primary port | `--primary-port` 既定 `8082`。client SDK 用 HTTP port と混同しない。port bind 失敗は起動失敗 |
+| auth token | replication token が設定されている場合は `Authorization: Bearer <token>` 完全一致必須。prefix/空白/大小文字補正は禁止 |
+| auth disabled | primary role で replication token 未設定の場合は replication API を `AUTH_REQUIRED` とする。外部公開状態で無認証成功させない |
+| `/replication/v1/log` | `GET` + query `from_frame` 必須。SSE で frame を frame_no 昇順に返し、追いついたら接続維持して heartbeat を送る |
+| `from_frame` | 1 以上の integer。0、負数、非数値、重複 query、空 query は `INVALID_REQUEST` |
+| frame_no | primary 内で単調増加。DB ごとの frame 順序と全体 stream 順序を transcript に残す |
+| checksum | frame payload bytes の CRC32。SSE data、snapshot header、future archive manifest で同じ計算式を使う |
+| SSE format | frame は `event: frame`、`id: <frame_no>`、`data: <json>`。heartbeat は `event: heartbeat`。frame bytes は base64 |
+| `/replication/v1/snapshot` | 整合した SQLite snapshot byte stream を返す。`Content-Type: application/octet-stream`、base frame header、checksum header 必須 |
+| snapshot consistency | snapshot 生成中の write があっても snapshot 内は一貫。temp snapshot は成功/失敗後に cleanup される |
+| `/replication/v1/heartbeat` | replica_id、synced_frame、last_seen_primary_frame を受け付ける。unknown replica_id は登録、既存は上書き更新 |
+| heartbeat validation | `synced_frame` が primary 最大 frame を超える場合は `INVALID_REQUEST`。負数/非数値/null は拒否 |
+| `/replication/v1/status` | primary role、current_frame、connected replica summary、write_mode、auth enabled を返す。secret は返さない |
+| write mode | Phase 11 の `async` は ACK を待たない。`sync` は quorum/ACK semantics 未完成なら起動拒否し、silent async fallback しない |
+| quota/block | replication apply は Phase 12。Phase 11 primary stream は quota/block 判定で frame 提供を止めない |
+
+**Phase 11 atomic task ledger：**
+
+| Task ID | Goal | Input contracts | Change targets | Forbidden changes | Completion condition | Verification |
+|---------|------|-----------------|----------------|-------------------|----------------------|--------------|
+| `TASK-P11-1` | primary role / config validation を固定する | §4、§8.4、§9.13 | `config.rs`、`main.rs` | silent fallback、port 混同 | primary 起動条件が固定 | config fixture |
+| `TASK-P11-2` | replication auth を固定する | §9.1.18、§10.1 | `http/replication.rs` | token 補正、secret log | auth matrix が規定 status/code | auth snapshot |
+| `TASK-P11-3` | WAL frame model を固定する | §3.6、§9.1.28 | `replication/primary.rs` | frame_no 巻き戻り、checksum なし | frame_no / CRC32 が固定 | frame transcript |
+| `TASK-P11-4` | `/replication/v1/log` SSE を固定する | §9.5、Phase 11 詳細 | `http/replication.rs` | JSON polling 代替、順序崩れ | SSE event/id/data が固定 | SSE snapshot |
+| `TASK-P11-5` | snapshot stream を固定する | §9.1.23、Phase 11 詳細 | `replication/snapshot.rs` | 不整合 file copy、header 欠落 | consistent byte stream + headers | snapshot artifact |
+| `TASK-P11-6` | heartbeat API を固定する | Phase 11 詳細 | `http/replication.rs` | invalid frame 受理、secret response | replica state summary が更新 | heartbeat snapshot |
+| `TASK-P11-7` | primary status API を固定する | §9.5、Phase 11 詳細 | `http/replication.rs` | secret 出力、role 混同 | status schema が固定 | status snapshot |
+| `TASK-P11-8` | long-poll / cleanup / shutdown を固定する | §9.1.25、§9.4.1 | replication runtime | leaked temp snapshot、hung connection | heartbeat/close/cleanup が再現可能 | lifecycle artifact |
+| `TASK-P11-9` | Phase 11 Done receipt / handoff / operator delta | §9.1.33、§9.1.51、§9.1.52 | docs / PR artifact | PR description だけの根拠 | 第三者が replication API を再現できる | handoff checklist |
+
+**Phase 11 scenario / oracle 固定表：**
+
+| Scenario ID | 入力 | 期待結果 | Evidence |
+|-------------|------|----------|----------|
+| `SCN-P11-1` | `--role primary --primary-port 8082` | primary port 起動、client port と分離 | startup transcript |
+| `SCN-P11-2` | primary port bind 失敗 | 起動失敗、partial service success なし | bind failure fixture |
+| `SCN-P11-3` | replication token 欠落 / 不一致 / valid | `AUTH_REQUIRED` / `AUTH_INVALID` / success | auth matrix |
+| `SCN-P11-4` | `GET /replication/v1/log` without `from_frame` | `INVALID_REQUEST` | query validation snapshot |
+| `SCN-P11-5` | `from_frame=0`、負数、非数値、重複 query | `INVALID_REQUEST` | from_frame matrix |
+| `SCN-P11-6` | `from_frame=1` with existing frames | SSE frame_no 昇順、CRC32 付き | SSE frame transcript |
+| `SCN-P11-7` | stream が current frame に追いつく | connection 維持、heartbeat event 送信 | long-poll transcript |
+| `SCN-P11-8` | write 後に log stream 継続 | 新 frame が次の frame_no で流れる | live stream transcript |
+| `SCN-P11-9` | frame payload CRC32 再計算 | response checksum と一致 | checksum artifact |
+| `SCN-P11-10` | `GET /replication/v1/snapshot` | 200 octet-stream、base frame/checksum headers | snapshot header artifact |
+| `SCN-P11-11` | snapshot 中に concurrent write | snapshot は一貫し、write は後続 frame になる | consistency transcript |
+| `SCN-P11-12` | snapshot temp file left by interrupted run | 起動時 cleanup、metadata 変更なし | cleanup fixture |
+| `SCN-P11-13` | `POST /replication/v1/heartbeat` unknown replica | 登録され status に反映 | heartbeat transcript |
+| `SCN-P11-14` | heartbeat `synced_frame` > primary max | `INVALID_REQUEST` | heartbeat validation snapshot |
+| `SCN-P11-15` | `GET /replication/v1/status` | role/current_frame/replicas/write_mode/auth_enabled、secret なし | status snapshot |
+| `SCN-P11-16` | `--replication-write-mode sync` without quorum contract | 起動拒否。async へ silent fallback しない | write mode fixture |
+| `SCN-P11-17` | replica role / replica apply endpoints | Phase 11 では成功応答なし | unsupported snapshot |
+| `SCN-P11-18` | Phase 1〜10 regression + SDK HTTP/WS | すべて pass | regression transcript |
+
+**Phase 11 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| replication token 未設定 primary で replication API を無認証成功させる | merge 不可 |
+| Bearer token を trim / lowercase / 補正して受け付ける | merge 不可 |
+| frame_no を巻き戻す、重複させる、checksum なしで送る | merge 不可 |
+| SSE ではなく独自 JSON polling だけで `/log` 完了扱いにする | merge 不可 |
+| snapshot を単純 file copy し、一貫性と base frame を証明しない | merge 不可 |
+| snapshot / frame bytes / replication token を log や artifact に生出力する | merge 不可 |
+| `sync` write mode を quorum 未定義のまま async と同じ挙動にする | merge 不可 |
+| replica apply、write redirect、replica health lag を Phase 11 完了条件に混ぜる | merge 不可。Phase 12 対象 |
+| replication API snapshot、frame/checksum transcript、snapshot consistency、secret scan なしで完了扱いにする | Phase 未完了 |
+
+**Phase 11 Done receipt 最低 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `implemented_scope` | primary role、primary port、replication auth、`/log` SSE、`/snapshot`、`/heartbeat`、`/status`、frame_no、CRC32 |
+| `excluded_scope` | replica apply、write redirect、replica health lag、WAL archive retention、backup/restore、branch、HA、内製化 |
+| `atomic_task_result` | `TASK-P11-1`〜`TASK-P11-9` がすべて pass、open task 0 件 |
+| `scenario_matrix_result` | `SCN-P11-1`〜`SCN-P11-18` の pass/fail、artifact path |
+| `config_result` | role、primary_port、replication_auth_token、write_mode、invalid config、secret redaction |
+| `replication_auth_result` | no auth、bad format、不一致、valid、token redaction の matrix |
+| `frame_stream_result` | SSE event/id/data、frame_no monotonic、CRC32、long-poll heartbeat、live append |
+| `snapshot_result` | octet-stream、base frame/checksum headers、concurrent write consistency、temp cleanup |
+| `heartbeat_status_result` | heartbeat validation、replica summary、status schema、secret 不在 |
+| `compatibility_baseline_result` | Phase 1〜10 regression、TypeScript SDK HTTP/WS transcript、Turso / libSQL compatibility 差分なし |
+| `secret_redaction_result` | response/log/snapshot/artifact に replication token、JWT、frame bytes 生値、SQL args が残らない scan |
+| `coverage_closure_result` | config、auth、SSE、snapshot、heartbeat、status、cleanup、unsupported、regression の gap 0 件 |
+| `review_handoff_result` | 第三者が primary 起動、SSE、snapshot、heartbeat、status、secret scan を再現できる command と artifact |
+| `operator_behavior_delta_result` | Phase 11 で primary replication API が公開されるが replica apply / redirect はまだ利用不可である release note |
 
 **Phase 11/12 の境界決定：**
 
