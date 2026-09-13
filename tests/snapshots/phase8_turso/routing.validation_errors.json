@@ -1,0 +1,1 @@
+{"status":400,"content_type":"application/json","body":{"invalid_request":{"code":"INVALID_REQUEST","error":"invalid request"},"method_not_allowed":{"code":"METHOD_NOT_ALLOWED","error":"method not allowed"},"not_found":{"code":"ENDPOINT_NOT_FOUND","error":"endpoint not found"}}}

@@ -1,0 +1,1 @@
+{"status":200,"content_type":"application/json","body":{"database":{"DbId":"<uuid>","Hostname":"my-db-default.<host>","Name":"my-db","block_reads":false,"block_writes":false,"primaryRegion":"default","regions":["default"]}}}

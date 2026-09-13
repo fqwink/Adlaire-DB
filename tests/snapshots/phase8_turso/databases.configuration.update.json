@@ -1,0 +1,1 @@
+{"status":200,"content_type":"application/json","body":{"allow_attach":true,"block_reads":false,"block_writes":false,"delete_protection":true,"size_limit":"1mb"}}

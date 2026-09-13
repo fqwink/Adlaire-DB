@@ -79,7 +79,7 @@ pub async fn admin_route(
         ("POST", p) if is_turso_groups_path(p) => admin::platform::create_group(req, state).await,
         ("GET", p) if is_turso_group_path(p) => admin::platform::group(req, state).await,
         ("PATCH", p) if is_turso_group_configuration_path(p) => admin::platform::patch_group_configuration(req, state).await,
-        ("POST", p) if is_turso_group_rotate_path(p) => admin::platform::rotate_ok(req, state).await,
+        ("POST", p) if is_turso_group_rotate_path(p) => admin::platform::rotate_group_tokens(req, state).await,
         ("POST", p) if is_turso_group_transfer_path(p) => admin::platform::unsupported(req, state).await,
         ("GET" | "PATCH" | "DELETE", p) if is_turso_group_transfer_path(p) => admin::platform::unsupported_method(req, state).await,
         ("GET", p) if is_turso_databases_path(p) => admin::platform::databases(req, state).await,
@@ -88,13 +88,17 @@ pub async fn admin_route(
         ("DELETE", p) if is_turso_database_path(p) => admin::platform::delete_database(req, state).await,
         ("PATCH", p) if is_turso_database_configuration_path(p) => admin::platform::patch_database_configuration(req, state).await,
         ("POST", p) if is_turso_database_token_path(p) => admin::platform::create_database_token(req, state).await,
-        ("POST", p) if is_turso_database_rotate_path(p) => admin::platform::rotate_ok(req, state).await,
+        ("POST", p) if is_turso_database_rotate_path(p) => admin::platform::rotate_database_tokens(req, state).await,
         ("GET", p) if is_turso_database_stats_path(p) => admin::platform::unsupported(req, state).await,
         ("POST" | "PATCH" | "DELETE", p) if is_turso_database_stats_path(p) => admin::platform::unsupported_method(req, state).await,
+        ("GET" | "POST" | "PATCH" | "DELETE", p) if is_turso_always_unsupported_path(p) => admin::platform::unsupported(req, state).await,
         ("GET", p) if is_turso_unsupported_read_path(p) => admin::platform::unsupported(req, state).await,
         ("POST" | "PATCH" | "DELETE", p) if is_turso_unsupported_write_path(p) => admin::platform::unsupported_method(req, state).await,
         ("POST", "/v1/upload") => admin::platform::unsupported(req, state).await,
         ("GET" | "PATCH" | "DELETE", "/v1/upload") => admin::platform::unsupported_method(req, state).await,
+        _ if is_turso_method_not_allowed(method.as_str(), &path) => {
+            admin::platform::unsupported_method(req, state).await
+        }
         ("GET", "/admin/v1/metrics") => admin::metrics::get(req, state).await,
         ("GET", p) if p.ends_with("/backup") => admin::backup::backup(req, state).await,
         ("POST", p) if p.ends_with("/restore") => admin::backup::restore(req, state).await,
@@ -279,6 +283,17 @@ fn is_turso_unsupported_read_path(path: &str) -> bool {
     )
 }
 
+fn is_turso_always_unsupported_path(path: &str) -> bool {
+    let segs = segments(path);
+    matches!(
+        segs.as_slice(),
+        ["v1", "organizations", _, "members", ..]
+            | ["v1", "organizations", _, "invites", ..]
+            | ["v1", "organizations", _, "billing", ..]
+            | ["v1", "organizations", _, "overages", ..]
+    )
+}
+
 fn is_turso_unsupported_write_path(path: &str) -> bool {
     let segs = segments(path);
     matches!(
@@ -286,6 +301,33 @@ fn is_turso_unsupported_write_path(path: &str) -> bool {
         ["v1", "organizations", _, "plans"]
             | ["v1", "organizations", _, "audit-logs"]
     )
+}
+
+fn is_turso_method_not_allowed(method: &str, path: &str) -> bool {
+    if method == "GET" || method == "POST" || method == "PATCH" || method == "DELETE" {
+        let known_without_method = matches!(
+            path,
+            "/v1/auth/validate" | "/v1/locations" | "/v1/organizations" | "/v1/upload"
+        ) || is_turso_api_token_path(path)
+            || is_turso_org_path(path)
+            || is_turso_usage_path(path)
+            || is_turso_groups_path(path)
+            || is_turso_group_path(path)
+            || is_turso_group_configuration_path(path)
+            || is_turso_group_rotate_path(path)
+            || is_turso_group_transfer_path(path)
+            || is_turso_databases_path(path)
+            || is_turso_database_path(path)
+            || is_turso_database_configuration_path(path)
+            || is_turso_database_token_path(path)
+            || is_turso_database_rotate_path(path)
+            || is_turso_database_stats_path(path)
+            || is_turso_unsupported_read_path(path)
+            || is_turso_unsupported_write_path(path)
+            || is_turso_always_unsupported_path(path);
+        return known_without_method;
+    }
+    false
 }
 
 fn segments(path: &str) -> Vec<&str> {
