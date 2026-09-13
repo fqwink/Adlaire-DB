@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.80
+**バージョン：** V.81
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.80` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.81` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.80` の次は `V.81` とし、以後 `V.82`、`V.83` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.81` の次は `V.82` とし、以後 `V.83`、`V.84` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -2774,6 +2774,75 @@ observability に関係する仕様変更は、manifest の `Security map`、`Re
 
 設定に関係する仕様変更は、§4、§8.4、§9.13、manifest の `Config map`、CFG 契約 ID、config fixture、stderr snapshot、redaction artifact を同時更新する。設定の正常系だけが通っても、不正値、優先順位、対象 Phase 前挙動、秘匿が固定されていない場合は Phase 完了扱いにしない。
 
+#### 9.1.20 API schema / validation / serialization 固定契約
+
+各 Phase 実装 PR は、追加・変更する API の method、path、path parameter、query、header、Content-Type、Accept、body limit、request body schema、success response schema、error response schema、serialization、snapshot 正規化を実装開始前に固定しなければならない。schema が曖昧な API は route を公開してはならない。
+
+**request validation 既定ルール：**
+
+| 対象 | 既定仕様 | 例外条件 |
+|------|----------|----------|
+| method | §9.5 または該当 Phase 節に明記された method のみ許可。未対応 method は `405 METHOD_NOT_ALLOWED` | Turso 互換で異なる status が必要な場合は snapshot と差分理由を明記 |
+| path parameter | URL decode 後に validation。空文字、`..`、`/`、NUL、未正規化 unicode は `INVALID_REQUEST` または専用 error | hrana path DB 名など既存互換がある場合のみ該当節で緩和 |
+| query | 明記された key のみ許可。duplicate query key、空 query value、未知 query は `INVALID_REQUEST` | cursor など opaque value は型だけ固定 |
+| Content-Type | JSON body は `application/json` 必須。`; charset=utf-8` は許可。octet-stream は `application/octet-stream` 必須 | body なし endpoint は Content-Type 不要 |
+| Accept | response media type が JSON の場合は未指定、`*/*`、`application/json` を許可。それ以外は `406 NOT_ACCEPTABLE` | SDK 互換で Accept を無視する endpoint は明記 |
+| body limit | endpoint ごとに byte 上限を明記。超過は `413 PAYLOAD_TOO_LARGE` | streaming response は response 側上限を別途固定 |
+| JSON top-level | request body は object 必須。array/scalar/null は `INVALID_REQUEST` | hrana wire protocol で配列等が仕様化される場合のみ |
+| unknown field | 管理 API、Turso Platform API、backup/restore/branch/extension/HA API は拒否 | hrana wire protocol は hrana 仕様に従い、該当節で許可 |
+| omitted field | `?` または「省略可」と明記された field だけ省略可。明記なしは必須 | default が仕様化された field は省略可 |
+| null | `null 可` と明記された field だけ許可。省略可能 field の `null` を省略扱いにしない | Turso 互換 DTO で null が必要な field |
+| empty array / object | 空を許可する field だけ許可。filter、scope、batch、permission 配列の空は既定で `INVALID_REQUEST` | 空 object が Turso 互換上必要な場合 |
+
+**response serialization 既定ルール：**
+
+| 対象 | 固定仕様 |
+|------|----------|
+| success JSON | schema に定義された wrapper、field casing、必須 field、nullable field を厳密に返す |
+| error JSON | `{"error": string, "code": string}` を基本形とし、追加 field は該当 error 契約に明記する |
+| 204 response | body なし。`Content-Type` を付けない |
+| hrana SQL error | HTTP 200 のまま `results[i].type="error"`。pipeline 全体の JSON 不正だけ HTTP 400 |
+| timestamp | RFC3339 UTC 秒精度。ミリ秒、local time、timezone offset は返さない |
+| numeric string | SQLite integer / Turso size など文字列指定の field は数値型へ勝手に変えない |
+| field order | JSON object order は意味を持たない。snapshot 比較前に key を辞書順正規化する |
+| dynamic field | UUID、timestamp、request id、JWT、host、path は placeholder へ正規化する |
+| secret field | token / JWT / secret は作成時 1 回だけ返す endpoint を除き response に含めない |
+
+**Turso / SDK 互換 schema：**
+
+| Surface | 必須固定 |
+|---------|----------|
+| `/v1/*` Turso Platform API | wrapper 名、field casing、status、query mapping、unsupported response を snapshot 化 |
+| `/admin/v1/*` | Adlaire 管理 API schema として `/v1/*` と混同しない。差分理由を明記 |
+| hrana HTTP | libSQL SDK の request/response schema を優先。unknown field 方針は hrana 節に従う |
+| hrana WebSocket | message type、request_id、stream_id、response_ok/error の対応を transcript 化 |
+| binary endpoint | `Content-Type`、`Content-Disposition`、body size、checksum/header を固定 |
+
+**必須 evidence：**
+
+| Evidence | 必須内容 |
+|----------|----------|
+| request fixture | method、path、query、header subset、body、Content-Type |
+| response snapshot | status、header subset、body、error code、wrapper、field casing |
+| validation error snapshot | unknown field、null、missing field、bad query、bad Content-Type、body limit |
+| compatibility snapshot | Turso / SDK 互換 endpoint の正規化後 snapshot |
+| serialization roundtrip | request deserialize、internal type、response serialize の roundtrip test |
+| redaction snapshot | response / error に secret、token、raw path、SQL args が出ないこと |
+
+**禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| success response schema が仕様本文にない | route 公開禁止 |
+| unknown field を endpoint ごとに仕様なしで黙って無視する | Phase 未完了 |
+| `null` と省略を同一扱いにする | review failure |
+| 204 response に JSON body を返す | merge 不可 |
+| Turso wrapper / field casing を実装都合で変更する | merge 不可 |
+| snapshot 正規化なしに dynamic 値を保存する | Phase 未完了 |
+| SDK 互換 endpoint を手動確認だけで完了扱いにする | Phase 未完了 |
+
+API schema に関係する仕様変更は、§6、§7、§9.5、manifest の `Endpoint map`、API 契約 ID、request fixture、response snapshot、validation error snapshot を同時更新する。正常系だけが通っても、invalid / unknown / null / body limit / serialization の証跡がない場合は Phase 完了扱いにしない。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -3406,7 +3475,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Failure closure | §9.1.14 の失敗、flaky、未検証、artifact 欠落、secret 混入が同一 PR で閉じている | merge 不可 |
 | 後方互換 / migration | §9.1.15 の互換影響、migration plan、rollback、旧形式 fixture が固定されている | 既存契約を変更しない |
 | 設定解決 / validation | §9.1.19 に従い、CLI/env/TOML/default/secret file の優先順位、不正値、対象 Phase 前挙動、秘匿が固定されている | config 実装を開始しない |
-| API 契約 | method/path/auth/request/success/error が §9.5 または各 API 節に明記されている | route を追加しない |
+| API 契約 | §9.1.20 に従い、method/path/auth/request/success/error/schema/validation/serialization が §9.5 または各 API 節に明記されている | route を追加しない |
 | Error code | 失敗条件ごとの `code` が §7.3 / §9.7 に存在する | 先に error code を追加する |
 | 永続化 | ファイル名、schema、atomic update、rollback、破損時挙動が §9.6 に明記されている | 書き込み処理を実装しない |
 | 認証/認可 | §9.1.18 に従い、必要 token、scope、ro/rw、org/group、quota、block policy、拒否条件 precedence が明記されている | success response を返す API を公開しない |
