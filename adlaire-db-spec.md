@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.155
+**バージョン：** V.156
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.155` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.156` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -7040,6 +7040,25 @@ Done receipt に記録する `precision_closure_result` は、以下の canonica
 
 canonical object は Done receipt 本文にそのまま貼れる Markdown table または JSON object とする。ただし JSON object を使う場合も key 名は本表と完全一致させ、`closure_fields` の 11 key を省略してはならない。
 
+**precision closure artifact manifest schema：**
+
+`artifact_manifest` は 11 closure field と 1:1 で対応する entry を持つ。各 entry は以下の key を必ず持ち、field 名、artifact path、reviewer command が `closure_fields` の同名 field と一致しなければならない。
+
+| key | 必須値 |
+|-----|--------|
+| `field` | 11 closure field のいずれか。別名、短縮名、配列 index は不可 |
+| `artifact_path` | `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/{artifact-name}.json` |
+| `producer_command` | artifact を生成した再実行可能 command |
+| `producer_exit_code` | `0` |
+| `content_hash` | 正規化済み artifact 本文の hash |
+| `hash_algorithm` | `sha256` 固定 |
+| `generated_at_source` | `ci`、`release-check`、`local-docker` のいずれか |
+| `secret_scan_result` | `pass`。secret/token/JWT/SQL args/raw path/frame bytes の検出 0 件 |
+| `redaction_policy` | 適用した redaction rule 名、または不要な場合 `none_with_reason` |
+| `reviewer_command` | reviewer が artifact と hash と secret scan を再検証できる command |
+
+`content_hash` の対象は正規化済み artifact 本文だけとする。local absolute path、timestamp、hostname、username、非決定的 temporary path、実行順序で変わる ID は hash 対象から除外し、必要な場合は正規化 rule を artifact 内に記録する。`secret_scan_result` を pass にするには、scan command、対象 path、検出 0 件、redaction policy を manifest entry に残さなければならない。
+
 **precision_closure_result review algorithm：**
 
 レビュアーと CI は以下の順序で `precision_closure_result` を評価する。各 step は fail fast とし、失敗した step より後続の step を pass 扱いしてはならない。`summary_status` は最後の step でのみ評価し、途中 step の代替証跡にしてはならない。
@@ -7073,6 +7092,10 @@ canonical object は Done receipt 本文にそのまま貼れる Markdown table 
 | `closure_fields` を配列にして順序依存にする、または固定 key object 以外で表現する | Phase 未完了 |
 | `summary_status: pass` だけで 11 field、artifact manifest、reviewer reproduction、open counts を省略する | merge 不可 |
 | `artifact_manifest` と closure field の `artifact_path` が一致しない | Phase 未完了 |
+| `artifact_manifest` entry が 11 closure field と 1:1 対応しない | Phase 未完了 |
+| manifest entry の `hash_algorithm` が未指定、`sha256` 以外、または `content_hash` の対象が不明 | merge 不可 |
+| `content_hash` に local absolute path、timestamp、hostname、username、非決定的 temporary path が混入している | merge 不可 |
+| `secret_scan_result` が未実行、manual only、抽象記載、または scan command / 対象 path / redaction policy を欠く | merge 不可 |
 | `reviewer_command` が `see CI`、`manual`、`確認済み` など抽象表現だけで、再現可能な command ではない | merge 不可 |
 | review algorithm の step を飛ばす、順序を入れ替える、fail 後に後続 step で pass 扱いする | merge 不可 |
 | `review_result` が許可値以外、または失敗 step と一致しない | Phase 未完了 |
@@ -13536,7 +13559,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.155` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.156` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
