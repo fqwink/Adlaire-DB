@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.108
+**バージョン：** V.109
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.108` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.109` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -4002,6 +4002,7 @@ branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§
 | `decision_precedence_matrix` | §9.1.43 の複数条件同時成立時の優先順位、selected behavior、losing behavior、error/status/client action |
 | `coverage_closure_matrix` | §9.1.44 の Contract ID / source matrix / test / artifact / oracle / N/A reason の網羅完了表 |
 | `change_impact_matrix` | §9.1.45 の実装中変更に対する影響範囲、同時更新対象、承認状態、drift closure |
+| `rollout_readiness_matrix` | §9.1.46 の起動、停止、再起動、rollback、health、operator action、release 可否 |
 | `completion_gate` | merge 前に満たす Done 条件と失敗時の扱い |
 
 **Phase group 粒度：**
@@ -4098,6 +4099,7 @@ Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§
 | `decision_precedence_result` | §9.1.43 の decision ID ごとの precedence 実行結果、selected behavior、error/status snapshot、losing behavior 非発火証跡 |
 | `coverage_closure_result` | §9.1.44 の coverage ID ごとの pass/fail/N/A、gap 0 件、test/artifact/oracle 実在証跡 |
 | `change_impact_result` | §9.1.45 の change ID ごとの affected sections/matrices/tests/artifacts 更新完了、drift 0 件、承認証跡 |
+| `rollout_readiness_result` | §9.1.46 の rollout ID ごとの startup/shutdown/restart/rollback/health/operator/compat/data safety 証跡 |
 | `reviewer_decision` | `Done`、`Not Done`、`Spec correction required` のいずれか |
 
 **Phase group Done minimum：**
@@ -4973,6 +4975,64 @@ Phase coverage closure に関係する仕様変更は、§9.1.7、§9.1.8、§9.
 
 Phase change impact / drift control に関係する仕様変更は、§0、§7.3、§9.1.10、§9.1.11、§9.1.12、§9.1.13、§9.1.14、§9.1.15、§9.1.23、§9.1.24、§9.1.29、§9.1.32、§9.1.33、§9.1.35、§9.1.38、§9.1.39、§9.1.40、§9.1.41、§9.1.42、§9.1.43、§9.1.44、§9.2、§9.4、§9.5、§9.6、§9.7、§9.8、§9.11、§9.15、§9.17、該当 Phase 詳細節を同時更新する。change impact matrix がない Phase 実装 PR は、実装中の仕様 drift、古い Contract ID、古い snapshot、互換影響見落とし、migration / rollback 漏れによる後続バグ修正を防げないため、実装開始不可とする。
 
+#### 9.1.46 Phase rollout readiness / operator acceptance matrix 固定契約
+
+各 Phase の実装 PR は、Phase Done と rollout ready を分離して判定しなければならない。Phase Done は仕様・実装・test・artifact の完了判定であり、rollout ready は operator が起動、停止、再起動、rollback、health 監視、互換性確認、data safety 確認を行ったうえで運用投入してよい状態を指す。Done receipt があっても rollout readiness matrix が未完了なら release / deploy / production enable を行ってはならない。
+
+**Rollout readiness matrix 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `rollout_id` | `ROLL-P{phase}-{surface}` 形式の一意 ID |
+| `phase` | rollout 判定対象 Phase |
+| `release_surface` | binary / CLI / HTTP API / WebSocket / admin API / metadata migration / background job / Docker / CI / docs |
+| `startup_condition` | 起動してよい前提条件、config、data-dir、metadata、lock、migration marker、secret の状態 |
+| `shutdown_condition` | shutdown 時に flush / fsync / lock release / job cancel / transaction rollback が必要な条件 |
+| `restart_condition` | restart 後に同じ state、health、metadata、runtime map、compat behavior に戻る条件 |
+| `rollback_condition` | rollback flag、backup、old metadata、restore marker、operator 手順、rollback 不能時の扱い |
+| `health_gate` | release 可否を判断する health endpoint / CLI status / log / metric の期待値 |
+| `operator_action` | operator が実行する command、確認、承認、manual step。不要なら `none` |
+| `observability_evidence` | log、metric、health snapshot、audit 相当記録、request id / trace id、redaction scan |
+| `compatibility_gate` | Turso Cloud、libSQL SDK、legacy metadata、previous Phase regression の pass 条件 |
+| `data_safety_gate` | fsync、atomic write、backup、rollback、corruption handling、data loss なしの証跡 |
+| `blocked_release_reason` | rollout 不可の場合の理由。不可でなければ `none` |
+
+**Phase group rollout minimum：**
+
+| Phase group | 最低 readiness |
+|-------------|----------------|
+| Phase 1〜5 | CLI help、config resolution、data-dir lock、default DB restart、hrana health、JWT secret、log redaction、SDK smoke |
+| Phase 6〜8 | admin API auth、Turso Platform snapshot、metadata migration/restart、organization/group/location/quota、legacy fallback、quota block |
+| Phase 9〜10 | WebSocket reconnect、open transaction rollback、ATTACH path denial、metrics counter persistence/visibility、disconnect behavior |
+| Phase 11〜13 | primary/replica role health、replication lag、archive manifest integrity、retention cleanup safety、checksum mismatch handling |
+| Phase 14〜15 | backup artifact readability、restore/PITR rollback、branch create/delete recovery、source snapshot、destructive operation lock |
+| Phase 16〜18 | extension load failure handling、metrics snapshot rebuild、HA candidate/leader health、operator promote、split-brain rejection |
+| Phase 19 | internal adapter shadow/active/rollback flag、compat snapshot diff zero、performance baseline、Phase 1〜18 regression、silent fallback 禁止 |
+
+**rollout ready 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| Phase Done receipt だけで rollout ready と扱う | release 不可 |
+| rollback 手順、rollback flag、backup、または recovery marker が未検証 | release 不可 |
+| health が `ok` でも `operator_required`、`rollback_required`、`degraded` を隠す | merge 不可 |
+| Docker / CI / local の結果差分が未記録 | rollout ready 不可 |
+| data loss、partial commit、success-before-fsync の可能性が残る | merge 不可 |
+| Turso Cloud / libSQL SDK / previous Phase 互換差分が未分類 | rollout ready 不可 |
+| startup / restart 後に metadata、file、runtime map、health が一致しない | release 不可 |
+| operator action が必要なのに command、解除条件、確認 artifact がない | Phase 未完了 |
+| rollout 不可理由があるのに `blocked_release_reason:none` とする | review failure |
+
+**Done receipt への反映：**
+
+| Done receipt field | 必須内容 |
+|--------------------|----------|
+| `rollout_readiness_result` | rollout ID ごとの startup、shutdown、restart、rollback、health、operator、compatibility、data safety 証跡 |
+| `operator_acceptance_result` | operator action、manual step、解除条件、command、artifact。不要な場合は `none` |
+| `release_blocker_result` | blocked release reason が 0 件、または rollout 不可として明示されていること |
+
+Phase rollout readiness に関係する仕様変更は、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.1.15、§9.1.24、§9.1.32、§9.1.33、§9.1.37、§9.1.39、§9.1.41、§9.1.44、§9.1.45、§9.2、§9.4、§9.6、§9.8、§9.11、§9.15、§9.16、§9.17、該当 Phase 詳細節を同時更新する。rollout readiness matrix がない Phase 実装 PR は、実装完了後の起動・再起動・rollback・health・operator 判断の欠落による後続バグ修正を防げないため、release / deploy / production enable 不可とする。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -5632,6 +5692,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Decision precedence | §9.1.43 に従い、複数条件同時成立時の precedence、selected behavior、losing behavior、error/status/client action、compatibility 差分が固定されている | 実装開始禁止。分岐順の実装依存、存在漏洩、commit 後拒否、protocol 間不一致がある場合は Phase 完了扱いにしない |
 | Coverage closure | §9.1.44 に従い、全 Contract ID / schema ID / scenario ID / decision ID が test、artifact、oracle、regression、N/A 理由へ対応している | 実装開始禁止。coverage gap、manual only pass、根拠なし N/A、旧 Phase regression 漏れがある場合は Phase 完了扱いにしない |
 | Change impact / drift control | §9.1.45 に従い、実装中の scope、API、schema、error、metadata、auth、test、oracle、compatibility 変更が change ID、同時更新範囲、承認状態、closure evidence で閉じている | 実装開始禁止。packet freeze 後の暗黙変更、snapshot だけ更新、互換影響未評価、migration / rollback 未評価がある場合は Phase 完了扱いにしない |
+| Rollout readiness | §9.1.46 に従い、startup、shutdown、restart、rollback、health、operator action、compatibility、data safety、blocked release reason が固定されている | release / deploy / production enable 禁止。Phase Done だけで rollout ready 扱い、rollback 未検証、operator_required 隠蔽、環境差分未記録の場合は運用投入不可 |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | 仕様内相互参照 | §9.1.29 に従い、Phase 番号、TC ID、Task ID、API 契約 ID、error code、persistence key、evidence 名、manifest 参照が一致している | 仕様修正 PR に戻す |
 | Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
