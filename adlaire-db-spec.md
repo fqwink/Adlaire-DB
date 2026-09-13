@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.150
+**バージョン：** V.151
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.150` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.151` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -6918,7 +6918,7 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 
 ### 9.11.1 Phase 1〜19 実装精度索引
 
-本索引は Phase 実装開始時の入口である。実装者は対象 Phase の行にある `詳細節`、`固定契約`、`台帳`、`シナリオ`、`Done receipt`、`横断契約`、`regression`、`precision closure` を Phase packet に転記してから実装する。1 つでも未定義、未読、未転記、または Phase packet / Done receipt / 実装差分と不一致がある場合は、実装開始禁止または Phase 未完了とする。
+本索引は Phase 実装開始時の入口である。実装者は対象 Phase の行にある `詳細節`、`固定契約`、`台帳`、`シナリオ`、`Done receipt`、`横断契約`、`regression`、`precision closure` と、§9.11.3〜§9.11.13 の ambiguity / failure / review handoff / N/A / Go-No-Go / regression inheritance / deterministic / assertion / negative surface / evidence integrity / operator observability closure を Phase packet に転記してから実装する。1 つでも未定義、未読、未転記、または Phase packet / Done receipt / 実装差分と不一致がある場合は、実装開始禁止または Phase 未完了とする。
 
 | Phase | 詳細節 | 固定契約 | 台帳 | シナリオ | Done receipt | 横断契約 | 必須 regression | precision closure |
 |-------|--------|----------|------|----------|--------------|----------|-----------------|-------------------|
@@ -6949,6 +6949,7 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 | 対象 Phase の詳細節、固定契約、台帳、シナリオ、Done receipt、横断契約のいずれかを Phase packet に転記していない | 実装開始禁止 |
 | Phase packet の `scope`、`regression_set`、`precision_closure_result` が本索引と一致しない | 実装開始禁止 |
 | Done receipt の `implemented_scope`、`excluded_scope`、`atomic_task_result`、`scenario_matrix_result`、`precision_closure_result` が本索引と一致しない | Phase 未完了 |
+| Phase packet、Done receipt、`P{phase}-PRECISION-CLOSURE` のいずれかで §9.11.3〜§9.11.13 の closure result を相互参照できない | Phase 未完了 |
 | 本索引にない Phase 外機能、未来 API、metadata、config、dependency を実装差分へ含める | merge 不可 |
 | 本索引の必須 regression を実行せず、影響なし理由も Phase packet / Done receipt にない | Phase 未完了 |
 | 索引、Phase 詳細節、§9.2、§9.4、§9.8、§9.11、§9.17 が矛盾する | 仕様修正 PR に戻す |
@@ -6968,7 +6969,7 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 | `P{phase}-RECOVERY-{name}` | crash、rollback、restart、partial failure、operator_required、startup recovery の契約 | recovery log、failure injection artifact |
 | `P{phase}-REDACTION-{name}` | secret、token、SQL args、raw path、frame bytes、backup body、absolute path の秘匿契約 | secret scan result |
 | `P{phase}-REGRESSION-{name}` | 当該 Phase と過去 Phase の regression 契約 | CI output、release-check output、regression transcript |
-| `P{phase}-PRECISION-CLOSURE` | Done receipt の `precision_closure_result` を証明する最終閉鎖契約 | precision closure artifact、review handoff、open decision 0 件 |
+| `P{phase}-PRECISION-CLOSURE` | Done receipt の `precision_closure_result` を証明する最終閉鎖契約 | precision closure artifact、review handoff、ambiguity closure、failure closure、N/A closure、Go-No-Go、regression inheritance、determinism、assertion binding、negative surface、evidence integrity、operator observability、open decision 0 件 |
 
 `{phase}` は整数だけを使い、`P01` のような 0 padding はしない。`{name}` は ASCII lowercase、数字、hyphen のみを許可し、space、underscore、slash、日本語、timestamp、random ID、local username、host name を含めてはならない。例: `P14-RECOVERY-restore-rollback`、`P19-COMPAT-sdk-transcript`。
 
@@ -7764,6 +7765,10 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Atomic implementation task ledger | §9.1.50 に従い、task ID、input contracts、change targets、forbidden changes、completion condition、verification command、rollback condition、dependency が固定されている | 実装開始禁止。巨大 task、task ID なし差分、検証なし task、task 外変更、rollback 未定義、open task がある場合は Phase 完了扱いにしない |
 | Review handoff / independent reproducibility | §9.1.51 に従い、reading order、reproduction commands、expected artifacts、decision criteria、failure classification、oral context free evidence が固定されている | Phase 完了扱いにしない。口頭説明、PR description だけの根拠、local only 再現、artifact 欠落、レビュアー判断任せの N/A / snapshot 更新は禁止 |
 | Operator-facing behavior delta | §9.1.52 に従い、audience、external surface、before/after、compatibility delta、operator action、migration/config、rollback、release note、evidence が固定されている | Phase 完了扱いにしない。release note なし、operator 影響未分類、互換差分未記載、運用手順なし、rollback 不明、log/health/metric sample 欠落は禁止 |
+| Phase precision closure index | §9.11.1〜§9.11.2 に従い、対象 Phase の詳細節、固定契約、台帳、シナリオ、Done receipt、横断契約、regression、`P{phase}-PRECISION-CLOSURE`、artifact path が Phase packet で相互参照できる | 実装開始禁止。索引未転記、Contract ID 未接続、artifact path 未確定、Done receipt field との不一致がある場合は Phase 完了扱いにしない |
+| Phase ambiguity / failure / handoff closure | §9.11.3〜§9.11.5 に従い、open ambiguity、open failure、known flaky、unverified item、review handoff 欠落が 0 件である | merge 不可。判断未確定、失敗未分類、flaky 放置、レビュアー再現不能、口頭説明依存がある場合は Phase 完了扱いにしない |
+| Phase N/A / Go-No-Go / regression closure | §9.11.6〜§9.11.8 に従い、根拠なし N/A、blocking item、regression failure、過去 Phase regression 漏れが 0 件であり、Go/No-Go 判定と継承 regression が Done receipt に接続されている | Phase 未完了。N/A 理由不足、No-Go 未解消、旧 Phase 影響未検証、regression 継承漏れがある場合は実装完了扱いにしない |
+| Phase deterministic / assertion / negative / evidence / operator closure | §9.11.9〜§9.11.13 に従い、deterministic でない検証、assertion 未接続、unsupported success、stale/missing artifact、operator action gap が 0 件である | Phase 未完了。flaky、oracle なし pass、negative surface 未否認、artifact manifest 不整合、log/health/metric/operator 手順欠落がある場合は完了扱いにしない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | 仕様内相互参照 | §9.1.29 に従い、Phase 番号、TC ID、Task ID、API 契約 ID、error code、persistence key、evidence 名、manifest 参照が一致している | 仕様修正 PR に戻す |
 | Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
@@ -13463,7 +13468,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.150` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.151` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
