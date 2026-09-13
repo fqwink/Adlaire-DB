@@ -2,8 +2,8 @@
 
 ## 仕様書の位置づけ
 
-- `docs/spec/spec.md` と `docs/spec/phase-*.md` は**仕様正本群**（single source of truth）である
-- `docs/spec/spec.md` は仕様憲章であり、Phase 1〜19 の詳細は `docs/spec/` に分割して管理する
+- `docs/spec/spec.md`、`docs/spec/auth.md`、`docs/spec/api.md`、`docs/spec/testing-policy.md`、`docs/spec/phase-*.md` は**仕様正本群**（single source of truth）である
+- `docs/spec/spec.md` は仕様憲章であり、認証・認可仕様、API契約仕様、テストポリシー、Phase 1〜19 の詳細は `docs/spec/` に分割して管理する
 - `docs/Adlaire-db-spec.html` は `docs/spec/spec.md` から生成された閲覧用 HTML であり、正本ではない
 - 実装は仕様書に基づいて行うこと
 - 仕様書と実装が乖離している場合は、**仕様書を優先する**
@@ -11,7 +11,7 @@
 
 ## 仕様書 HTML 更新ルール
 
-`docs/spec/spec.md` または `docs/spec/phase-*.md` を改訂した場合は、`docs/build-scripts/build_spec_v3.py` 経由で `docs/Adlaire-db-spec.html` を更新すること。
+`docs/spec/spec.md`、`docs/spec/auth.md`、`docs/spec/api.md`、`docs/spec/testing-policy.md`、`docs/spec/phase-*.md` を改訂した場合は、`docs/build-scripts/build_spec_v3.py` 経由で `docs/Adlaire-db-spec.html` を更新すること。
 
 - 仕様書改訂 PR では、Markdown 正本と HTML 生成物の整合性を確認する
 - HTML 生成物だけを正として仕様判断してはならない
@@ -25,7 +25,7 @@
 - `docs/build-scripts/build_spec_v3_spec.md`
 - `docs/build-scripts/DESIGN.md`
 
-Adlaire DB の仕様正本群は、上記ツールではなく `docs/spec/spec.md` と `docs/spec/phase-*.md` である。
+Adlaire DB の仕様正本群は、上記ツールではなく `docs/spec/spec.md`、`docs/spec/auth.md`、`docs/spec/api.md`、`docs/spec/testing-policy.md`、`docs/spec/phase-*.md` である。
 
 ## 作業開始時の確認
 
