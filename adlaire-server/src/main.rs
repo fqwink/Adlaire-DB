@@ -237,6 +237,8 @@ fn run_token_create(args: crate::cli::TokenCreateArgs) -> anyhow::Result<()> {
         exp: expires_at.map(|t| t.timestamp()),
         a: access.clone(),
         dbs: dbs.clone(),
+        org: None,
+        grp: None,
     };
     let jwt = sign_claims(&secret, &claims)?;
 
@@ -246,6 +248,13 @@ fn run_token_create(args: crate::cli::TokenCreateArgs) -> anyhow::Result<()> {
             id: token_id,
             access,
             dbs,
+            organization_scope: None,
+            group_scope: None,
+            source: None,
+            name: None,
+            database: None,
+            platform_token: false,
+            token_hash: None,
             created_at: now,
             expires_at,
             revoked: false,

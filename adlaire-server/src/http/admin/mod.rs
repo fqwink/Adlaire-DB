@@ -60,6 +60,21 @@ async fn parse_json_body<T: serde::de::DeserializeOwned>(
     serde_json::from_slice::<T>(&bytes).map_err(|_| AppError::InvalidRequest)
 }
 
+async fn parse_optional_json_body<T: serde::de::DeserializeOwned + Default>(
+    req: Request<Incoming>,
+) -> Result<T, AppError> {
+    let bytes = req
+        .into_body()
+        .collect()
+        .await
+        .map_err(|_| AppError::InvalidRequest)?
+        .to_bytes();
+    if bytes.is_empty() {
+        return Ok(T::default());
+    }
+    serde_json::from_slice::<T>(&bytes).map_err(|_| AppError::InvalidRequest)
+}
+
 fn path_param(req: &Request<Incoming>, prefix: &[&str]) -> Option<String> {
     let segs: Vec<_> = req.uri().path().trim_start_matches('/').split('/').collect();
     if segs.len() != prefix.len() + 1 || &segs[..prefix.len()] != prefix {
@@ -82,6 +97,17 @@ fn query_value(query: Option<&str>, key: &str) -> Option<String> {
             .filter_map(|pair| pair.split_once('='))
             .find_map(|(k, v)| (k == key && !v.is_empty()).then(|| v.to_string()))
     })
+}
+
+fn validate_token_name(value: &str) -> Result<(), AppError> {
+    use regex::Regex;
+    use std::sync::LazyLock;
+    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9_-]{1,64}$").unwrap());
+    if RE.is_match(value) {
+        Ok(())
+    } else {
+        Err(AppError::InvalidRequest)
+    }
 }
 
 fn parse_turso_expiry(
@@ -324,6 +350,8 @@ pub mod tokens {
             exp: expires_at.map(|t| t.timestamp()),
             a: body.access.clone(),
             dbs: body.dbs.clone(),
+            org: body.organization_scope.clone(),
+            grp: body.group_scope.clone(),
         };
         let token = match sign_claims(secret, &claims) {
             Ok(token) => token,
@@ -333,6 +361,13 @@ pub mod tokens {
             id: token_id.clone(),
             access: body.access.clone(),
             dbs: body.dbs.clone(),
+            organization_scope: body.organization_scope.clone(),
+            group_scope: body.group_scope.clone(),
+            source: Some("admin-api".to_string()),
+            name: None,
+            database: None,
+            platform_token: false,
+            token_hash: None,
             created_at: now,
             expires_at,
             revoked: false,
@@ -572,6 +607,12 @@ pub mod platform {
         block_writes:  bool,
     }
 
+    #[derive(Default, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CreatePlatformApiTokenRequest {
+        organization: Option<String>,
+    }
+
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct CreateTursoGroupRequest {
@@ -614,6 +655,104 @@ pub mod platform {
 
     pub async fn auth_validate(_req: Request<Incoming>, _state: SharedState) -> Result<HttpResponse, Infallible> {
         Ok(crate::http::json_ok(&serde_json::json!({ "exp": -1 })))
+    }
+
+    pub async fn create_api_token(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+        let Some(token_name) = path_segment(&req, 3) else {
+            return Ok(AppError::InvalidRequest.into_response());
+        };
+        if let Err(e) = validate_token_name(&token_name) {
+            return Ok(e.into_response());
+        }
+        let body = match parse_optional_json_body::<CreatePlatformApiTokenRequest>(req).await {
+            Ok(body) => body,
+            Err(e) => return Ok(e.into_response()),
+        };
+        let organization_scope = match body.organization {
+            Some(org) => {
+                let Some(resolved) = state
+                    .db_mgr
+                    .organizations()
+                    .await
+                    .into_iter()
+                    .find(|item| item.id == org || item.slug == org || item.name == org)
+                    .map(|item| item.slug)
+                else {
+                    return Ok(AppError::OrgNotFound(org).into_response());
+                };
+                Some(resolved)
+            }
+            None => None,
+        };
+
+        let mut meta = match util::load_tokens(&state.config.data_dir) {
+            Ok(meta) => meta,
+            Err(e) => return Ok(AppError::Internal(e).into_response()),
+        };
+        if meta
+            .tokens
+            .iter()
+            .any(|token| token.platform_token && token.name.as_deref() == Some(token_name.as_str()))
+        {
+            return Ok(AppError::InvalidRequest.into_response());
+        }
+
+        let now = chrono::Utc::now();
+        let secret = util::generate_platform_token_secret();
+        let token_id = util::generate_token_id();
+        meta.tokens.push(TokenRecord {
+            id: token_id.clone(),
+            access: AccessLevel::Rw,
+            dbs: None,
+            organization_scope,
+            group_scope: None,
+            source: Some("turso-platform-api-token".to_string()),
+            name: Some(token_name.clone()),
+            database: None,
+            platform_token: true,
+            token_hash: Some(util::platform_token_hash(&secret)),
+            created_at: now,
+            expires_at: None,
+            revoked: false,
+            revoked_at: None,
+        });
+        if let Err(e) = util::save_tokens(&state.config.data_dir, &meta) {
+            return Ok(AppError::Internal(e).into_response());
+        }
+
+        Ok(crate::http::json_ok(&serde_json::json!({
+            "name": token_name,
+            "id": token_id,
+            "token": secret,
+        })))
+    }
+
+    pub async fn revoke_api_token(req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
+        let Some(token_name) = path_segment(&req, 3) else {
+            return Ok(AppError::InvalidRequest.into_response());
+        };
+        if let Err(e) = validate_token_name(&token_name) {
+            return Ok(e.into_response());
+        }
+        let mut meta = match util::load_tokens(&state.config.data_dir) {
+            Ok(meta) => meta,
+            Err(e) => return Ok(AppError::Internal(e).into_response()),
+        };
+        let Some(token) = meta
+            .tokens
+            .iter_mut()
+            .find(|token| token.platform_token && token.name.as_deref() == Some(token_name.as_str()))
+        else {
+            return Ok(AppError::TokenNotFound(token_name).into_response());
+        };
+        if !token.revoked {
+            token.revoked = true;
+            token.revoked_at = Some(chrono::Utc::now());
+        }
+        if let Err(e) = util::save_tokens(&state.config.data_dir, &meta) {
+            return Ok(AppError::Internal(e).into_response());
+        }
+        Ok(crate::http::json_ok(&serde_json::json!({ "token": token_name })))
     }
 
     pub async fn locations(_req: Request<Incoming>, state: SharedState) -> Result<HttpResponse, Infallible> {
@@ -854,9 +993,10 @@ pub mod platform {
         let Some(db) = path_segment(&req, 4) else {
             return Ok(AppError::InvalidRequest.into_response());
         };
-        if let Err(e) = state.db_mgr.get_info(&db).await {
-            return Ok(e.into_response());
-        }
+        let db_info = match state.db_mgr.get_info(&db).await {
+            Ok(info) => info,
+            Err(e) => return Ok(e.into_response()),
+        };
         let secret = match state.config.jwt_secret_bytes.as_ref() {
             Some(secret) => secret,
             None => return Ok(AppError::AuthDisabled.into_response()),
@@ -881,6 +1021,8 @@ pub mod platform {
             exp: expires_at.map(|t| t.timestamp()),
             a: access.clone(),
             dbs: Some(dbs.clone()),
+            org: Some(db_info.organization.clone()),
+            grp: Some(db_info.group.clone()),
         };
         let jwt = match sign_claims(secret, &claims) {
             Ok(token) => token,
@@ -890,6 +1032,13 @@ pub mod platform {
             id: token_id,
             access,
             dbs: Some(dbs),
+            organization_scope: Some(db_info.organization),
+            group_scope: Some(db_info.group),
+            source: Some("turso-platform-api".to_string()),
+            name: None,
+            database: Some(db.clone()),
+            platform_token: false,
+            token_hash: None,
             created_at: now,
             expires_at,
             revoked: false,

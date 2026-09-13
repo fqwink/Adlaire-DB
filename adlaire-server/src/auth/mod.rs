@@ -27,6 +27,10 @@ pub struct Claims {
     pub exp: Option<i64>,
     pub a:   AccessLevel,
     pub dbs: Option<HashMap<String, AccessLevel>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grp: Option<String>,
 }
 
 impl Claims {
@@ -39,6 +43,8 @@ impl Claims {
             exp: None,
             a:   AccessLevel::Rw,
             dbs: None,
+            org: None,
+            grp: None,
         }
     }
 
