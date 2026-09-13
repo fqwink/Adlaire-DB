@@ -445,7 +445,7 @@ a:focus-visible {
   <span class="hdr-title">Adlaire DB</span>
   <span class="hdr-sep">/</span>
   <span class="hdr-title" style="color:rgba(255,255,255,.7);font-weight:400">プロジェクト憲章 / 仕様正本</span>
-  <span class="hdr-ver">V.213</span>
+  <span class="hdr-ver">V.214</span>
 </header>
 
 <div id="lay">
@@ -595,12 +595,13 @@ a:focus-visible {
 <li class="ti"><a href="#Phase-18HA自動フェイルオーバー" class="tl lv3" data-slug="Phase-18HA自動フェイルオーバー">Phase 18：HA・自動フェイルオーバー</a></li>
 <li class="ti"><a href="#Phase-19libSQL-内部コンポーネント段階的内製化" class="tl lv3" data-slug="Phase-19libSQL-内部コンポーネント段階的内製化">Phase 19：libSQL 内部コンポーネント段階的内製化</a></li>
 </ul></li>
-<li class="tg"><div class="tg-row"><a href="#11-内製化責務" class="tl lv2" data-slug="11-内製化責務">11. 内製化責務</a><button class="tg-btn" aria-expanded="false" data-target="tg-11-内製化責務" aria-label="展開"><svg viewBox="0 0 10 10" width="10" height="10"><polyline points="2,3 5,7 8,3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg></button></div><ul id="tg-11-内製化責務" class="tc" hidden>
-<li class="ti"><a href="#11-1-Phase-19-内製化方針" class="tl lv3" data-slug="11-1-Phase-19-内製化方針">11.1 Phase 19 内製化方針</a></li>
-<li class="ti"><a href="#基本方針" class="tl lv3" data-slug="基本方針">基本方針</a></li>
-<li class="ti"><a href="#併用パターン" class="tl lv3" data-slug="併用パターン">併用パターン</a></li>
-<li class="ti"><a href="#内製化順序難易度低い順" class="tl lv3" data-slug="内製化順序難易度低い順">内製化順序（難易度低い順）</a></li>
-<li class="ti"><a href="#実施時期" class="tl lv3" data-slug="実施時期">実施時期</a></li>
+<li class="tg"><div class="tg-row"><a href="#11-内製化方針と仕様化済み契約" class="tl lv2" data-slug="11-内製化方針と仕様化済み契約">11. 内製化方針と仕様化済み契約</a><button class="tg-btn" aria-expanded="false" data-target="tg-11-内製化方針と仕様化済み契約" aria-label="展開"><svg viewBox="0 0 10 10" width="10" height="10"><polyline points="2,3 5,7 8,3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg></button></div><ul id="tg-11-内製化方針と仕様化済み契約" class="tc" hidden>
+<li class="ti"><a href="#11-1-内製化方針" class="tl lv3" data-slug="11-1-内製化方針">11.1 内製化方針</a></li>
+<li class="ti"><a href="#11-2-内製化ポリシー" class="tl lv3" data-slug="11-2-内製化ポリシー">11.2 内製化ポリシー</a></li>
+<li class="ti"><a href="#11-3-仕様化済み契約" class="tl lv3" data-slug="11-3-仕様化済み契約">11.3 仕様化済み契約</a></li>
+<li class="ti"><a href="#11-4-併用パターン" class="tl lv3" data-slug="11-4-併用パターン">11.4 併用パターン</a></li>
+<li class="ti"><a href="#11-5-内製化順序難易度低い順" class="tl lv3" data-slug="11-5-内製化順序難易度低い順">11.5 内製化順序（難易度低い順）</a></li>
+<li class="ti"><a href="#11-6-実施時期" class="tl lv3" data-slug="11-6-実施時期">11.6 実施時期</a></li>
 </ul></li>
 <li class="tg"><div class="tg-row"><a href="#12-テスト仕様" class="tl lv2" data-slug="12-テスト仕様">12. テスト仕様</a><button class="tg-btn" aria-expanded="false" data-target="tg-12-テスト仕様" aria-label="展開"><svg viewBox="0 0 10 10" width="10" height="10"><polyline points="2,3 5,7 8,3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg></button></div><ul id="tg-12-テスト仕様" class="tc" hidden>
 <li class="ti"><a href="#12-1-テストカバレッジ方針" class="tl lv3" data-slug="12-1-テストカバレッジ方針">12.1 テストカバレッジ方針</a></li>
@@ -618,12 +619,12 @@ a:focus-visible {
   <main id="ct">
     <div class="ci">
       <h1 id="Adlaire-DB-プロジェクト憲章-仕様正本" class="mh h1">Adlaire DB プロジェクト憲章 / 仕様正本</h1>
-<p class="mp"><strong>バージョン：</strong> V.213 <strong>ステータス：</strong> 設計中 <strong>最終更新：</strong> 2026-09-13</p>
+<p class="mp"><strong>バージョン：</strong> V.214 <strong>ステータス：</strong> 設計中 <strong>最終更新：</strong> 2026-09-13</p>
 <hr class="mr">
 <h2 id="0-プロジェクト憲章-仕様正本の責務" class="mh h2">0. プロジェクト憲章 / 仕様正本の責務</h2>
 <p class="mp"><code class="ic">docs/PROJECT_CHARTER.md</code> は、プロジェクト憲章であり、仕様正本の入口も兼ねる。本ファイルは Adlaire DB の目的、価値、優先順位、判断原則を示し、同時に実装・テスト・レビュー・完了判定に使う確定契約を固定する。<code class="ic">docs/spec/phase-*.md</code> は Phase 別の実装契約を定める。仕様正本内で矛盾がある場合は、実装判断ではなく仕様改訂で解消する。</p>
 <h3 id="0-1-仕様バージョン管理責務" class="mh h3">0.1 仕様バージョン管理責務</h3>
-<p class="mp">本仕様書のバージョンは <code class="ic">V.{累積番号}</code> 形式で表記する。現在の仕様書バージョンは <code class="ic">V.213</code> である。</p>
+<p class="mp">本仕様書のバージョンは <code class="ic">V.{累積番号}</code> 形式で表記する。現在の仕様書バージョンは <code class="ic">V.214</code> である。</p>
 <p class="mp">仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、<code class="ic">V.1</code>、<code class="ic">0.x</code>、日付ベース、Phase 番号ベースへ戻してはならない。</p>
 <p class="mp">仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。<code class="ic">V.99</code> の次は <code class="ic">V.100</code> とし、以後 <code class="ic">V.101</code>、<code class="ic">V.102</code> のように 1 ずつ増加させる。</p>
 <p class="mp"><strong>禁止事項：</strong></p>
@@ -636,7 +637,7 @@ a:focus-visible {
 <tr><td>仕様本文を変更したのに仕様書バージョンを上げない</td><td>review failure</td></tr>
 </table></div>
 <h3 id="0-2-プロジェクト憲章方針ポリシー仕様の区別" class="mh h3">0.2 プロジェクト憲章・方針・ポリシー・仕様の区別</h3>
-<p class="mp">本リポジトリでは、プロジェクト憲章、方針、ポリシー、仕様を以下の意味で区別する。実装対象は仕様だけである。</p>
+<p class="mp">本リポジトリでは、プロジェクト憲章、方針、ポリシー、仕様を以下の意味で区別し、本ファイル内に分けて記載する。実装対象は仕様だけである。</p>
 <div class="tw"><table class="mt">
 <tr><th>種別</th><th>意味</th><th>実装時の扱い</th></tr>
 <tr><td>プロジェクト憲章</td><td>目的、価値、目標、優先順位、判断原則を示す文書</td><td>単独では実装根拠にしない。本ファイル内の仕様正本として固定された契約だけを実装根拠にする</td></tr>
@@ -644,8 +645,18 @@ a:focus-visible {
 <tr><td>ポリシー</td><td>条件に応じた判断ルール、運用ルール、禁止・許可の考え方</td><td>仕様ではない。実装根拠にしてはならない</td></tr>
 <tr><td>仕様</td><td>実装者がそのまま実装、テスト、レビューできる確定契約</td><td>実装根拠にできる</td></tr>
 </table></div>
-<p class="mp">プロジェクト憲章、方針、ポリシーは、それ単独では API、error、metadata、永続化、test、Done 判定を確定しない。実装根拠にできるのは、本ファイルまたは <code class="ic">docs/spec/</code> 配下で仕様正本として固定された契約だけである。</p>
+<h4 id="0-2-1-プロジェクト憲章として記載する内容" class="mh h4">0.2.1 プロジェクト憲章として記載する内容</h4>
+<p class="mp">プロジェクト憲章には、Adlaire DB の目的、価値、優先順位、判断原則、最終目標を記載する。プロジェクト憲章は「何を目指すか」を固定するが、それ単独では API、error、metadata、永続化、test、Done 判定を確定しない。</p>
+<h4 id="0-2-2-方針として記載する内容" class="mh h4">0.2.2 方針として記載する内容</h4>
+<p class="mp">方針には、Turso Cloud 追従、自己ホスト活用、段階的内製化、開発・保守の進め方、将来の進化方向を記載する。方針は仕様ではない。たとえば「内部は段階的に内製化する」は方針であり、そのままでは実装根拠にしてはならない。</p>
+<p class="mp">方針を実装する場合は、対象 API、adapter 境界、config、metadata、永続化、error、rollback、test、artifact、Done 判定を仕様として固定してから実装する。</p>
+<h4 id="0-2-3-ポリシーとして記載する内容" class="mh h4">0.2.3 ポリシーとして記載する内容</h4>
+<p class="mp">ポリシーには、判断ルール、運用ルール、禁止事項、許可条件、レビュー判定基準を記載する。ポリシーは仕様ではない。たとえば「secret をログに出さない」はポリシーであり、そのままでは実装対象ではない。</p>
 <p class="mp">ポリシーを実装する場合は、先に仕様へ変換しなければならない。例えば「secret をログに出さない」というポリシーは、そのままでは実装対象ではない。仕様にするには、secret field、対象ログ、redaction 形式、error、artifact、検証 command、test を本仕様正本へ固定する。</p>
+<h4 id="0-2-4-仕様として記載する内容" class="mh h4">0.2.4 仕様として記載する内容</h4>
+<p class="mp">仕様には、実装者がそのまま実装、テスト、レビュー、完了判定できる確定契約を記載する。実装根拠にできるのは、本ファイルまたは <code class="ic">docs/spec/</code> 配下で仕様正本として固定された契約だけである。</p>
+<p class="mp">仕様として扱うには、少なくとも対象、入力、出力、状態遷移、永続化、error、認証認可、互換差分、rollback、検証 command、artifact、Done 判定のうち該当項目が明示されていなければならない。</p>
+<h4 id="0-2-5-混在時の扱い" class="mh h4">0.2.5 混在時の扱い</h4>
 <p class="mp">実装時にプロジェクト憲章、方針、ポリシーと仕様が矛盾する場合は、仕様を優先する。仕様が不足している場合は、実装で補完してはならない。先に仕様変更 PR を作成し、API 契約、状態遷移、永続化契約、エラー契約、テスト条件、完了条件を追加してから実装する。</p>
 <h2 id="1-プロダクト責務" class="mh h2">1. プロダクト責務</h2>
 <p class="mp">Adlaire DB が何を提供し、何を優先し、どの方向へ進化するかを固定する責務である。Turso Cloud 互換、自己ホスト運用、将来的な内製化方針は、この責務に従って判断する。</p>
@@ -13648,7 +13659,7 @@ T6-7: 統合テスト
 <p class="mp"><strong>Phase 19 Done receipt 必須項目：</strong></p>
 <div class="tw"><table class="mt">
 <tr><th>項目</th><th>内容</th></tr>
-<tr><td><code class="ic">version_result</code></td><td>仕様書 <code class="ic">V.213</code> 準拠、Phase 19 contract ID、commit SHA</td></tr>
+<tr><td><code class="ic">version_result</code></td><td>仕様書 <code class="ic">V.214</code> 準拠、Phase 19 contract ID、commit SHA</td></tr>
 <tr><td><code class="ic">config_result</code></td><td><code class="ic">TASK-P19-1</code>、<code class="ic">SCN-P19-1</code>〜<code class="ic">SCN-P19-5</code> の pass/fail と artifact path</td></tr>
 <tr><td><code class="ic">adapter_result</code></td><td>WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path</td></tr>
 <tr><td><code class="ic">shadow<em>diff</em>result</code></td><td>差分ゼロまたは差分理由、ERROR log、test failure の証跡</td></tr>
@@ -13679,10 +13690,9 @@ T6-7: 統合テスト
 <tr><td>bug-zero readiness</td><td>Done receipt に coverage gap、未解決判断、仕様未確定、既知 flaky が 0 件であることを明記する</td><td>未解決判断を実装者判断へ先送り</td></tr>
 </table></div>
 <hr class="mr">
-<h2 id="11-内製化責務" class="mh h2">11. 内製化責務</h2>
-<p class="mp">libSQL 内部コンポーネントの段階的内製化を固定する責務である。内製化は Turso Cloud / libSQL SDK 互換、rollback、shadow / active mode、performance baseline、Phase regression を満たす範囲でのみ進める。</p>
-<h3 id="11-1-Phase-19-内製化方針" class="mh h3">11.1 Phase 19 内製化方針</h3>
-<h3 id="基本方針" class="mh h3">基本方針</h3>
+<h2 id="11-内製化方針と仕様化済み契約" class="mh h2">11. 内製化方針と仕様化済み契約</h2>
+<p class="mp">本章は、内製化に関する方針と、実装根拠にできる仕様化済み契約を分けて記載する。内製化方針は「将来的にどう進めるか」を示すものであり、それ単独では実装根拠にしてはならない。実装根拠にできるのは、本章の「仕様化済み契約」または Phase 詳細に固定された契約だけである。</p>
+<h3 id="11-1-内製化方針" class="mh h3">11.1 内製化方針</h3>
 <ul class="ml">
 <li>内製化の単位はクレートとする</li>
 <li>外部クレートを内製クレートに段階的に差し替えることで内製化を進める</li>
@@ -13690,23 +13700,41 @@ T6-7: 統合テスト
 <li>内製化は Turso Cloud 互換を維持するための内部実装差し替えであり、Turso Cloud 追従を止める理由にしてはならない</li>
 <li>API、認証、metadata、エラー、SDK 互換挙動は互換レイヤーとして固定し、その内側の実装から段階的に置き換える</li>
 <li>Turso 互換 mode は常に既定 mode とし、Adlaire 独自拡張 mode を追加する場合も互換 mode の snapshot と SDK regression に差分を出してはならない</li>
-<li>Phase 19 以降の内製化は <code class="ic">external contract freeze / internal replacement only</code> を固定契約とし、wire/API/metadata/error/auth/SDK 挙動を変えずに内部 crate、adapter、engine、scheduler、storage 境界だけを置換する</li>
-<li>production path を内製 crate へ切り替える場合は、shadow mode、active mode、rollback flag、compatibility oracle、performance baseline、crash recovery evidence を同一 PR で提示する</li>
 <li>既存の外部クレートで要件を満たせる場合は積極的に採用する</li>
 <li>既存クレートで不足する機能は、最初から内製クレートとして開発する</li>
 <li><strong>外部クレートと内製クレートの併用パターンを初期段階から採用する</strong></li>
 <li>内製化の順序は実装難易度が低いものから優先する</li>
 </ul>
-<h3 id="併用パターン" class="mh h3">併用パターン</h3>
+<h3 id="11-2-内製化ポリシー" class="mh h3">11.2 内製化ポリシー</h3>
+<div class="tw"><table class="mt">
+<tr><th>ポリシー</th><th>内容</th><th>仕様化が必要な事項</th></tr>
+<tr><td>外部契約凍結</td><td>内製化都合で API、wire format、metadata、error、auth、SDK 挙動を変えない</td><td>対象 contract、互換 snapshot、差分判定、失敗時 error</td></tr>
+<tr><td>内部置換限定</td><td>内製化は adapter 境界の内側だけを置き換える</td><td>adapter boundary、config flag、rollback、shadow/active mode</td></tr>
+<tr><td>互換優先</td><td>Turso Cloud / libSQL SDK 互換を内製化都合より優先する</td><td>SDK transcript、oracle、regression command、artifact</td></tr>
+<tr><td>段階導入</td><td>shadow mode で差分を観測し、active 化は証跡が揃った後に限定する</td><td>shadow diff、performance baseline、crash recovery、rollback evidence</td></tr>
+</table></div>
+<h3 id="11-3-仕様化済み契約" class="mh h3">11.3 仕様化済み契約</h3>
+<p class="mp">Phase 19 以降の内製化で実装根拠にできる固定契約は以下に限る。</p>
+<div class="tw"><table class="mt">
+<tr><th>項目</th><th>固定仕様</th></tr>
+<tr><td>external contract freeze</td><td>wire/API/metadata/error/auth/SDK 挙動を変えずに内部 crate、adapter、engine、scheduler、storage 境界だけを置換する</td></tr>
+<tr><td>internal replacement only</td><td>内製化 PR は外部 contract ではなく adapter 境界の内側だけを変更する</td></tr>
+<tr><td>production switch</td><td>production path を内製 crate へ切り替える場合は、shadow mode、active mode、rollback flag、compatibility oracle、performance baseline、crash recovery evidence を同一 PR で提示する</td></tr>
+<tr><td>default mode</td><td>Turso 互換 mode を既定 mode とし、Adlaire 独自拡張 mode を既定にしない</td></tr>
+<tr><td>error mapping</td><td>内部 error は既存 error code へ写像する。新 code が必要な場合は先に仕様変更 PR で固定する</td></tr>
+<tr><td>rollback</td><td>rollback は config flag または同等の仕様化済み手段で即時に旧経路へ戻せること</td></tr>
+<tr><td>completion</td><td>compatibility、oracle、invariant、regression、rollback evidence が揃うまで Done receipt を作成しない</td></tr>
+</table></div>
+<h3 id="11-4-併用パターン" class="mh h3">11.4 併用パターン</h3>
 <p class="mp">初期段階から外部クレートと内製クレートを併用する。 外部クレートで不足する機能を内製クレートで補い、 成熟次第に外部クレートを内製クレートへ差し替える。 差し替え中も Turso Cloud 互換テストと既存 libSQL SDK 互換テストを必須とし、互換性が落ちる差し替えは完了扱いにしない。</p>
-<h3 id="内製化順序難易度低い順" class="mh h3">内製化順序（難易度低い順）</h3>
+<h3 id="11-5-内製化順序難易度低い順" class="mh h3">11.5 内製化順序（難易度低い順）</h3>
 <div class="tw"><table class="mt">
 <tr><th>優先度</th><th>対象</th><th>現行クレート</th><th>備考</th></tr>
 <tr><td>1</td><td>WAL チェックポイント制御</td><td>libSQL</td><td>Phase 11 と直結</td></tr>
 <tr><td>2</td><td>ストレージ層</td><td>libSQL（SQLite ページャー）</td><td>WAL 内製後に着手</td></tr>
 <tr><td>3</td><td>SQL パーサ</td><td>libSQL（SQLite）</td><td>最難関・最後</td></tr>
 </table></div>
-<h3 id="実施時期" class="mh h3">実施時期</h3>
+<h3 id="11-6-実施時期" class="mh h3">11.6 実施時期</h3>
 <p class="mp">内製化の実装開始は Phase 19 とする。Phase 18 以前は、内製 crate の設計メモ、ベンチマーク、互換テスト追加のみ許可し、production path の切り替えは行わない。</p>
 <hr class="mr">
 <h2 id="12-テスト仕様" class="mh h2">12. テスト仕様</h2>

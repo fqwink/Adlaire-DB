@@ -1,6 +1,6 @@
 # Adlaire DB プロジェクト憲章 / 仕様正本
 
-**バージョン：** V.213
+**バージョン：** V.214
 **ステータス：** 設計中
 **最終更新：** 2026-09-13
 
@@ -12,7 +12,7 @@
 
 ### 0.1 仕様バージョン管理責務
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.213` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.214` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -30,7 +30,7 @@
 
 ### 0.2 プロジェクト憲章・方針・ポリシー・仕様の区別
 
-本リポジトリでは、プロジェクト憲章、方針、ポリシー、仕様を以下の意味で区別する。実装対象は仕様だけである。
+本リポジトリでは、プロジェクト憲章、方針、ポリシー、仕様を以下の意味で区別し、本ファイル内に分けて記載する。実装対象は仕様だけである。
 
 | 種別 | 意味 | 実装時の扱い |
 |------|------|--------------|
@@ -39,9 +39,29 @@
 | ポリシー | 条件に応じた判断ルール、運用ルール、禁止・許可の考え方 | 仕様ではない。実装根拠にしてはならない |
 | 仕様 | 実装者がそのまま実装、テスト、レビューできる確定契約 | 実装根拠にできる |
 
-プロジェクト憲章、方針、ポリシーは、それ単独では API、error、metadata、永続化、test、Done 判定を確定しない。実装根拠にできるのは、本ファイルまたは `docs/spec/` 配下で仕様正本として固定された契約だけである。
+#### 0.2.1 プロジェクト憲章として記載する内容
+
+プロジェクト憲章には、Adlaire DB の目的、価値、優先順位、判断原則、最終目標を記載する。プロジェクト憲章は「何を目指すか」を固定するが、それ単独では API、error、metadata、永続化、test、Done 判定を確定しない。
+
+#### 0.2.2 方針として記載する内容
+
+方針には、Turso Cloud 追従、自己ホスト活用、段階的内製化、開発・保守の進め方、将来の進化方向を記載する。方針は仕様ではない。たとえば「内部は段階的に内製化する」は方針であり、そのままでは実装根拠にしてはならない。
+
+方針を実装する場合は、対象 API、adapter 境界、config、metadata、永続化、error、rollback、test、artifact、Done 判定を仕様として固定してから実装する。
+
+#### 0.2.3 ポリシーとして記載する内容
+
+ポリシーには、判断ルール、運用ルール、禁止事項、許可条件、レビュー判定基準を記載する。ポリシーは仕様ではない。たとえば「secret をログに出さない」はポリシーであり、そのままでは実装対象ではない。
 
 ポリシーを実装する場合は、先に仕様へ変換しなければならない。例えば「secret をログに出さない」というポリシーは、そのままでは実装対象ではない。仕様にするには、secret field、対象ログ、redaction 形式、error、artifact、検証 command、test を本仕様正本へ固定する。
+
+#### 0.2.4 仕様として記載する内容
+
+仕様には、実装者がそのまま実装、テスト、レビュー、完了判定できる確定契約を記載する。実装根拠にできるのは、本ファイルまたは `docs/spec/` 配下で仕様正本として固定された契約だけである。
+
+仕様として扱うには、少なくとも対象、入力、出力、状態遷移、永続化、error、認証認可、互換差分、rollback、検証 command、artifact、Done 判定のうち該当項目が明示されていなければならない。
+
+#### 0.2.5 混在時の扱い
 
 実装時にプロジェクト憲章、方針、ポリシーと仕様が矛盾する場合は、仕様を優先する。仕様が不足している場合は、実装で補完してはならない。先に仕様変更 PR を作成し、API 契約、状態遷移、永続化契約、エラー契約、テスト条件、完了条件を追加してから実装する。
 
@@ -8909,34 +8929,54 @@ Phase 1〜19 の詳細は `docs/spec/phase-01.md` 〜 `docs/spec/phase-19.md` �
 <!-- include: docs/spec/phase-18.md -->
 <!-- include: docs/spec/phase-19.md -->
 
-## 11. 内製化責務
+## 11. 内製化方針と仕様化済み契約
 
-libSQL 内部コンポーネントの段階的内製化を固定する責務である。内製化は Turso Cloud / libSQL SDK 互換、rollback、shadow / active mode、performance baseline、Phase regression を満たす範囲でのみ進める。
+本章は、内製化に関する方針と、実装根拠にできる仕様化済み契約を分けて記載する。内製化方針は「将来的にどう進めるか」を示すものであり、それ単独では実装根拠にしてはならない。実装根拠にできるのは、本章の「仕様化済み契約」または Phase 詳細に固定された契約だけである。
 
-### 11.1 Phase 19 内製化方針
+### 11.1 内製化方針
 
-### 基本方針
 - 内製化の単位はクレートとする
 - 外部クレートを内製クレートに段階的に差し替えることで内製化を進める
 - 内製化の目的は、Turso Cloud 互換の自己ホスト DB 管理基盤を維持したまま、内部実装を Adlaire 独自基盤へ育てることである
 - 内製化は Turso Cloud 互換を維持するための内部実装差し替えであり、Turso Cloud 追従を止める理由にしてはならない
 - API、認証、metadata、エラー、SDK 互換挙動は互換レイヤーとして固定し、その内側の実装から段階的に置き換える
 - Turso 互換 mode は常に既定 mode とし、Adlaire 独自拡張 mode を追加する場合も互換 mode の snapshot と SDK regression に差分を出してはならない
-- Phase 19 以降の内製化は `external contract freeze / internal replacement only` を固定契約とし、wire/API/metadata/error/auth/SDK 挙動を変えずに内部 crate、adapter、engine、scheduler、storage 境界だけを置換する
-- production path を内製 crate へ切り替える場合は、shadow mode、active mode、rollback flag、compatibility oracle、performance baseline、crash recovery evidence を同一 PR で提示する
 - 既存の外部クレートで要件を満たせる場合は積極的に採用する
 - 既存クレートで不足する機能は、最初から内製クレートとして開発する
 - **外部クレートと内製クレートの併用パターンを初期段階から採用する**
 - 内製化の順序は実装難易度が低いものから優先する
 
-### 併用パターン
+### 11.2 内製化ポリシー
+
+| ポリシー | 内容 | 仕様化が必要な事項 |
+|----------|------|--------------------|
+| 外部契約凍結 | 内製化都合で API、wire format、metadata、error、auth、SDK 挙動を変えない | 対象 contract、互換 snapshot、差分判定、失敗時 error |
+| 内部置換限定 | 内製化は adapter 境界の内側だけを置き換える | adapter boundary、config flag、rollback、shadow/active mode |
+| 互換優先 | Turso Cloud / libSQL SDK 互換を内製化都合より優先する | SDK transcript、oracle、regression command、artifact |
+| 段階導入 | shadow mode で差分を観測し、active 化は証跡が揃った後に限定する | shadow diff、performance baseline、crash recovery、rollback evidence |
+
+### 11.3 仕様化済み契約
+
+Phase 19 以降の内製化で実装根拠にできる固定契約は以下に限る。
+
+| 項目 | 固定仕様 |
+|------|----------|
+| external contract freeze | wire/API/metadata/error/auth/SDK 挙動を変えずに内部 crate、adapter、engine、scheduler、storage 境界だけを置換する |
+| internal replacement only | 内製化 PR は外部 contract ではなく adapter 境界の内側だけを変更する |
+| production switch | production path を内製 crate へ切り替える場合は、shadow mode、active mode、rollback flag、compatibility oracle、performance baseline、crash recovery evidence を同一 PR で提示する |
+| default mode | Turso 互換 mode を既定 mode とし、Adlaire 独自拡張 mode を既定にしない |
+| error mapping | 内部 error は既存 error code へ写像する。新 code が必要な場合は先に仕様変更 PR で固定する |
+| rollback | rollback は config flag または同等の仕様化済み手段で即時に旧経路へ戻せること |
+| completion | compatibility、oracle、invariant、regression、rollback evidence が揃うまで Done receipt を作成しない |
+
+### 11.4 併用パターン
 
 初期段階から外部クレートと内製クレートを併用する。
 外部クレートで不足する機能を内製クレートで補い、
 成熟次第に外部クレートを内製クレートへ差し替える。
 差し替え中も Turso Cloud 互換テストと既存 libSQL SDK 互換テストを必須とし、互換性が落ちる差し替えは完了扱いにしない。
 
-### 内製化順序（難易度低い順）
+### 11.5 内製化順序（難易度低い順）
 
 | 優先度 | 対象 | 現行クレート | 備考 |
 |--------|------|------------|------|
@@ -8944,7 +8984,7 @@ libSQL 内部コンポーネントの段階的内製化を固定する責務で�
 | 2 | ストレージ層 | libSQL（SQLite ページャー）| WAL 内製後に着手 |
 | 3 | SQL パーサ | libSQL（SQLite）| 最難関・最後 |
 
-### 実施時期
+### 11.6 実施時期
 
 内製化の実装開始は Phase 19 とする。Phase 18 以前は、内製 crate の設計メモ、ベンチマーク、互換テスト追加のみ許可し、production path の切り替えは行わない。
 
