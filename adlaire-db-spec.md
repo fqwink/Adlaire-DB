@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.96
+**バージョン：** V.97
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.96` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.97` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.96` の次は `V.97` とし、以後 `V.98`、`V.99` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.97` の次は `V.98` とし、以後 `V.99`、`V.100` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -4004,6 +4004,7 @@ Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§
 | `redaction_result` | log、artifact、PR description、error body に secret / token / raw path / SQL args が残っていない根拠 |
 | `release_check_result` | local / Docker / CI の実行コマンド、環境差分、再実行条件 |
 | `oracle_result` | §9.1.35 の oracle 名、version、path、比較 command、exit code、差分理由 |
+| `defect_classification_result` | §9.1.36 の defect 件数、分類別件数、`open:0`、evidence path |
 | `reviewer_decision` | `Done`、`Not Done`、`Spec correction required` のいずれか |
 
 **Phase group Done minimum：**
@@ -4199,6 +4200,83 @@ Phase execution sequence に関係する仕様変更は、§9.1.9、§9.1.10、�
 | oracle なしで Done receipt を作成する | Phase 未完了 |
 
 Phase acceptance oracle に関係する仕様変更は、§9.1.3、§9.1.10、§9.1.11、§9.1.23、§9.1.24、§9.1.27、§9.1.28、§9.1.29、§9.1.33、§9.2、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。oracle が固定されていない機能は、実装が動作していても Phase 完了扱いにしない。
+
+#### 9.1.36 Phase defect classification / zero-bug triage 固定契約
+
+各 Phase の実装中に見つかった不具合、仕様不足、互換差分、検証不足は、発見時点で defect classification に記録し、同一 PR 内で閉じなければならない。分類されていない失敗、分類済みだが処理方針が未確定の失敗、後続 PR に送られた失敗が 1 件でもある場合、その Phase は未完了とする。
+
+**Defect classification 必須分類：**
+
+| Classification | 定義 | 必須対応 | 完了判定 |
+|----------------|------|----------|----------|
+| `spec_gap` | 仕様本文に API、error、永続化、auth、test、oracle、対象外の記述がない | 実装を止め、仕様修正 PR として本文を先に更新する | 仕様更新後に packet / manifest / oracle を再固定するまで実装再開不可 |
+| `implementation_bug` | 仕様は明確だが実装が満たしていない | 同一 PR 内で code fix、test、evidence を追加する | failure closure が 0 件になれば完了可 |
+| `regression_bug` | 過去 Phase の契約、TC、snapshot、SDK 互換が壊れた | 対象 Phase 未完了として同一 PR 内で修正する | regression baseline が再度 pass するまで完了不可 |
+| `compatibility_diff` | Turso Cloud、libSQL SDK、legacy metadata、previous Phase と差分が出た | §9.1.23 と §9.1.35 に従い差分理由を仕様化する | 差分理由なしは merge 不可 |
+| `oracle_gap` | 正解 snapshot / fixture / transcript / baseline が不足している | oracle を追加し、仕様変更根拠を明記する | oracle 追加前の実装完了は禁止 |
+| `environment_gap` | local / Docker / CI / release-check の環境差で結果が揺れる | §9.1.24 の environment artifact と再現条件を更新する | 環境差分が再現可能になるまで完了不可 |
+| `security_gap` | auth、scope、quota、redaction、secret scan、任意 path 拒否に不足がある | success response を禁止し、同一 PR 内で仕様または実装を修正する | merge 不可。manual only 禁止 |
+| `persistence_gap` | atomic update、fsync、rollback、migration、recovery、破損時挙動が不足している | 書き込み処理を止め、§9.1.21 / §9.6 / Phase 詳細節を修正する | merge 不可。rollback evidence 必須 |
+
+**Defect record 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `id` | `DEF-P{phase}-{number}` |
+| `classification` | 上記 8 分類のいずれか |
+| `detected_by` | test、review、oracle diff、CI、manual observation、Turso diff など |
+| `contract_id` | 関連する API / persistence / error / security / compatibility / regression 契約 ID |
+| `symptom` | 観測された失敗。推測ではなく artifact / command / snapshot path を含める |
+| `root_cause` | 仕様不足、実装誤り、oracle 不足、環境差分などの確定原因 |
+| `resolution` | spec fix、code fix、test fix、oracle追加、environment fix のいずれか |
+| `evidence` | 修正後の command、exit code、artifact path |
+| `status` | `open`、`fixed`、`spec_updated`、`not_a_defect`。Phase 完了時は `open` 禁止 |
+
+**分類別禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| `spec_gap` を実装判断で埋める | merge 不可 |
+| `implementation_bug` を既知課題として残す | Phase 未完了 |
+| `regression_bug` を対象外扱いにする | merge 不可 |
+| `compatibility_diff` を自己ホスト都合だけで許容する | 仕様修正 PR に戻す |
+| `oracle_gap` を現行出力 snapshot 更新で隠す | merge 不可 |
+| `environment_gap` を local pass だけで完了扱いにする | Phase 未完了 |
+| `security_gap` / `persistence_gap` を follow-up に送る | merge 不可 |
+| `not_a_defect` にした理由が仕様本文にない | review failure |
+
+**zero-bug triage 処理順：**
+
+| 順序 | 処理 | 失敗時 |
+|------|------|--------|
+| 1 | failure / diff / skipped / flaky / manual only をすべて列挙する | Phase 未完了 |
+| 2 | 各項目に classification と contract_id を付与する | Phase 未完了 |
+| 3 | `spec_gap` / `oracle_gap` / `compatibility_diff` は仕様本文を先に更新する | 実装継続禁止 |
+| 4 | `implementation_bug` / `regression_bug` は同一 PR 内で修正し test を追加する | merge 不可 |
+| 5 | `security_gap` / `persistence_gap` は success response と write path を停止する | merge 不可 |
+| 6 | 修正後に oracle、regression、secret scan、release-check を再実行する | Done receipt 作成禁止 |
+| 7 | defect record の `open` が 0 件であることを Done receipt に記録する | Phase 未完了 |
+
+**Done receipt への反映：**
+
+| Done receipt field | 必須内容 |
+|--------------------|----------|
+| `defect_classification_result` | defect 件数、分類別件数、`open:0`、各 defect の evidence path |
+| `triage_result` | zero-bug triage の 1〜7 が完了したこと |
+| `not_a_defect_decisions` | `not_a_defect` 判定がある場合の仕様本文参照。なければ `none` |
+
+**完了根拠として禁止する表現：**
+
+| 表現 | 扱い |
+|------|------|
+| `known issue` / `既知課題` | Phase 未完了 |
+| `minor` / `軽微` | defect classification がない限り無効 |
+| `later` / `follow-up` / `後続 Phase で対応` | 完了条件の代替に使えない |
+| `manual only` / `手元確認済み` | §9.1.10 の Manual exception がない限り無効 |
+| `accepted risk` | 使用禁止。仕様変更または修正で閉じる |
+| `works for me` / `想定通り` | artifact と oracle がない限り無効 |
+
+Phase defect classification に関係する仕様変更は、§9.1.1、§9.1.1a、§9.1.3、§9.1.10、§9.1.11、§9.1.14、§9.1.23、§9.1.24、§9.1.33、§9.1.35、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。defect classification がない失敗を残したまま Phase を完了扱いにしてはならない。
 
 ### 9.2 Phase 別完了ゲート
 
@@ -4835,6 +4913,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Phase Done receipt | §9.1.33 に従い、packet、manifest、contract map、evidence index、regression result、failure closure、compatibility / redaction result が一致している | Phase 完了扱いにしない |
 | Phase execution state | §9.1.34 に従い、current step、completed/open contracts、last command、allowed/forbidden changes、next command、blocking decision が明記されている | 中断・引継ぎ・再開を行わない |
 | Acceptance oracle | §9.1.35 に従い、API/error/persistence/migration/SDK/unsupported/security/compatibility/regression の正解 artifact、正規化、更新条件が固定されている | snapshot / fixture / expected を更新しない |
+| Defect classification | §9.1.36 に従い、spec gap、implementation bug、regression bug、compatibility diff、oracle gap、environment gap、security gap、persistence gap が分類され、`open:0` になっている | Phase 完了扱いにしない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | 仕様内相互参照 | §9.1.29 に従い、Phase 番号、TC ID、Task ID、API 契約 ID、error code、persistence key、evidence 名、manifest 参照が一致している | 仕様修正 PR に戻す |
 | Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
