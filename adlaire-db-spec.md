@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.188
+**バージョン：** V.189
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.188` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.189` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -4113,7 +4113,7 @@ Phase implementation packet は、実装開始前に以下の canonical key を�
 | `task_ids` | 対象 Phase の atomic task ID 一覧。各 task は入力契約、禁止変更、完了条件、verification command に接続する |
 | `scenario_ids` | 対象 Phase の scenario ID 一覧。各 scenario は expected result、artifact path、oracle に接続する |
 | `artifact_paths` | test、snapshot、fixture、log、manifest、review handoff、secret scan の保存先一覧 |
-| `audit_results` | §9.17 の `phase_packet_result`、`acceptance_manifest_result`、`oracle_result`、`scenario_matrix_result`、`schema_registry_result`、`decision_precedence_result`、`coverage_closure_result`、`artifact_paths_result`、`failure_remediation_result`、`transition_ready_result`、`review_handoff_result`、`operator_delta_result`、`precision_closure_index_result`、`change_impact_closure_result`、`rollout_readiness_closure_result`、`compatibility_baseline_closure_result`、`security_abuse_closure_result`、`configuration_environment_closure_result`、`ambiguity_atomic_task_closure_result`、`review_operator_closure_result`、`merge_readiness_closure_result`、`dependency_provenance_closure_result`、`upgrade_data_compatibility_closure_result`、`performance_capacity_closure_result`、`incident_recovery_closure_result`、`contract_versioning_closure_result`、`machine_contract_artifact_closure_result`、`phase_execution_sequence_closure_result`、`verdict_normalization_closure_result`、`release_handoff_closure_result`、`defect_prevention_closure_result`、`phase_done_final_result`、`readiness_audit_result` を全て含む |
+| `audit_results` | §9.17 の `phase_packet_result`、`acceptance_manifest_result`、`oracle_result`、`scenario_matrix_result`、`schema_registry_result`、`decision_precedence_result`、`coverage_closure_result`、`artifact_paths_result`、`failure_remediation_result`、`transition_ready_result`、`review_handoff_result`、`operator_delta_result`、`precision_closure_index_result`、`change_impact_closure_result`、`rollout_readiness_closure_result`、`compatibility_baseline_closure_result`、`security_abuse_closure_result`、`configuration_environment_closure_result`、`ambiguity_atomic_task_closure_result`、`review_operator_closure_result`、`merge_readiness_closure_result`、`dependency_provenance_closure_result`、`upgrade_data_compatibility_closure_result`、`performance_capacity_closure_result`、`incident_recovery_closure_result`、`contract_versioning_closure_result`、`machine_contract_artifact_closure_result`、`phase_execution_sequence_closure_result`、`verdict_normalization_closure_result`、`release_handoff_closure_result`、`defect_prevention_closure_result`、`artifact_layout_closure_result`、`phase_done_final_result`、`readiness_audit_result` を全て含む |
 | `blocking_items` | 実装開始前に残っている blocker 一覧。実装開始可能な packet では空配列または `none` |
 | `ready_to_implement` | 実装開始を許可する最終 boolean。`true` 以外は実装開始禁止 |
 
@@ -5840,6 +5840,25 @@ defect taxonomy / root cause / recurrence prevention は、実装中、review �
 | `defect_prevention_closure_result` | 上記 field がすべて `pass`。未分類 defect、原因不明 defect、再発防止なし修正、仕様 feedback なし修正、known defect 残存がすべて 0 件 | `pass` 以外は Phase 完了禁止 |
 
 `defect_prevention_closure_result` は readiness packet の `audit_results` と Done receipt に必ず含める。defect が発生していない Phase でも `defect_prevention_closure_result = pass` とし、`defect_count:0`、`known_defect_zero:true`、`regression_prevention:unchanged`、`spec_feedback:not_required_with_reason`、`escape_analysis:not_applicable_with_reason`、および非対象理由を `closure_evidence` に記録する。これにより「バグは直したが分類・再発防止・仕様反映がない」状態を Phase 未完了として扱える。
+
+**canonical artifact layout / schema file / snapshot storage closure audit：**
+
+artifact layout / schema file / snapshot storage は、Phase ごとの schema、snapshot、transcript、manifest、review handoff を同じ保存先と命名で扱い、CI と reviewer が迷わず再生できるようにする closure gate である。対象 Phase の readiness packet と Done receipt は、以下の closure audit field を持ち、`artifact_layout_closure_result = pass` でなければ実装開始、Phase 完了、または merge に進めない。
+
+| Audit field | pass 条件 | fail 時の扱い |
+|-------------|----------|---------------|
+| `artifact_root_layout_result` | `docs/phase-evidence/phase-{phase}/` と `tests/artifacts/phase-{phase}/` の責務、必須 directory、禁止 local path が固定されている | 実装開始禁止 |
+| `phase_artifact_naming_result` | packet、manifest、Done receipt、review handoff、schema、snapshot、transcript、log、secret scan の file name が Phase 番号と Contract ID に接続されている | 実装開始禁止 |
+| `schema_file_location_result` | OpenAPI、JSON Schema、metadata/config/JWT/artifact schema の保存先、version、hash、更新理由が artifact manifest に接続されている | 実装開始禁止 |
+| `snapshot_storage_result` | HTTP/WS/wire/error/metadata/compatibility snapshot の保存先、正規化 rule、更新条件、expected diff が固定されている | Phase 未完了 |
+| `transcript_storage_result` | SDK、curl、CLI、operator command transcript の保存先、command、tool version、env redaction、再実行方法が固定されている | Phase 未完了 |
+| `hash_manifest_result` | artifact manifest が全 artifact の relative path、sha256、生成 command、生成 commit、secret scan result、staleness 判定を持つ | merge 不可 |
+| `artifact_update_policy_result` | artifact 更新時の許可条件、同時更新すべき本文、reviewer reapproval、snapshot drift 判定、古い artifact の扱いが固定されている | 実装開始禁止 |
+| `artifact_retention_result` | 保持する artifact、再生成可能 artifact、削除禁止 artifact、release 後保持期間、private/secret artifact の扱いが固定されている | merge 不可 |
+| `artifact_replay_path_result` | clean checkout から artifact を再生成または照合する command、相対 path、出力先、失敗時分類が固定されている | Phase 未完了 |
+| `artifact_layout_closure_result` | 上記 field がすべて `pass`。保存先不明、命名揺れ、hash 欠落、snapshot 更新条件なし、local path 依存、再生不能 artifact がすべて 0 件 | `pass` 以外は実装開始禁止 |
+
+`artifact_layout_closure_result` は readiness packet の `audit_results` と Done receipt に必ず含める。artifact layout に影響しない Phase でも `artifact_layout_closure_result = pass` とし、`artifact_root:unchanged`、`schema_location:unchanged`、`snapshot_storage:unchanged`、`hash_manifest:unchanged`、`replay_path:unchanged`、および非対象理由を `closure_evidence` に記録する。これにより「artifact はあるが保存先・命名・hash・再生方法が揺れて reviewer が判定できない」状態を Phase 未完了として扱える。
 
 Phase operator behavior delta に関係する仕様変更は、§1.4、§1.5、§3.5.3、§7.3、§9.1.10、§9.1.11、§9.1.13、§9.1.15、§9.1.17、§9.1.19、§9.1.20、§9.1.22、§9.1.23、§9.1.24、§9.1.29、§9.1.32、§9.1.33、§9.1.37、§9.1.44、§9.1.45、§9.1.46、§9.1.47、§9.1.49、§9.1.50、§9.1.51、§9.2、§9.4、§9.5、§9.6、§9.7、§9.8、§9.11、§9.14、§9.17、該当 Phase 詳細節を同時更新する。operator behavior delta がない Phase 実装 PR は、利用者・運用者から見える変更、互換差分、運用手順、release note、rollback が未確定であるため、Phase 完了扱いにしない。
 
@@ -8543,8 +8562,9 @@ Phase 1〜19 の実装開始前に、実装者は対象 Phase の readiness pack
 | `verdict_normalization_closure_result` | §9.1.52 の verdict vocabulary / pass-fail normalization / reviewer decision closure に従い、verdict vocabulary、pass condition、fail condition、blocked condition、not applicable condition、manual review condition、partial result prohibition、reviewer decision trace、done/not_done mapping がすべて閉じている | 実装開始禁止 |
 | `release_handoff_closure_result` | §9.1.52 の release handoff / rollout decision / rollback evidence closure に従い、release candidate inventory、rollout decision、rollback evidence、operator release note、compatibility release delta、data safety release、post-release monitoring、release blocker、release handoff trace がすべて閉じている | Phase 完了扱い禁止 |
 | `defect_prevention_closure_result` | §9.1.52 の defect taxonomy / root cause / recurrence prevention closure に従い、defect taxonomy、severity/priority、root cause、fix scope、regression prevention、recurrence test、spec feedback、defect escape analysis、known defect zero がすべて閉じている | Phase 完了扱い禁止 |
+| `artifact_layout_closure_result` | §9.1.52 の artifact layout / schema file / snapshot storage closure に従い、artifact root layout、phase artifact naming、schema file location、snapshot storage、transcript storage、hash manifest、artifact update policy、artifact retention、artifact replay path がすべて閉じている | 実装開始禁止 |
 | `phase_done_final_result` | §9.1.33 に従い、Done receipt final audit の readiness、manifest、artifact、failure、regression、handoff、operator、precision closure、zero-bug がすべて pass である | Phase 完了扱い禁止 |
-| `readiness_audit_result` | 上記 32 field がすべて `pass`。ただし `phase_done_final_result` は実装完了時に評価する。`missing`、`partial`、`manual_only`、`not_run`、`N/A` 根拠なし、または値不一致が 0 件 | `pass` 以外は実装開始禁止 |
+| `readiness_audit_result` | 上記 33 field がすべて `pass`。ただし `phase_done_final_result` は実装完了時に評価する。`missing`、`partial`、`manual_only`、`not_run`、`N/A` 根拠なし、または値不一致が 0 件 | `pass` 以外は実装開始禁止 |
 
 `readiness_audit_result` は Phase 実装開始の入口 gate であり、実装後の Done receipt で初めて埋めてはならない。実装中に scope、API、schema、error、persistence、auth、compatibility、artifact path、review command、operator behavior のいずれかが変わる場合は、同じ PR で readiness packet、受入 manifest、oracle、scenario matrix、schema registry、precision closure を更新し、再度 `readiness_audit_result = pass` にする。更新しないまま code、test、snapshot、artifact だけを変更した場合は merge 不可とする。
 
@@ -8577,6 +8597,7 @@ Phase 1〜19 の実装開始前に、実装者は対象 Phase の readiness pack
 | verdict vocabulary / pass-fail normalization / reviewer decision の verdict vocabulary、pass condition、fail condition、blocked condition、not applicable condition、manual review condition、partial result prohibition、reviewer decision trace、done/not_done mapping のいずれかが未確定または artifact 未接続である | 実装開始禁止 |
 | release handoff / rollout decision / rollback evidence の release candidate inventory、rollout decision、rollback evidence、operator release note、compatibility release delta、data safety release、post-release monitoring、release blocker、release handoff trace のいずれかが未確定または artifact 未接続である | Phase 未完了 |
 | defect taxonomy / root cause / recurrence prevention の defect taxonomy、severity/priority、root cause、fix scope、regression prevention、recurrence test、spec feedback、defect escape analysis、known defect zero のいずれかが未確定または artifact 未接続である | Phase 未完了 |
+| artifact layout / schema file / snapshot storage の artifact root layout、phase artifact naming、schema file location、snapshot storage、transcript storage、hash manifest、artifact update policy、artifact retention、artifact replay path のいずれかが未確定または artifact 未接続である | 実装開始禁止 |
 | artifact path、hash、secret scan、reviewer command が readiness packet、受入 manifest、Done receipt、artifact manifest、review handoff の間で一致しない | Phase 未完了 |
 | failure が未分類、root cause 未記載、再検証 command 未記載、artifact / regression / secret scan 再実行漏れのまま残る | Phase 未完了 |
 | source Phase の Done receipt、regression、artifact hash、compatibility baseline、operator delta、known blocker が target Phase readiness packet に継承されていない | 実装開始禁止 |
@@ -14266,7 +14287,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.188` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.189` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
