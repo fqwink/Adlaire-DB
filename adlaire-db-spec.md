@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.147
+**バージョン：** V.148
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.147` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.148` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -7155,7 +7155,7 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 |-------|----------|
 | `handoff_id` | `HANDOFF-P{phase}-{number}` 形式の一意 ID |
 | `spec_version` | 対象仕様書 version。Phase Done 時点の `V.{累積番号}` と一致させる |
-| `reading_order` | レビュアーが読む順番。最低でも §0、§1.4、§9.1.51、§9.11.1〜§9.11.10、対象 Phase 詳細節、Phase packet、Done receipt |
+| `reading_order` | レビュアーが読む順番。最低でも §0、§1.4、§9.1.51、§9.11.1〜§9.11.11、対象 Phase 詳細節、Phase packet、Done receipt |
 | `reproduction_commands` | clean checkout から実行できる command。各 command は working directory、env、fixture、expected exit code を持つ |
 | `expected_artifacts` | command ごとの生成 artifact path、Contract ID、Scenario ID、snapshot / transcript / log の対応 |
 | `decision_criteria` | Done / Not Done / Spec correction required の判定条件。失敗時に参照する仕様節を含める |
@@ -7449,6 +7449,58 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 | `actual` をそのまま `expected` にコピーして oracle とする | merge 不可 |
 | assertion failure を snapshot 更新で消し、仕様本文の差分理由を残さない | merge 不可 |
 | `P{phase}-PRECISION-CLOSURE` に `missing_assertion_count = 0`、`oracle_binding_result = pass` がない | Phase 未完了 |
+
+### 9.11.11 Phase 1〜19 negative surface / unsupported denial closure 最低表
+
+本節は対象外、未来 Phase、unsupported、拒否系入力が success response、partial success、metadata 変更、file 変更、runtime map 変更を起こさないことを証明する最低条件を定義する。実装者は正常系 API だけで Phase 完了扱いにしてはならない。各 Phase は、その Phase で成功応答を許可しない surface を negative surface として固定し、拒否時の status / error / persistence no-op / redaction を artifact で証明する。
+
+| Phase | negative surface / unsupported denial 最低対象 |
+|-------|-----------------------------------------------|
+| 1 | DB open、HTTP listen、JWT secret、metadata file、future serve subcommand、unknown CLI flag |
+| 2 | HTTP route、JWT、multi DB route、Admin API、Turso API、invalid data-dir / lock bypass |
+| 3 | JWT required mode、WebSocket route、Admin API、path DB route、unknown hrana body shape、unsupported SQL protocol feature |
+| 4 | Admin API、DB scope JWT、WebSocket、Turso API、bad Bearer、expired/revoked token、ro write |
+| 5 | future API、new metadata schema、unsupported route/config、secret in log/artifact、SDK unsupported mode |
+| 6 | Admin API success、Turso API success、WebSocket success、invalid DB name、path traversal、default/path ambiguity |
+| 7 | Turso Platform `/v1/*` success、organization/group/quota fields、WebSocket、backup、branch、invalid Admin body/query |
+| 8 | WebSocket、ATTACH、replication、backup/restore、branch、extension、HA、unsupported Turso body feature / upload / seed |
+| 9 | ATTACH、metrics Prometheus、replication、backup、branch、unsupported WebSocket message / ordering |
+| 10 | replication、backup/restore、branch、Prometheus、arbitrary ATTACH path、scope/quota bypass |
+| 11 | replica apply、write redirect、backup、branch、HA、bad replication token、invalid frame range |
+| 12 | archive/PITR/branch/HA success、stale replica write、bad redirect target、checksum bypass |
+| 13 | restore/PITR/branch/extension success、unsafe retention delete、corrupt archive success、disabled mode write |
+| 14 | branch/extension/HA/internal adapter success、restore partial success、rollback failure hidden、invalid backup body |
+| 15 | merge/diff/COW/extension success、source delete bypass、branch name collision、seed without branch selector |
+| 16 | upload/Wasm/runtime global load success、symlink/path bypass、SQL direct load、default Turso mode pollution |
+| 17 | alerting/remote write/HA success、unsupported Prometheus Accept、label secret exposure、counter mutation on denied request |
+| 18 | multi-primary write、external consensus dependency、auto primary without operator、stale term promote、split-brain write |
+| 19 | wire/API/schema/JWT claim change、SQL parser replacement success、metadata migration、rollback requiring data-dir edit |
+
+**negative_surface_record 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `negative_id` | `NEG-P{phase}-{surface}-{number}` 形式の一意 ID |
+| `phase` | 対象 Phase 番号 |
+| `surface` | API path、WebSocket message、CLI flag、config key、SQL statement、filesystem path、background operation |
+| `forbidden_input` | success response を許可しない request / command / config / SQL / path / body field |
+| `expected_status_or_error` | HTTP status、hrana error、WebSocket close/error、CLI exit code、startup failure、health state |
+| `persistence_noop` | 拒否時に metadata、DB file、WAL、archive、branch、extension、metrics、HA state が変化しない証跡 |
+| `redaction_evidence` | token、body、SQL、raw path、upload binary、secret が log / artifact / error body に出ない証跡 |
+| `artifact_path` | denial snapshot、before/after fixture、secret scan、review handoff artifact の path |
+| `result` | `pass` または `fail`。`manual_only`、`not_run`、`accepted_risk` は禁止 |
+
+**Negative surface 判定規則：**
+
+| 状態 | 判定 |
+|------|------|
+| unsupported、対象外、未来 Phase surface が 2xx、success body、partial success、runtime active を返す | merge 不可 |
+| 拒否時に metadata、file、runtime map、counter、token state、branch state が変化する | Phase 未完了 |
+| 404、501、400、403、405、startup failure、WebSocket error の使い分けが仕様本文にない | 実装開始禁止 |
+| denial artifact に token、request body、SQL args、raw path、upload binary、secret が残る | merge 不可 |
+| negative scenario が normal scenario のみで代替されている | Phase 未完了 |
+| future Phase に昇格する場合、Scope in/out、unsupported 表、Contract ID、oracle、artifact を同じ PR で更新していない | merge 不可 |
+| `P{phase}-PRECISION-CLOSURE` に `negative_surface_failure_count = 0`、`unsupported_success_count = 0`、`denial_redaction_result = pass` がない | Phase 未完了 |
 
 ### 9.12 PR レビュー観点
 
@@ -13305,7 +13357,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.147` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.148` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
