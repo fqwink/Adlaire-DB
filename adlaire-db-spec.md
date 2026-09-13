@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.164
+**バージョン：** V.165
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.164` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.165` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -8025,6 +8025,41 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | テスト | §9.8 と §9.1.24 / §9.1.27 / §9.1.28 に従い、該当 Phase 行に正常/異常/認可/永続化/障害系、list/pagination/cursor/filter evidence、SQL/result/transaction evidence、CI / release-check / secret scan evidence がある | 完了扱いにしない |
 | 運用 | config、metrics、health、rollback、job status / recovery 手順が必要な Phase では明記されている | 運用 API を公開しない |
 
+**Phase implementation readiness packet audit：**
+
+Phase 1〜19 の実装開始前に、実装者は対象 Phase の readiness packet を作成し、以下の audit field をすべて `pass` にしなければならない。readiness packet は `docs/phase-evidence/phase-{phase}/packet.md` または PR description の同等表を正とし、仕様本文、Phase packet、受入 manifest、Done receipt、artifact manifest、review handoff の間で値が揺れてはならない。
+
+| audit field | pass 条件 | fail 時の扱い |
+|-------------|----------|---------------|
+| `phase_packet_result` | §9.1.32 と §9.17 の Phase packet が対象 Phase 番号、scope in/out、target surface、unsupported behavior、completion gate を持つ | 実装開始禁止 |
+| `acceptance_manifest_result` | §9.1.10 の Phase 受入 manifest が Contract ID、Task ID、Scenario ID、Evidence path、Status を全件持つ | 実装開始禁止 |
+| `oracle_result` | §9.1.35 の acceptance oracle が API、error、persistence、migration、SDK、unsupported、security、compatibility、regression の期待値を持つ | 実装開始禁止 |
+| `scenario_matrix_result` | §9.1.40 と個別 Phase の scenario matrix が正常系、異常系、認可、永続化、rollback、concurrency、compatibility、unsupported、redaction、operational を網羅する | 実装開始禁止 |
+| `schema_registry_result` | §9.1.42 に従い、追加・変更する request、response、metadata、config、JWT claim、WebSocket message、artifact、log、metric の field-level schema が固定されている | 実装開始禁止 |
+| `decision_precedence_result` | §9.1.43 に従い、複数条件同時成立時の status、error code、client action、commit/rollback 順序が固定されている | 実装開始禁止 |
+| `coverage_closure_result` | §9.1.44 に従い、Contract ID、schema ID、scenario ID、decision ID が test、artifact、oracle、regression、N/A 理由へ接続され、coverage gap が 0 件 | 実装開始禁止 |
+| `review_handoff_result` | §9.1.51 に従い、第三者が clean checkout から同じ command と artifact で Done / Not Done を判定できる | Phase 完了扱い禁止 |
+| `operator_delta_result` | §9.1.52 に従い、operator から見える before/after、migration/config、rollback、health/log/metric、release note、evidence が固定されている | Phase 完了扱い禁止 |
+| `precision_closure_index_result` | §9.11.1〜§9.11.13 と §9.17 の precision closure 系 field が Phase packet、Done receipt、artifact manifest、reviewer reproduction で相互参照できる | 実装開始禁止 |
+| `readiness_audit_result` | 上記 10 field がすべて `pass`。`missing`、`partial`、`manual_only`、`not_run`、`N/A` 根拠なし、または値不一致が 0 件 | `pass` 以外は実装開始禁止 |
+
+`readiness_audit_result` は Phase 実装開始の入口 gate であり、実装後の Done receipt で初めて埋めてはならない。実装中に scope、API、schema、error、persistence、auth、compatibility、artifact path、review command、operator behavior のいずれかが変わる場合は、同じ PR で readiness packet、受入 manifest、oracle、scenario matrix、schema registry、precision closure を更新し、再度 `readiness_audit_result = pass` にする。更新しないまま code、test、snapshot、artifact だけを変更した場合は merge 不可とする。
+
+**readiness audit 不一致時の判定：**
+
+| 状態 | 判定 |
+|------|------|
+| `readiness_audit_result` が `pass` ではない | 実装開始禁止 |
+| readiness packet と仕様本文の Phase 番号、Contract ID、Task ID、Scenario ID、artifact path が一致しない | 実装開始禁止 |
+| Phase packet にある scope / unsupported behavior と受入 manifest または Done receipt が一致しない | Phase 未完了 |
+| acceptance oracle または scenario matrix に存在しない成功応答を実装する | merge 不可 |
+| schema registry に存在しない field、default、nullable、omittable、redaction rule を実装する | merge 不可 |
+| decision precedence 未定義のまま複数拒否条件、commit/rollback、auth/quota、resource state を実装する | merge 不可 |
+| coverage closure に未接続の Contract ID、schema ID、scenario ID、decision ID がある | Phase 未完了 |
+| review handoff が local only、口頭説明、PR description の自由文、または実装者環境だけに依存する | Phase 未完了 |
+| operator delta が health、log、metric、rollback、migration/config、release note のいずれかを欠く | Phase 未完了 |
+| precision closure index と readiness packet の Contract ID、artifact path、review command が一致しない | Phase 未完了 |
+
 **Phase 間の前倒し実装ルール：**
 
 - 未来 Phase の内部型や helper を先に置くことは許可する。ただし外部 API、永続化 schema、成功応答を公開してはならない
@@ -13706,7 +13741,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.164` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.165` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
