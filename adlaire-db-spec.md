@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.120
+**バージョン：** V.121
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.120` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.121` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -5868,6 +5868,95 @@ Phase 5 は Phase 1〜4 の実装を、構造化ログ、統合テスト、SDK �
 - Phase 6 で DB 作成用の内部関数を実装してよいが、外部 API として成功応答を返すのは Phase 7
 - DB scope JWT は Phase 7。Phase 6 では global `a` claim のみ有効
 - Turso Cloud 互換管理モデルは Phase 8。Phase 7 の DB/token CRUD は既存の最小管理 API として完了済み扱いを維持する
+
+**Phase 6 完全実装精度固定契約：**
+
+Phase 6 は Phase 1〜5 の単一 DB HTTP/JWT/SDK 互換を維持したまま、path-based DB routing と DbManager 内部機構を追加する Phase である。Phase 6 で成功応答してよい新規外部 API は `POST /{db-name}/v2/pipeline` のみであり、管理 API、DB scope JWT、Turso Platform API、WebSocket、organization/group/location/quota は実装してはならない。Phase 6 実装者は下表を Phase packet、atomic task ledger、scenario matrix、Done receipt、review handoff、operator behavior delta に転記してから実装する。
+
+| 項目 | Phase 6 固定仕様 |
+|------|------------------|
+| 実装範囲 | path-based DB routing、DbManager load/open/create/delete internal functions、DB name validation、`databases.json` atomic update、multi DB isolation |
+| API surface | 既存 `GET /v2/health`、`POST /v2/pipeline` に加え、`POST /{db-name}/v2/pipeline` のみ成功応答可 |
+| default route | `POST /v2/pipeline` は Phase 6 以降も常に `default` DB を対象とする。path DB へ暗黙移行してはならない |
+| path route | `POST /{db-name}/v2/pipeline` は URL decode 後の `{db-name}` を DB identity とし、該当 DB にだけ SQL を実行する |
+| route precedence | `/v2/pipeline` は default route として最優先。`/admin/*`、`/v1/*`、`/v3/*` は Phase 6 では成功応答禁止 |
+| auth | Phase 4 の global JWT `a` claim のみ適用する。`dbs`、`org`、`grp` claim は Phase 7/8 まで権限判定に使わない |
+| DB name validation | `^[a-zA-Z0-9_-]{1,127}$`。空、slash、dot path、URL decode 後 slash、space、percent decode 不正は `INVALID_DB_NAME` |
+| reserved name | `meta`、`admin`、`___` を含む name は `DB_RESERVED_NAME`。branch 内部名は Phase 15 まで外部作成不可 |
+| DB existence | validation 通過後、metadata / manager に存在しない DB は `DB_NOT_FOUND`。存在しない DB directory を暗黙作成しない |
+| DbManager lifecycle | 起動時に `databases.json` を読み、default を含む全 DB を open する。open/integrity_check 失敗は起動失敗 |
+| create/delete scope | Phase 6 では create/delete/list/detail を外部 API として成功応答しない。内部関数と test helper だけで検証する |
+| metadata update | `databases.json` は tmp write + fsync + atomic rename。partial write、空上書き、DB directory との不整合を成功扱いにしない |
+| directory layout | 各 DB は `{data-dir}/databases/{name}/data.db` 固定。default は `{data-dir}/databases/default/data.db` |
+| isolation | DB A への write は DB B に見えてはならない。default route と path route の DB identity を混ぜてはならない |
+| compatibility | Phase 1〜5 regression と TypeScript SDK CRUD は default route で継続 pass。path route は libSQL SDK 互換の HTTP surface として snapshot を取る |
+
+**Phase 6 atomic task ledger：**
+
+| Task ID | Goal | Input contracts | Change targets | Forbidden changes | Completion condition | Verification |
+|---------|------|-----------------|----------------|-------------------|----------------------|--------------|
+| `TASK-P6-1` | route precedence を固定する | §6.1、§9.5 | `http/mod.rs` | `/v2/pipeline` の default 破壊、管理 API 成功 | default/path route が分離 | route snapshot |
+| `TASK-P6-2` | DB name validation を固定する | §3.4、§7.3、§9.5 | `db/mod.rs` | path traversal、補正、trim | invalid/reserved が規定 error | validation matrix |
+| `TASK-P6-3` | DbManager open/load を固定する | §8.1、§9.6 | `db/manager.rs`、`db/meta.rs` | open 失敗無視、空 metadata 上書き | 起動時に全 DB open、失敗時起動失敗 | startup fixture |
+| `TASK-P6-4` | internal create/delete lifecycle を固定する | §3.4、§9.1.16 | `db/manager.rs` | 外部管理 API 成功、partial create/delete | internal function が atomic に DB state を変更 | lifecycle tests |
+| `TASK-P6-5` | `databases.json` atomic update を固定する | §9.6、§9.1.23 | `db/meta.rs` | partial write、空上書き | tmp/fsync/rename と失敗注入が pass | metadata fixture |
+| `TASK-P6-6` | path DB pipeline を実装する | §6.2、§9.1.28、§9.5 | `http/pipeline.rs` | default への誤ルーティング | path DB で SELECT/INSERT 成功 | path pipeline snapshot |
+| `TASK-P6-7` | multi DB isolation を固定する | §3.4、§9.1.35 | tests / artifact | DB 間混線、共有 file | DB A/B/default が独立 | isolation transcript |
+| `TASK-P6-8` | unsupported surface を固定する | §9.1.10、§9.5 | tests / snapshot | admin/v1/v3 成功応答 | Phase 7+ surface が成功しない | unsupported snapshot |
+| `TASK-P6-9` | Phase 6 Done receipt / handoff / operator delta | §9.1.33、§9.1.51、§9.1.52 | docs / PR artifact | PR description だけの根拠 | 第三者が route/isolation/restart を再現できる | handoff checklist |
+
+**Phase 6 scenario / oracle 固定表：**
+
+| Scenario ID | 入力 | 期待結果 | Evidence |
+|-------------|------|----------|----------|
+| `SCN-P6-1` | `POST /v2/pipeline` INSERT/SELECT | 常に `default` DB に対して成功 | default route transcript |
+| `SCN-P6-2` | `POST /app/v2/pipeline` INSERT/SELECT | `app` DB に対して成功、default には見えない | path route transcript |
+| `SCN-P6-3` | DB A に INSERT、DB B で SELECT | DB B には DB A の table/data が存在しない | isolation snapshot |
+| `SCN-P6-4` | URL decode 後 `/` を含む DB name | HTTP 400 `INVALID_DB_NAME` | validation snapshot |
+| `SCN-P6-5` | 空、space、`.`、`..`、128 文字 name | HTTP 400 `INVALID_DB_NAME` | validation matrix |
+| `SCN-P6-6` | `meta`、`admin`、`a___b` | HTTP 400 `DB_RESERVED_NAME` | reserved snapshot |
+| `SCN-P6-7` | 存在しない valid DB name | HTTP 404 `DB_NOT_FOUND` | not found snapshot |
+| `SCN-P6-8` | malformed pipeline JSON on path route | HTTP 400 `INVALID_REQUEST`。DB は暗黙作成されない | malformed snapshot |
+| `SCN-P6-9` | valid JWT global `ro` で path route write | HTTP 403 `PERMISSION_DENIED` | permission snapshot |
+| `SCN-P6-10` | valid JWT global `rw` で path route write/read | HTTP 200、対象 DB にだけ反映 | auth path transcript |
+| `SCN-P6-11` | restart 後に DB A/B/default を SELECT | 各 DB の data が維持される | restart transcript |
+| `SCN-P6-12` | 壊れた `databases.json` で起動 | 起動失敗。空 metadata で上書きしない | corrupt metadata fixture |
+| `SCN-P6-13` | DB directory 欠落 / data.db open 失敗 | 起動失敗または明示 recovery failure。暗黙 success なし | recovery fixture |
+| `SCN-P6-14` | `/admin/v1/databases`、`/v1/*`、`/v3/baton` | Phase 6 では成功応答なし | unsupported snapshot |
+| `SCN-P6-15` | Phase 1〜5 regression + TypeScript SDK default CRUD | すべて pass | regression transcript |
+
+**Phase 6 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| 管理 API、Turso Platform API、WebSocket を成功応答にする | merge 不可 |
+| `POST /v2/pipeline` を default 以外へ向ける | merge 不可 |
+| path DB が存在しない場合に暗黙作成する | merge 不可 |
+| DB name を trim / lowercase / normalize して受け付ける | merge 不可 |
+| URL decode 後の slash、dot path、`___` を許可する | merge 不可 |
+| `databases.json` parse 失敗時に空 metadata で上書きする | merge 不可 |
+| DB directory / metadata の不整合を成功起動扱いにする | Phase 未完了 |
+| DB A/B/default の isolation transcript なしで完了扱いにする | Phase 未完了 |
+| Phase 1〜5 regression と TypeScript SDK default CRUD なしで完了扱いにする | Phase 未完了 |
+| DB scope JWT、organization/group/location/quota 判定を Phase 6 完了条件に混ぜる | merge 不可。Phase 7/8 対象 |
+
+**Phase 6 Done receipt 最低 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `implemented_scope` | path-based DB routing、DbManager load/open/internal create/delete、DB name validation、`databases.json` atomic update、multi DB isolation |
+| `excluded_scope` | 管理 API 成功応答、DB scope JWT、Turso Platform API、WebSocket、organization/group/location/quota |
+| `atomic_task_result` | `TASK-P6-1`〜`TASK-P6-9` がすべて pass、open task 0 件 |
+| `scenario_matrix_result` | `SCN-P6-1`〜`SCN-P6-15` の pass/fail、artifact path |
+| `route_contract_result` | `/v2/pipeline` default、`/{db-name}/v2/pipeline` path DB、unsupported future route の snapshot |
+| `validation_result` | valid / invalid / reserved / URL decode / path traversal / length boundary の matrix |
+| `metadata_atomicity_result` | `databases.json` tmp/fsync/rename、失敗注入、破損時起動失敗、空上書きなし |
+| `isolation_result` | default / DB A / DB B の write/read 分離 transcript |
+| `restart_recovery_result` | 複数 DB の再起動復元、directory 欠落、metadata 破損、open 失敗の結果 |
+| `compatibility_baseline_result` | Phase 1〜5 regression、TypeScript SDK default route CRUD、path route wire snapshot |
+| `coverage_closure_result` | route、validation、auth、metadata、isolation、restart、unsupported、regression の gap 0 件 |
+| `review_handoff_result` | 第三者が route、validation、metadata、isolation、restart、unsupported を再現できる command と artifact |
+| `operator_behavior_delta_result` | Phase 6 で `/{db-name}/v2/pipeline` が追加されるが、DB 作成管理 API はまだ成功応答しない release note |
 
 **Phase 8〜10 の境界決定：**
 
