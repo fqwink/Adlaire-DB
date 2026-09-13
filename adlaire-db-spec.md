@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.112
+**バージョン：** V.113
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.112` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.113` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -4006,6 +4006,7 @@ branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§
 | `compatibility_baseline_matrix` | §9.1.47 の Turso Cloud / libSQL SDK 互換 baseline、refresh trigger、差分分類、証跡 |
 | `security_abuse_matrix` | §9.1.48 の attack surface、untrusted input、bypass attempt、denial、redaction、audit、regression |
 | `ambiguity_closure_matrix` | §9.1.49 の implementation question、推奨決定、却下案、根拠、影響範囲、証跡 |
+| `atomic_task_ledger` | §9.1.50 の task ID、入力契約、変更対象、禁止変更、完了条件、検証、rollback |
 | `completion_gate` | merge 前に満たす Done 条件と失敗時の扱い |
 
 **Phase group 粒度：**
@@ -4106,6 +4107,7 @@ Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§
 | `compatibility_baseline_result` | §9.1.47 の baseline ID ごとの upstream source、snapshot / SDK version、差分分類、refresh 可否、証跡 |
 | `security_abuse_result` | §9.1.48 の security case ID ごとの bypass denial、redaction、audit/log、quota/rate/persistence、証跡 |
 | `ambiguity_closure_result` | §9.1.49 の ambiguity ID ごとの採用決定、却下案、仕様反映、証跡、open ambiguity 0 件 |
+| `atomic_task_result` | §9.1.50 の task ID ごとの完了条件、検証 command、証跡、rollback 可否、open task 0 件 |
 | `reviewer_decision` | `Done`、`Not Done`、`Spec correction required` のいずれか |
 
 **Phase group Done minimum：**
@@ -5211,6 +5213,62 @@ Phase security abuse に関係する仕様変更は、§7.3、§9.1.10、§9.1.1
 
 Phase ambiguity closure に関係する仕様変更は、§0、§7.3、§9.1.10、§9.1.11、§9.1.12、§9.1.14、§9.1.15、§9.1.18、§9.1.19、§9.1.20、§9.1.21、§9.1.22、§9.1.23、§9.1.24、§9.1.29、§9.1.32、§9.1.33、§9.1.35、§9.1.38、§9.1.39、§9.1.40、§9.1.41、§9.1.42、§9.1.43、§9.1.44、§9.1.45、§9.1.46、§9.1.47、§9.1.48、§9.2、§9.4、§9.5、§9.6、§9.7、§9.8、§9.11、§9.14、§9.17、該当 Phase 詳細節を同時更新する。ambiguity closure matrix がない Phase 実装 PR は、実装判断、N/A、例外、error/status、commit order、互換差分の根拠が未確定であるため、実装開始不可とする。
 
+#### 9.1.50 Phase atomic implementation task ledger 固定契約
+
+各 Phase の実装 PR は、Phase scope を atomic task ledger に分解し、task ID ごとに入力契約、変更対象、禁止変更、完了条件、検証 command、証跡、rollback 条件を固定しなければならない。Phase 全体を大きな一括実装として扱うこと、task ID なしで差分を追加すること、検証がない task を Done 扱いにすることは禁止する。
+
+**Atomic task ledger 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `task_id` | `TASK-P{phase}-{number}` 形式の一意 ID |
+| `phase` | task が属する Phase |
+| `task_goal` | 1 task で完了させる具体的な成果。API、persistence、security、test、artifact のいずれに効くかを明記 |
+| `input_contracts` | 参照する Phase packet、manifest、schema、scenario、decision、security、compatibility、ambiguity ID |
+| `change_targets` | 変更してよい module、API、config、metadata、test、artifact、docs。仕様書 PR では対象節番号 |
+| `forbidden_changes` | 同 task で変更してはならない surface、future Phase、互換契約、schema、error、auth、secret、dependency |
+| `completion_condition` | task が完了したと判定する observable result、snapshot、artifact、Done receipt field |
+| `verification_command` | task 完了を確認する command、expected exit code、環境、artifact path。実行不能なら manual exception ID |
+| `rollback_condition` | task 失敗時に戻す state、metadata/file、config、runtime map、artifact。rollback 不要なら理由 |
+| `dependency` | 先行 task、block する task、並列可否 |
+| `evidence` | diff、test log、snapshot、fixture、secret scan、metadata before/after、review checklist |
+
+**Phase group atomic task minimum：**
+
+| Phase group | 最低 task 分解 |
+|-------------|----------------|
+| Phase 1〜5 | CLI/config、data-dir、default DB、HTTP pipeline、JWT、log/redaction、SDK smoke、restart test を分離 |
+| Phase 6〜8 | DB CRUD、admin token、scope、organization/group/location、quota/block、Platform API、legacy migration を分離 |
+| Phase 9〜10 | WebSocket handshake、stream、transaction、ATTACH policy、metrics persistence、ro/rw enforcement を分離 |
+| Phase 11〜13 | primary frame、replica apply、checksum、snapshot、archive manifest、retention、health/redirect を分離 |
+| Phase 14〜15 | backup create、restore rollback、PITR select、branch create/delete、seed isolation、quota/delete protection を分離 |
+| Phase 16〜18 | extension registry、signature/load、metrics snapshot、Prometheus、HA term、promote/demote、split-brain を分離 |
+| Phase 19 | shadow adapter、diff capture、active switch、fallback denial、performance baseline、rollback flag を分離 |
+
+**atomic task 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| Phase 実装を 1 つの巨大 task として扱う | 実装開始禁止 |
+| `TASK-P{phase}-{number}` がない差分を入れる | merge 不可 |
+| task の input contracts が Phase packet / manifest / matrix に接続していない | 実装開始禁止 |
+| task に verification command または manual exception ID がない | Phase 未完了 |
+| task 外の API、metadata、config、dependency、error code、auth 境界を変更する | merge 不可 |
+| rollback condition がない状態変更 task を完了扱いにする | Phase 未完了 |
+| dependency 未完了の task を先に merge する | merge 不可 |
+| open task が 1 件以上ある状態で Done receipt を出す | Phase 未完了 |
+| task 完了を PR description の説明だけで代替する | 仕様として扱わない |
+
+**Done receipt への反映：**
+
+| Done receipt field | 必須内容 |
+|--------------------|----------|
+| `atomic_task_result` | task ID ごとの input contracts、change targets、completion condition、verification command、evidence |
+| `open_task_count` | `0` 固定。0 以外は Phase 未完了 |
+| `task_dependency_result` | dependency 順序、並列実行可否、blocked task 0 件、rollback condition の証跡 |
+
+Phase atomic task ledger に関係する仕様変更は、§9.1.7、§9.1.8、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.1.16、§9.1.21、§9.1.24、§9.1.29、§9.1.32、§9.1.33、§9.1.34、§9.1.35、§9.1.38、§9.1.39、§9.1.40、§9.1.41、§9.1.42、§9.1.43、§9.1.44、§9.1.45、§9.1.46、§9.1.47、§9.1.48、§9.1.49、§9.2、§9.4、§9.5、§9.6、§9.7、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。atomic task ledger がない Phase 実装 PR は、実装粒度、変更境界、検証単位、rollback 単位、完了判定が未確定であるため、実装開始不可とする。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -5874,6 +5932,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Compatibility baseline | §9.1.47 に従い、Turso Cloud、libSQL SDK、hrana、legacy metadata、previous Phase の baseline、snapshot / SDK version、refresh trigger、差分分類、証跡が固定されている | 実装開始禁止。実装都合の snapshot 更新、SDK transcript 欠落、upstream 未確認、自己ホスト差分理由なし、古い baseline のまま Done / rollout ready は不可 |
 | Security abuse / bypass resistance | §9.1.48 に従い、attack surface、untrusted input、required control、bypass attempt、expected denial、redaction、audit/log、quota/rate、persistence no-op が固定されている | 実装開始禁止。auth/scope/quota bypass、secret 漏洩、path traversal、commit 後拒否、replay 二重処理、manual only security case がある場合は Phase 完了扱いにしない |
 | Ambiguity closure / implementation decision | §9.1.49 に従い、implementation question、candidate options、selected decision、rejected options、decision basis、affected contracts、edge cases、reopen trigger が固定されている | 実装開始禁止。TBD、実装判断、根拠なし N/A、open ambiguity、error/status/commit order/redaction の未決定がある場合は Phase 完了扱いにしない |
+| Atomic implementation task ledger | §9.1.50 に従い、task ID、input contracts、change targets、forbidden changes、completion condition、verification command、rollback condition、dependency が固定されている | 実装開始禁止。巨大 task、task ID なし差分、検証なし task、task 外変更、rollback 未定義、open task がある場合は Phase 完了扱いにしない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | 仕様内相互参照 | §9.1.29 に従い、Phase 番号、TC ID、Task ID、API 契約 ID、error code、persistence key、evidence 名、manifest 参照が一致している | 仕様修正 PR に戻す |
 | Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
