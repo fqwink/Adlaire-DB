@@ -35,7 +35,7 @@
 |------|------|
 | Python バージョン | 3.9 以上（型ヒント `dict[str, int]`、`list[tuple]` を使用） |
 | 外部依存 | **なし** — `re`・`html`・`unicodedata`・`pathlib`・`typing` の標準ライブラリのみ使用。`pip install` 不要 |
-| 入力 | UTF-8 エンコードの Markdown ファイル。`docs/adlaire-db-spec.md` から `docs/phases/*.md` を include 展開する |
+| 入力 | UTF-8 エンコードの Markdown ファイル。`docs/spec/adlaire-db-spec.md` から `docs/spec/phase-*.md` を include 展開する |
 | 出力 | UTF-8 エンコードの単一 HTML ファイル |
 
 ---
@@ -45,13 +45,13 @@
 スクリプト冒頭の定数で入出力パスを管理する。
 
 ```python
-SRC = "docs/adlaire-db-spec.md"      # 入力 Markdown 親仕様
+SRC = "docs/spec/adlaire-db-spec.md"      # 入力 Markdown 親仕様
 OUT = "docs/Adlaire-db-spec.html"    # 出力 HTML
 ```
 
 別の環境で実行する場合はこの 2 変数を書き換える。
 
-親仕様内の `<!-- include: docs/phases/phase-01.md -->` 形式の行は、HTML 生成前に指定 Markdown ファイルの本文へ展開する。include はリポジトリルートからの相対パスで記述する。
+親仕様内の `<!-- include: docs/spec/phase-01.md -->` 形式の行は、HTML 生成前に指定 Markdown ファイルの本文へ展開する。include はリポジトリルートからの相対パスで記述する。
 
 ---
 

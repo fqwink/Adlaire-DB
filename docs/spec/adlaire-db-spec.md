@@ -9570,27 +9570,27 @@ pub struct DbMetrics {
 ```
 
 
-**Phase 1〜19 の詳細：** `docs/phases/` に分割して管理する。HTML 生成時は以下の include を展開する。
+**Phase 1〜19 の詳細：** `docs/spec/` に分割して管理する。HTML 生成時は以下の include を展開する。
 
-<!-- include: docs/phases/phase-01.md -->
-<!-- include: docs/phases/phase-02.md -->
-<!-- include: docs/phases/phase-03.md -->
-<!-- include: docs/phases/phase-04.md -->
-<!-- include: docs/phases/phase-05.md -->
-<!-- include: docs/phases/phase-06.md -->
-<!-- include: docs/phases/phase-07.md -->
-<!-- include: docs/phases/phase-08.md -->
-<!-- include: docs/phases/phase-09.md -->
-<!-- include: docs/phases/phase-10.md -->
-<!-- include: docs/phases/phase-11.md -->
-<!-- include: docs/phases/phase-12.md -->
-<!-- include: docs/phases/phase-13.md -->
-<!-- include: docs/phases/phase-14.md -->
-<!-- include: docs/phases/phase-15.md -->
-<!-- include: docs/phases/phase-16.md -->
-<!-- include: docs/phases/phase-17.md -->
-<!-- include: docs/phases/phase-18.md -->
-<!-- include: docs/phases/phase-19.md -->
+<!-- include: docs/spec/phase-01.md -->
+<!-- include: docs/spec/phase-02.md -->
+<!-- include: docs/spec/phase-03.md -->
+<!-- include: docs/spec/phase-04.md -->
+<!-- include: docs/spec/phase-05.md -->
+<!-- include: docs/spec/phase-06.md -->
+<!-- include: docs/spec/phase-07.md -->
+<!-- include: docs/spec/phase-08.md -->
+<!-- include: docs/spec/phase-09.md -->
+<!-- include: docs/spec/phase-10.md -->
+<!-- include: docs/spec/phase-11.md -->
+<!-- include: docs/spec/phase-12.md -->
+<!-- include: docs/spec/phase-13.md -->
+<!-- include: docs/spec/phase-14.md -->
+<!-- include: docs/spec/phase-15.md -->
+<!-- include: docs/spec/phase-16.md -->
+<!-- include: docs/spec/phase-17.md -->
+<!-- include: docs/spec/phase-18.md -->
+<!-- include: docs/spec/phase-19.md -->
 ## 10. セキュリティ考慮事項
 
 ### 10.1 JWT シークレット管理

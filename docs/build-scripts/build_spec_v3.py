@@ -10,7 +10,7 @@ import re, html, unicodedata
 from pathlib import Path
 from typing import Optional
 
-SRC = "docs/adlaire-db-spec.md"
+SRC = "docs/spec/adlaire-db-spec.md"
 OUT = "docs/Adlaire-db-spec.html"
 
 INCLUDE_RE = re.compile(r'^<!--\s*include:\s*([^>]+?)\s*-->\s*$')
