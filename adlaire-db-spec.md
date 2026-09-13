@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** 0.73
+**バージョン：** 0.74
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -2340,6 +2340,56 @@ artifact は Phase 完了 PR と同じ commit に含める。後続 PR で artif
 
 矛盾解消後は、該当 Contract ID、manifest、test name、artifact path、PR description の追跡表が同じ挙動を指していなければならない。1 つでも古い仕様を参照している場合は、矛盾未解消として扱う。
 
+#### 9.1.13 Verification command 固定契約
+
+各 Phase 実装 PR は、完了判定に使う verification command を実装開始前に Phase 受入 manifest の `Regression set` と PR description に固定する。固定されていない command の成功は完了根拠として扱わない。
+
+verification command は deterministic に実行できなければならない。実行者のローカル環境、手順記憶、IDE、手動クリック、外部サービスの一時状態に依存する確認は、§9.1.10 の `Manual exception` に根拠がない限り完了根拠として使えない。
+
+**必須 command 分類：**
+
+| 分類 | 必須 command | 適用 Phase | 必須 artifact |
+|------|--------------|------------|---------------|
+| format / lint | repository 標準の format / lint command。存在しない場合は manifest に `N/A` 理由を明記 | all | `tests/artifacts/phase-{phase}/{contract-id}/ci.txt` |
+| unit | 対象 crate/module の unit test | all implementation phases | `ci.txt` |
+| integration | HTTP / WebSocket / CLI / persistence の integration test | Phase 3 以降、または外部 API を持つ Phase | `ci.txt`、request fixture、response snapshot |
+| SDK compatibility | libSQL client SDK 互換 test | hrana / client API を変更する Phase | SDK transcript、compat diff |
+| Turso compatibility | Turso Cloud snapshot / behavior compare | Turso Cloud 互換 API / metadata / auth / quota / branch / platform API を変更する Phase | `compat.diff` |
+| persistence / restart / rollback | fsync、restart、corruption、rollback、migration test | 永続化 schema / metadata / backup / branch / HA を変更する Phase | persistence fixture、recovery log |
+| security / secret scan | auth denial、scope denial、redaction、artifact secret scan | 認証、認可、secret、artifact を扱う Phase | secret-scan result、denied response |
+| release-check | release-check script または同等の repository 標準 release validation | release / packaging / CI 完了判定を行う Phase | `ci.txt` |
+
+該当する分類が存在するのに command が未定義の場合、その Phase は未完了である。`N/A` は、対象機能が §9.2、§9.4、該当 Phase 節、または unsupported 固定表で明示対象外の場合だけ許可する。
+
+**実行順序：**
+
+| Order | Gate | 失敗時 |
+|-------|------|--------|
+| 1 | format / lint | 実装修正。後続 gate に進まない |
+| 2 | unit | 実装修正。integration に進まない |
+| 3 | integration | 実装または仕様矛盾を修正する |
+| 4 | SDK / Turso compatibility | 互換差分を仕様化するか実装修正する |
+| 5 | persistence / restart / rollback | 永続化・migration・rollback 契約を修正する |
+| 6 | security / secret scan | secret 混入を除去し、deny/redaction test を追加する |
+| 7 | release-check | release / packaging / CI 契約を修正する |
+
+上記順序を飛ばして後段 command だけを成功させても Phase 完了扱いにしない。前段 command の失敗を `known issue`、`flaky`、`後で確認` として残すことは禁止する。
+
+**exit code と証跡：**
+
+| 状態 | 判定 |
+|------|------|
+| command の exit code が `0` | 完了根拠として利用可 |
+| command の exit code が非 `0` | Phase 未完了 |
+| command 未実行 | Phase 未完了 |
+| command 名、引数、対象 path が artifact に残っていない | Phase 未完了 |
+| CI output artifact と manifest の `Regression set` が一致しない | review failure |
+| ローカル実行の口頭説明だけで artifact がない | Phase 未完了 |
+| flaky test を再実行で通したが失敗ログを残していない | review failure |
+| `--ignored`、`--skip`、filter で対象 test を外した | Phase 未完了。ただし除外理由が仕様本文にある場合のみ `N/A` 可 |
+
+verification command の追加・削除・引数変更は、manifest、PR description、CI output artifact、該当 Contract ID の追跡表を同時に更新しなければならない。検証 command を変更しただけで仕様本文を更新しない PR は Phase 完了不可である。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -2968,6 +3018,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Phase 受入 manifest | §9.1.10 の必須 fields が実装開始前に固定されている | 実装 PR として扱わない |
 | Evidence artifact | §9.1.11 の保存先、命名、正規化、secret scan が固定されている | 証跡生成まで完了扱いにしない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
+| Verification command | §9.1.13 の command 分類、順序、exit code、artifact が固定されている | 検証完了扱いにしない |
 | API 契約 | method/path/auth/request/success/error が §9.5 または各 API 節に明記されている | route を追加しない |
 | Error code | 失敗条件ごとの `code` が §7.3 / §9.7 に存在する | 先に error code を追加する |
 | 永続化 | ファイル名、schema、atomic update、rollback、破損時挙動が §9.6 に明記されている | 書き込み処理を実装しない |
