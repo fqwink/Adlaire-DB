@@ -3,9 +3,28 @@
 ## 仕様書の位置づけ
 
 - `docs/adlaire-db-spec.md` は**正本**（single source of truth）である
+- `docs/Adlaire-db-spec.html` は `docs/adlaire-db-spec.md` から生成された閲覧用 HTML であり、正本ではない
 - 実装は仕様書に基づいて行うこと
 - 仕様書と実装が乖離している場合は、**仕様書を優先する**
 - 実装の都合で仕様書を変更する場合は、下記「変更承認フロー」に従うこと
+
+## 仕様書 HTML 更新ルール
+
+`docs/adlaire-db-spec.md` を改訂した場合は、`docs/build-scripts/build_spec_v3.py` 経由で `docs/Adlaire-db-spec.html` を更新すること。
+
+- 仕様書改訂 PR では、Markdown 正本と HTML 生成物の整合性を確認する
+- HTML 生成物だけを正として仕様判断してはならない
+- HTML 生成物と Markdown 正本が乖離した場合は、Markdown 正本を優先し、HTML を再生成して整合させる
+
+## ドキュメント生成ツールの位置づけ
+
+以下は別途リポジトリで開発したドキュメント生成ツールおよび関連文書である。
+
+- `docs/build-scripts/build_spec_v3.py`
+- `docs/build-scripts/build_spec_v3_spec.md`
+- `docs/build-scripts/DESIGN.md`
+
+Adlaire DB の仕様正本は、上記ツールではなく `docs/adlaire-db-spec.md` である。
 
 ## 作業開始時の確認
 
@@ -27,6 +46,17 @@
 3. 「承認」を得てから編集・コミット・プッシュを行う
 4. 変更作業の提示には、対象ファイル、変更理由、変更予定内容を含める
 5. ユーザーが「承認」と返答した場合、その変更作業は承認済みとして扱う
+
+## PR / マージ運用
+
+`main` への反映は、必ず PR 経由にすること。
+
+- Codex は main へ直接 push しない
+- すべての変更は作業ブランチへ commit し、その作業ブランチを push する
+- 作業完了時は PR を作成する
+- Codex は PR 作成までを担当する
+- main へのマージはユーザーが行う
+- GitHub remote 設定では、PR merge 後の head branch 自動削除を有効化する
 
 ## PR 報告形式
 
