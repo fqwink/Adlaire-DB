@@ -409,7 +409,7 @@ HTML テンプレートの `PAGE` f-string 内を直接編集する。
 ```python
 <title>Adlaire DB 仕様憲章</title>          # ← ブラウザタブタイトル
 <span class="hdr-title">Adlaire DB</span>  # ← ヘッダー表示名
-<span class="hdr-ver">V.208</span>         # ← バージョンバッジ
+<span class="hdr-ver">V.209</span>         # ← バージョンバッジ
 ```
 
 ### 8.4 TOC の対象見出しレベル
