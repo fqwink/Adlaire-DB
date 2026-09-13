@@ -1,14 +1,18 @@
 # Adlaire DB 仕様憲章
 
-**バージョン：** V.205
+**バージョン：** V.206
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
 ---
 
-## 0. 仕様書バージョン管理固定契約
+## 0. 仕様憲章の責務
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.205` である。
+本仕様憲章は、Adlaire DB の実装・運用・互換性判断における最上位の仕様責務を固定する。`docs/spec/spec.md` は全体方針、共通契約、API、運用、実装統制、Phase include 順を定め、`docs/spec/phase-*.md` は Phase 別の実装契約を定める。仕様憲章と Phase 仕様が乖離する場合は、仕様矛盾として扱い、実装判断ではなく仕様改訂で解消する。
+
+### 0.1 仕様バージョン管理責務
+
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.206` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -24,7 +28,11 @@
 | リポジトリ移行や仕様再編を理由に `V.1` から再開する | merge 不可 |
 | 仕様本文を変更したのに仕様書バージョンを上げない | review failure |
 
-## 1. 概要
+## 1. プロダクト責務
+
+Adlaire DB が何を提供し、何を優先し、どの方向へ進化するかを固定する責務である。Turso Cloud 互換、自己ホスト運用、将来的な内製化方針は、この責務に従って判断する。
+
+### 1.1 概要・位置づけ・進化方針
 
 ### 1.1 プロジェクト概要
 
@@ -157,7 +165,15 @@ Adlaire DB の最終目標は、Turso Cloud 互換の自己ホスト DB 管理�
 
 ---
 
-## 2. 機能スコープ
+## 2. 互換性責務
+
+Adlaire DB は Turso Cloud / libSQL SDK / hrana 互換を最優先の外部契約として扱う。互換性に影響する変更は、実装前に差分、理由、SDK 影響、後方互換性、代替仕様を仕様へ固定する。自己ホスト都合の差分は、security または durability 上必要な場合に限り、仕様上の差分として明示する。
+
+## 3. 境界責務
+
+提供する機能、提供しない機能、管理境界、DB境界、セキュリティ境界を固定する責務である。実装者は境界外の機能を成功応答にしてはならない。
+
+### 3.1 機能スコープ責務
 
 ### 2.1 クライアント接続
 
@@ -207,7 +223,11 @@ Phase 8 では、上記 3 機能について Turso Cloud 互換 API、永続化�
 
 ---
 
-## 3. アーキテクチャ
+## 4. 実行基盤責務
+
+サーバー構成、データ配置、libsql 統合、設定、起動停止、リカバリを固定する責務である。production path はこの責務に従い、起動時の不整合は黙認せず、仕様に定めた失敗または復旧を選ぶ。
+
+### 4.1 アーキテクチャ責務
 
 ### 3.1 全体構成
 
@@ -700,7 +720,7 @@ WAL リテンションが有効な場合、チェックポイントで消去さ�
 
 ---
 
-## 4. 設定・起動
+### 4.2 設定・起動責務
 
 ### 4.1 CLI
 
@@ -782,7 +802,130 @@ sync_timeout_ms = 5000     # sync モード時のタイムアウト（ミリ秒�
 
 ---
 
-## 5. 認証
+### 4.3 起動・停止・リカバリ責務
+
+### 8.1 起動シーケンス（`adlaire-db serve`）
+
+```
+Step 1: 設定解決
+  1-1. CLI フラグをパース
+  1-2. --config で指定された config.toml を読み込む（なければスキップ）
+  1-3. 優先順位に従い設定値をマージ（フラグ > config.toml > デフォルト）
+  1-4. --data が未指定なら Error: --data is required で終了
+
+Step 2: JWT シークレット検証
+  2-1. jwt_secret_file が指定されていればファイルを読み込む
+  2-2. いずれも未指定なら WARN "auth is disabled (no jwt_secret configured)"
+  2-3. secret が指定されている場合、長さを検証
+       → 32 バイト未満なら Error: jwt_secret must be at least 32 bytes で終了
+
+Step 3: データディレクトリ準備
+  3-1. {data-dir} が存在しなければ mkdir -p で作成（パーミッション 700）
+  3-2. {data-dir}/meta/ が存在しなければ作成
+  3-3. {data-dir}/databases/ が存在しなければ作成
+  3-4. {data-dir} のパーミッションを確認
+       → 700 未満なら WARN "data directory permissions are too open: {mode}"
+
+Step 4: プロセスロック取得
+  4-1. {data-dir}/.lock の排他ロック（flock LOCK_EX | LOCK_NB）を試みる
+  4-2. 失敗（EWOULDBLOCK）なら Error: another adlaire-db process is running で終了
+  4-3. 成功したら .lock を保持したまま続行
+
+Step 5: メタデータ読み込み（Phase 1〜5 はシングル DB のためスキップ可）
+  5-1. {data-dir}/meta/databases.json が存在すれば読み込みメモリに展開
+       なければ空のリスト `{"databases":[]}` として初期化し書き出す
+  5-2. {data-dir}/meta/tokens.json が存在すれば読み込みメモリに展開
+       なければ空のリスト `{"tokens":[]}` として初期化し書き出す
+  5-3. {data-dir}/meta/branches.json が存在すれば読み込みメモリに展開（Phase 15〜）
+       なければ空のリスト `{"branches":[]}` として初期化し書き出す
+  ※ Phase 3 では tokens.json / branches.json の内容は利用しないが、
+     Phase 7 以降の管理 API および Phase 15 の branch metadata と同じ配置にするためファイル自体は初期化する
+
+Step 6: DB オープン
+  【Phase 1〜5 — シングル DB 固定】
+  6-1. {data-dir}/databases/default/ が存在しなければ作成（初回起動時）
+  6-2. {data-dir}/databases/default/data.db を libsql::Builder::new_local() でオープン（§14.19 参照）
+  6-3. WAL モードを設定（PRAGMA journal_mode = WAL）
+  6-4. busy timeout を設定（busy_timeout_ms）
+  6-5. synchronous を設定（PRAGMA synchronous = NORMAL）
+  6-6. skip_integrity_check フラグが false の場合は PRAGMA integrity_check を実行
+       → ok 以外の場合は Error: database integrity check failed で終了
+  ※ いずれかで失敗した場合は Error: failed to open database 'default': {err} で終了
+
+  【Phase 6 以降 — マルチ DB】
+  6-1. {data-dir}/databases/ 以下の各 DB ディレクトリを列挙
+  6-2. 各 DB の data.db を libsql::Builder::new_local() でオープン（整合性チェック含む）
+  ※ databases/default/ が存在しない場合も自動作成して後方互換を維持
+
+Step 7: HTTP サーバー起動
+  7-1. API ポート（デフォルト 0.0.0.0:8080）でソケットを bind
+  7-2. 管理ポート（デフォルト 127.0.0.1:8081）でソケットを bind
+  7-3. いずれかで失敗した場合は Error: failed to bind port {n}: {err} で終了
+
+Step 8: 起動完了
+  INFO {"msg":"Adlaire DB starting","version":"<semver>","data_dir":"...","port":8080}
+  INFO {"msg":"Adlaire DB listening","addr":"0.0.0.0:8080","admin_addr":"127.0.0.1:8081"}
+```
+
+### 8.2 停止シーケンス（SIGINT / SIGTERM 受信時）
+
+```
+Step 1: シャットダウン開始
+  INFO {"msg":"shutdown signal received","signal":"SIGTERM"}
+
+Step 2: 新規リクエスト受付を停止
+  HTTP リスナーを閉じる。処理中のリクエストは最大 --shutdown-timeout（デフォルト 30s）待機する。
+  タイムアウト超過の場合は接続タスクを中断し、WARN ログを出力する。
+
+Step 3: DB クローズ
+  Arc<libsql::Database> の最後の参照が drop される（WAL チェックポイント + ファイルクローズ）
+  ※ Connection は execute() 呼び出しのたびに都度生成・即 drop するため、シャットダウン時点では保持していない
+
+Step 4: プロセスロック解放
+  {data-dir}/.lock の flock を解放する（プロセス終了で自動解放されるが明示的に行う）
+
+Step 5: 停止完了
+  INFO {"msg":"Adlaire DB stopped"}
+  exit code 0
+```
+
+### 8.3 異常終了・リカバリ
+
+| シナリオ | 挙動 |
+|----------|------|
+| クラッシュ（SIGKILL 等） | SQLite WAL がコミット済みデータを保護する。次回起動時に WAL ロールフォワードが自動実行される |
+| `.lock` ゾンビ残留 | flock はプロセス死亡で自動解放される。手動削除は不要 |
+| `databases.json` 破損 | Error: failed to parse databases.json で起動失敗。バックアップから復元する |
+| `tokens.json` 破損 | Error: failed to parse tokens.json で起動失敗。バックアップから復元するか空リストで初期化 |
+| data.db 破損 | SQLite の PRAGMA integrity_check を実行し異常なら起動失敗 |
+
+### 8.4 初期化フラグ優先順位まとめ
+
+```
+--auth-jwt-secret-file > --auth-jwt-secret > ADLAIRE_JWT_SECRET (env) > config.toml [auth] jwt_secret
+--data               > config.toml [storage] data_dir  （config.toml に書かないことを推奨）
+--port               > config.toml [server] port        (default: 8080)
+--admin-port         > config.toml [server] admin_port  (default: 8081)
+--log-level          > ADLAIRE_LOG_LEVEL (env) > config.toml [server] log_level  (default: info)
+--busy-timeout       > config.toml [server] busy_timeout_ms  (default: 5000)
+--admin-auth-token   > ADLAIRE_ADMIN_TOKEN (env) > config.toml [admin] auth_token
+--shutdown-timeout   > config.toml [server] shutdown_timeout  (default: 30)
+
+# Phase 11 レプリケーション設定
+--role                      standalone（デフォルト）     CLI のみ（TOML 対応なし）
+--primary-port              8082（デフォルト）           CLI のみ（TOML 対応なし）
+--primary-url               必須（--role replica 時のみ）CLI のみ（TOML 対応なし）
+--replication-auth-token    なし（デフォルト）           CLI のみ（TOML 対応なし）
+--replication-write-mode    async（デフォルト）          CLI + config.toml [replication] write_mode
+```
+
+---
+
+## 5. 認証・認可責務
+
+JWT、claim、scope、DB scope、token lifecycle を固定する責務である。認証・認可の境界は API 実装と管理操作の前提であり、実装都合で拡張または緩和してはならない。
+
+### 5.1 認証契約
 
 ### 5.1 方式
 
@@ -978,7 +1121,11 @@ adlaire-db token create --secret "my-secret" \
 
 ---
 
-## 6. API 仕様
+## 6. API契約責務
+
+URL、HTTP API、WebSocket API、管理 API、エラー形式、エラーコードを固定する責務である。外部 observable な response、status、wire format、error code はこの責務に従う。
+
+### 6.1 API 仕様責務
 
 ### 6.1 URL 設計
 
@@ -1547,7 +1694,7 @@ GET /admin/v1/metrics     全 DB のメトリクス取得
 
 ---
 
-## 7. エラーハンドリング
+### 6.2 エラー契約責務
 
 ### 7.1 HTTP ステータスコード
 
@@ -1726,126 +1873,223 @@ ETC-8: ストレージビジーエラー
 
 ---
 
-## 8. 起動・停止シーケンス
+## 7. データ保全責務
 
-### 8.1 起動シーケンス（`adlaire-db serve`）
+WAL、整合性、リカバリ、ファイル保護、データ破壊防止を固定する責務である。データ保全に関する挙動は互換性よりも強い安全側判断を許容するが、差分は仕様へ明示する。
 
-```
-Step 1: 設定解決
-  1-1. CLI フラグをパース
-  1-2. --config で指定された config.toml を読み込む（なければスキップ）
-  1-3. 優先順位に従い設定値をマージ（フラグ > config.toml > デフォルト）
-  1-4. --data が未指定なら Error: --data is required で終了
+### 7.1 WAL 設定責務
 
-Step 2: JWT シークレット検証
-  2-1. jwt_secret_file が指定されていればファイルを読み込む
-  2-2. いずれも未指定なら WARN "auth is disabled (no jwt_secret configured)"
-  2-3. secret が指定されている場合、長さを検証
-       → 32 バイト未満なら Error: jwt_secret must be at least 32 bytes で終了
+### 13.1 WAL モード
 
-Step 3: データディレクトリ準備
-  3-1. {data-dir} が存在しなければ mkdir -p で作成（パーミッション 700）
-  3-2. {data-dir}/meta/ が存在しなければ作成
-  3-3. {data-dir}/databases/ が存在しなければ作成
-  3-4. {data-dir} のパーミッションを確認
-       → 700 未満なら WARN "data directory permissions are too open: {mode}"
+すべての SQLite DB は起動時に WAL モードを有効化する。
 
-Step 4: プロセスロック取得
-  4-1. {data-dir}/.lock の排他ロック（flock LOCK_EX | LOCK_NB）を試みる
-  4-2. 失敗（EWOULDBLOCK）なら Error: another adlaire-db process is running で終了
-  4-3. 成功したら .lock を保持したまま続行
-
-Step 5: メタデータ読み込み（Phase 1〜5 はシングル DB のためスキップ可）
-  5-1. {data-dir}/meta/databases.json が存在すれば読み込みメモリに展開
-       なければ空のリスト `{"databases":[]}` として初期化し書き出す
-  5-2. {data-dir}/meta/tokens.json が存在すれば読み込みメモリに展開
-       なければ空のリスト `{"tokens":[]}` として初期化し書き出す
-  5-3. {data-dir}/meta/branches.json が存在すれば読み込みメモリに展開（Phase 15〜）
-       なければ空のリスト `{"branches":[]}` として初期化し書き出す
-  ※ Phase 3 では tokens.json / branches.json の内容は利用しないが、
-     Phase 7 以降の管理 API および Phase 15 の branch metadata と同じ配置にするためファイル自体は初期化する
-
-Step 6: DB オープン
-  【Phase 1〜5 — シングル DB 固定】
-  6-1. {data-dir}/databases/default/ が存在しなければ作成（初回起動時）
-  6-2. {data-dir}/databases/default/data.db を libsql::Builder::new_local() でオープン（§14.19 参照）
-  6-3. WAL モードを設定（PRAGMA journal_mode = WAL）
-  6-4. busy timeout を設定（busy_timeout_ms）
-  6-5. synchronous を設定（PRAGMA synchronous = NORMAL）
-  6-6. skip_integrity_check フラグが false の場合は PRAGMA integrity_check を実行
-       → ok 以外の場合は Error: database integrity check failed で終了
-  ※ いずれかで失敗した場合は Error: failed to open database 'default': {err} で終了
-
-  【Phase 6 以降 — マルチ DB】
-  6-1. {data-dir}/databases/ 以下の各 DB ディレクトリを列挙
-  6-2. 各 DB の data.db を libsql::Builder::new_local() でオープン（整合性チェック含む）
-  ※ databases/default/ が存在しない場合も自動作成して後方互換を維持
-
-Step 7: HTTP サーバー起動
-  7-1. API ポート（デフォルト 0.0.0.0:8080）でソケットを bind
-  7-2. 管理ポート（デフォルト 127.0.0.1:8081）でソケットを bind
-  7-3. いずれかで失敗した場合は Error: failed to bind port {n}: {err} で終了
-
-Step 8: 起動完了
-  INFO {"msg":"Adlaire DB starting","version":"<semver>","data_dir":"...","port":8080}
-  INFO {"msg":"Adlaire DB listening","addr":"0.0.0.0:8080","admin_addr":"127.0.0.1:8081"}
+```sql
+PRAGMA journal_mode = WAL;
 ```
 
-### 8.2 停止シーケンス（SIGINT / SIGTERM 受信時）
+- WAL により複数の同時読み取りと 1 書き込みが並行可能
+- クラッシュ後の自動リカバリは SQLite が保証
+
+### 13.2 設定パラメータ
+
+| パラメータ | デフォルト | CLI フラグ | config.toml キー | 説明 |
+|---|---|---|---|---|
+| busy timeout | 5000 ms | `--busy-timeout` | `[server] busy_timeout_ms` | ロック待機タイムアウト。超過時 503 BUSY |
+| WAL checkpoint interval | 1000 pages | — | `[storage] wal_checkpoint_pages`（未実装・Phase 11） | 自動チェックポイントのページ閾値 |
+| WAL checkpoint mode | `passive` | — | `[storage] wal_mode` | `passive` / `full` / `restart` |
+| synchronous | `NORMAL` | — | `[storage] synchronous`（未実装・Phase 11） | `OFF` は非サポート（I-4 違反） |
+
+### 13.3 チェックポイント挙動
+
+- SQLite のデフォルト自動チェックポイント（1000 pages）をそのまま使用（Phase 1）
+- Phase 1 では手動チェックポイントの API は提供しない
+- Phase 11（レプリケーション）時に WAL チェックポイント制御を再設計する
+
+### 13.4 busy timeout エラー
+
+WAL ロック待機が `busy_timeout_ms` を超えた場合：
+
+```json
+{
+  "error": {
+    "message": "database is busy",
+    "code": "STORAGE_BUSY"
+  }
+}
+```
+
+HTTP ステータス：503
+
+---
+
+## 8. 運用責務
+
+運用時のセキュリティ、デプロイ、ログ、TLS、管理ポート、証跡を固定する責務である。運用者が再現できない手順、保存されない証跡、秘匿値が残るログは完了条件として扱わない。
+
+### 8.1 セキュリティ責務
+
+### 10.1 JWT シークレット管理
+
+**優先順位：** `--auth-jwt-secret-file` > `--auth-jwt-secret` > 環境変数 `ADLAIRE_JWT_SECRET` > 設定ファイル `[auth] jwt_secret`
+
+| 方法 | 推奨度 | 用途 |
+|------|--------|------|
+| `--auth-jwt-secret-file <PATH>` | 本番推奨 | ファイルから読み込み。ファイルパーミッション 600 で保護 |
+| 環境変数 `ADLAIRE_JWT_SECRET` | 本番可 | コンテナ・systemd での秘密注入に適す |
+| `--auth-jwt-secret <VALUE>` | 開発のみ | プロセスリストに secret が露出するため本番不可 |
+| config.toml `jwt_secret` | 非推奨 | 設定ファイルが平文で読まれる。git に入れないこと |
+
+secret が未設定の場合は認証を完全に無効化する（起動時に `WARN` ログを出力する）。
+
+**シークレットの最小要件（実装で検証する）：**
+- 長さ 32 バイト以上
+- 未満の場合: 起動失敗 `Error: jwt_secret must be at least 32 bytes`
+
+**ローテーション方針（Phase 1 時点）：**
+- 旧 secret でのトークンは即時無効化される（新 secret で再発行が必要）
+- ローテーション手順: 新 secret で新トークン発行 → クライアント切り替え → 旧 secret 廃止
+- ゼロダウンタイムローテーション（複数 secret の同時受理）は Phase 1 対象外
+
+### 10.2 管理ポート（8081）のアクセス制御
+
+**デフォルト動作：**
 
 ```
-Step 1: シャットダウン開始
-  INFO {"msg":"shutdown signal received","signal":"SIGTERM"}
-
-Step 2: 新規リクエスト受付を停止
-  HTTP リスナーを閉じる。処理中のリクエストは最大 --shutdown-timeout（デフォルト 30s）待機する。
-  タイムアウト超過の場合は接続タスクを中断し、WARN ログを出力する。
-
-Step 3: DB クローズ
-  Arc<libsql::Database> の最後の参照が drop される（WAL チェックポイント + ファイルクローズ）
-  ※ Connection は execute() 呼び出しのたびに都度生成・即 drop するため、シャットダウン時点では保持していない
-
-Step 4: プロセスロック解放
-  {data-dir}/.lock の flock を解放する（プロセス終了で自動解放されるが明示的に行う）
-
-Step 5: 停止完了
-  INFO {"msg":"Adlaire DB stopped"}
-  exit code 0
+bind: 127.0.0.1:8081   ← localhost のみ待機（Phase 1 固定）
 ```
 
-### 8.3 異常終了・リカバリ
+Phase 1〜5 では管理ポートのバインドアドレスは `127.0.0.1` 固定であり、変更できない（`--admin-bind` フラグは Phase 6 以降で追加する）。
+外部ネットワークへの公開が必要な場合は Phase 6 以降でリバースプロキシ経由で行うこと。公開する場合は必ず `[admin] auth_token` を設定し、TLS ターミネーション（Nginx・Caddy 等）を前段に置くこと。
 
-| シナリオ | 挙動 |
-|----------|------|
-| クラッシュ（SIGKILL 等） | SQLite WAL がコミット済みデータを保護する。次回起動時に WAL ロールフォワードが自動実行される |
-| `.lock` ゾンビ残留 | flock はプロセス死亡で自動解放される。手動削除は不要 |
-| `databases.json` 破損 | Error: failed to parse databases.json で起動失敗。バックアップから復元する |
-| `tokens.json` 破損 | Error: failed to parse tokens.json で起動失敗。バックアップから復元するか空リストで初期化 |
-| data.db 破損 | SQLite の PRAGMA integrity_check を実行し異常なら起動失敗 |
-
-### 8.4 初期化フラグ優先順位まとめ
+**推奨構成（本番）：**
 
 ```
---auth-jwt-secret-file > --auth-jwt-secret > ADLAIRE_JWT_SECRET (env) > config.toml [auth] jwt_secret
---data               > config.toml [storage] data_dir  （config.toml に書かないことを推奨）
---port               > config.toml [server] port        (default: 8080)
---admin-port         > config.toml [server] admin_port  (default: 8081)
---log-level          > ADLAIRE_LOG_LEVEL (env) > config.toml [server] log_level  (default: info)
---busy-timeout       > config.toml [server] busy_timeout_ms  (default: 5000)
---admin-auth-token   > ADLAIRE_ADMIN_TOKEN (env) > config.toml [admin] auth_token
---shutdown-timeout   > config.toml [server] shutdown_timeout  (default: 30)
+Internet → Reverse Proxy (TLS) → :8080 (API)
+                                → :8081 (Admin) ← VPN / internal network only
+```
 
-# Phase 11 レプリケーション設定
---role                      standalone（デフォルト）     CLI のみ（TOML 対応なし）
---primary-port              8082（デフォルト）           CLI のみ（TOML 対応なし）
---primary-url               必須（--role replica 時のみ）CLI のみ（TOML 対応なし）
---replication-auth-token    なし（デフォルト）           CLI のみ（TOML 対応なし）
---replication-write-mode    async（デフォルト）          CLI + config.toml [replication] write_mode
+### 10.3 データディレクトリのファイルパーミッション
+
+起動時に `--data` で指定したディレクトリのパーミッションを検証・適用する。
+
+| パス | 推奨パーミッション | 内容 |
+|------|--------------------|------|
+| `{data-dir}/` | `700` | ルートディレクトリ |
+| `{data-dir}/meta/` | `700` | tokens.json・databases.json |
+| `{data-dir}/meta/tokens.json` | `600` | JWT secret と同等の機密 |
+| `{data-dir}/databases/{name}/` | `700` | DB ファイルディレクトリ |
+| `{data-dir}/databases/{name}/data.db` | `600` | SQLite 本体 |
+| `{data-dir}/databases/{name}/data.db-wal` | `600` | WAL ファイル |
+
+実装方針：
+- 起動時に `data-dir` が `700` 未満の場合は `WARN` ログを出力する（強制変更はしない）
+- 新規作成するファイル・ディレクトリは上記パーミッションで作成する
+
+### 10.4 TLS
+
+Phase 1〜7 では TLS をネイティブ実装しない。リバースプロキシ（Nginx・Caddy 等）による TLS ターミネーションを推奨する。
+
+```
+Client → [TLS] → Nginx/Caddy → [plain HTTP] → adlaire-db :8080
+```
+
+TLS ネイティブ対応は Phase 1〜19 では対象外とする。Phase 19 完了後に専用フェーズとして仕様化されるまで、server binary 内に TLS termination を実装してはならない。
+
+### 10.5 トークン情報の漏洩防止
+
+- `GET /admin/v1/tokens` および `GET /admin/v1/tokens/{id}` は JWT 文字列（`token` フィールド）を返さない（§6.4 参照）
+- JWT 文字列は `POST /admin/v1/tokens` の発行時レスポンスでのみ返す（以降は再取得不可）
+- `tokens.json` に JWT 文字列は保存しない（`id` と `access` と有効期限のみ保存）
+
+### 10.6 パストラバーサル対策
+
+DB 名・ファイルパス生成時に以下を必ず適用する：
+
+1. DB 名バリデーション（§6.4 の正規表現 `^[a-zA-Z0-9_-]{1,127}$`）
+2. `databases/{name}/` パス構築時に `Path::new(data_dir).join("databases").join(name)` を使用し、`..` を含む入力をバリデーションで事前排除する
+3. 予約語（`meta`・`admin`）のブロック
+
+---
+
+### 8.2 配布・デプロイ責務
+
+- シングルバイナリ（`adlaire-db`）として配布
+- ターゲット：Linux x86_64 / aarch64
+- 静的リンク（musl）によるランタイム依存ゼロは必須条件にしない。配布物は release-check で glibc 依存、動的ライブラリ依存、対象アーキテクチャを明示し、musl 対応は専用リリース仕様が追加されるまで実装対象外とする
+- 配布チャネル：GitHub Releases
+- リリース成果物には SHA-256 チェックサムを添付する
+
+---
+
+### 8.3 ログ責務
+
+### 12.1 フォーマット
+
+構造化 JSON Lines（1 行 1 イベント）。
+
+```json
+{"ts":"2024-01-01T00:00:00.123Z","level":"INFO","msg":"request completed","method":"POST","path":"/v2/pipeline","status":200,"duration_ms":3,"db":null,"error":null}
+```
+
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `ts` | string (RFC 3339, ms 精度) | ✓ | イベント発生時刻（UTC） |
+| `level` | string | ✓ | `TRACE` / `DEBUG` / `INFO` / `WARN` / `ERROR` |
+| `msg` | string | ✓ | 人間可読メッセージ |
+| `method` | string | HTTP リクエスト時 | HTTP メソッド |
+| `path` | string | HTTP リクエスト時 | リクエストパス |
+| `status` | integer | HTTP レスポンス時 | HTTP ステータスコード |
+| `duration_ms` | integer | HTTP リクエスト時 | 処理時間（ミリ秒） |
+| `db` | string \| null | マルチ DB 時 | 対象 DB 名（Phase 6〜） |
+| `error` | string \| null | エラー時 | エラーコードまたはメッセージ |
+
+### 12.2 ログレベル
+
+| レベル | 用途 |
+|---|---|
+| `ERROR` | リクエスト処理失敗・起動失敗・ファイル I/O エラー |
+| `WARN` | 認証失敗・存在しない DB へのアクセス・設定非推奨 |
+| `INFO` | 起動・停止・HTTP リクエスト完了（デフォルト） |
+| `DEBUG` | SQL 実行詳細・WAL チェックポイント |
+| `TRACE` | hrana プロトコル詳細・バイト列ダンプ |
+
+デフォルトレベル：`INFO`。`--log-level` フラグまたは環境変数 `ADLAIRE_LOG_LEVEL` で変更可。
+
+### 12.3 出力先
+
+- デフォルト：stdout（コンテナ・systemd との親和性）
+- `--log-file <PATH>` 指定時：ファイルへ書き出し（ローテーションは外部ツール任せ）（未実装）
+- stdout とファイルの同時出力は非サポート（Phase 1 時点）
+
+### 12.4 起動・停止ログ例
+
+```
+{"ts":"...","level":"INFO","msg":"Adlaire DB starting","version":"0.1.0","data_dir":"/var/lib/adlaire","port":8080}
+{"ts":"...","level":"INFO","msg":"Adlaire DB listening","addr":"0.0.0.0:8080","admin_addr":"127.0.0.1:8081"}
+{"ts":"...","level":"INFO","msg":"shutdown signal received"}
+{"ts":"...","level":"INFO","msg":"Adlaire DB stopped"}
 ```
 
 ---
 
-## 9. 実装フェーズ
+### 8.4 用語責務
+
+| 用語 | 定義 |
+|------|------|
+| Turso Cloud | libSQL のマネージドホスティングサービス。Adlaire DB の hrana プロトコル互換の参照実装 |
+| libSQL | SQLite フォーク。HTTP API・WAL レプリケーション等を追加した OSS DB ライブラリ |
+| sqld | libSQL プロジェクトのサーバーコンポーネント（参考情報）。Adlaire DB は sqld を使用せず、libsql crate（embedded モード）を使用する |
+| libsql crate | Rust の libSQL クライアントライブラリ（crates.io）。embedded SQLite モードで使用する |
+| hrana | Turso / libSQL のワイヤプロトコル名。hrana-http（HTTP版）と hrana-ws（WebSocket版）がある |
+| baton | hrana プロトコルにおけるセッション継続識別子 |
+
+---
+
+## 9. 実装統制責務
+
+Phase 実装判断、共通完了条件、DoR / DoD、テスト、PRレビュー、証跡、バグ修正ゼロ化を固定する責務である。実装者は「動く」ことではなく、仕様契約を証跡で満たすことを完了根拠にする。
+
+### 9.1 Phase 共通統制契約
 
 フェーズ単位で機能を積み上げる。内製化は Phase 19 から開始し、Phase 18 以前は production path の内部差し替えを行わない（§3.5.4）。
 
@@ -2312,7 +2556,8 @@ manifest がない Phase 実装 PR は、§9.1.9 の Step 2 `Contract mapping` �
 **manifest の固定フォーマット：**
 
 ```markdown
-## Phase {phase} Acceptance Manifest
+
+### Phase {phase} Acceptance Manifest
 
 | Field | Value |
 |-------|-------|
@@ -9572,6 +9817,11 @@ pub struct DbMetrics {
 
 **Phase 1〜19 の詳細：** `docs/spec/` に分割して管理する。HTML 生成時は以下の include を展開する。
 
+
+## 10. Phase仕様の責務
+
+Phase 1〜19 の詳細は `docs/spec/phase-01.md` 〜 `docs/spec/phase-19.md` に分割して管理する。各 Phase ファイルは、その Phase の実装契約、完了条件、禁止事項、証跡、review handoff を固定する正本である。HTML 生成時は以下の include をこの順序で展開する。
+
 <!-- include: docs/spec/phase-01.md -->
 <!-- include: docs/spec/phase-02.md -->
 <!-- include: docs/spec/phase-03.md -->
@@ -9591,211 +9841,12 @@ pub struct DbMetrics {
 <!-- include: docs/spec/phase-17.md -->
 <!-- include: docs/spec/phase-18.md -->
 <!-- include: docs/spec/phase-19.md -->
-## 10. セキュリティ考慮事項
 
-### 10.1 JWT シークレット管理
+## 11. 内製化責務
 
-**優先順位：** `--auth-jwt-secret-file` > `--auth-jwt-secret` > 環境変数 `ADLAIRE_JWT_SECRET` > 設定ファイル `[auth] jwt_secret`
+libSQL 内部コンポーネントの段階的内製化を固定する責務である。内製化は Turso Cloud / libSQL SDK 互換、rollback、shadow / active mode、performance baseline、Phase regression を満たす範囲でのみ進める。
 
-| 方法 | 推奨度 | 用途 |
-|------|--------|------|
-| `--auth-jwt-secret-file <PATH>` | 本番推奨 | ファイルから読み込み。ファイルパーミッション 600 で保護 |
-| 環境変数 `ADLAIRE_JWT_SECRET` | 本番可 | コンテナ・systemd での秘密注入に適す |
-| `--auth-jwt-secret <VALUE>` | 開発のみ | プロセスリストに secret が露出するため本番不可 |
-| config.toml `jwt_secret` | 非推奨 | 設定ファイルが平文で読まれる。git に入れないこと |
-
-secret が未設定の場合は認証を完全に無効化する（起動時に `WARN` ログを出力する）。
-
-**シークレットの最小要件（実装で検証する）：**
-- 長さ 32 バイト以上
-- 未満の場合: 起動失敗 `Error: jwt_secret must be at least 32 bytes`
-
-**ローテーション方針（Phase 1 時点）：**
-- 旧 secret でのトークンは即時無効化される（新 secret で再発行が必要）
-- ローテーション手順: 新 secret で新トークン発行 → クライアント切り替え → 旧 secret 廃止
-- ゼロダウンタイムローテーション（複数 secret の同時受理）は Phase 1 対象外
-
-### 10.2 管理ポート（8081）のアクセス制御
-
-**デフォルト動作：**
-
-```
-bind: 127.0.0.1:8081   ← localhost のみ待機（Phase 1 固定）
-```
-
-Phase 1〜5 では管理ポートのバインドアドレスは `127.0.0.1` 固定であり、変更できない（`--admin-bind` フラグは Phase 6 以降で追加する）。
-外部ネットワークへの公開が必要な場合は Phase 6 以降でリバースプロキシ経由で行うこと。公開する場合は必ず `[admin] auth_token` を設定し、TLS ターミネーション（Nginx・Caddy 等）を前段に置くこと。
-
-**推奨構成（本番）：**
-
-```
-Internet → Reverse Proxy (TLS) → :8080 (API)
-                                → :8081 (Admin) ← VPN / internal network only
-```
-
-### 10.3 データディレクトリのファイルパーミッション
-
-起動時に `--data` で指定したディレクトリのパーミッションを検証・適用する。
-
-| パス | 推奨パーミッション | 内容 |
-|------|--------------------|------|
-| `{data-dir}/` | `700` | ルートディレクトリ |
-| `{data-dir}/meta/` | `700` | tokens.json・databases.json |
-| `{data-dir}/meta/tokens.json` | `600` | JWT secret と同等の機密 |
-| `{data-dir}/databases/{name}/` | `700` | DB ファイルディレクトリ |
-| `{data-dir}/databases/{name}/data.db` | `600` | SQLite 本体 |
-| `{data-dir}/databases/{name}/data.db-wal` | `600` | WAL ファイル |
-
-実装方針：
-- 起動時に `data-dir` が `700` 未満の場合は `WARN` ログを出力する（強制変更はしない）
-- 新規作成するファイル・ディレクトリは上記パーミッションで作成する
-
-### 10.4 TLS
-
-Phase 1〜7 では TLS をネイティブ実装しない。リバースプロキシ（Nginx・Caddy 等）による TLS ターミネーションを推奨する。
-
-```
-Client → [TLS] → Nginx/Caddy → [plain HTTP] → adlaire-db :8080
-```
-
-TLS ネイティブ対応は Phase 1〜19 では対象外とする。Phase 19 完了後に専用フェーズとして仕様化されるまで、server binary 内に TLS termination を実装してはならない。
-
-### 10.5 トークン情報の漏洩防止
-
-- `GET /admin/v1/tokens` および `GET /admin/v1/tokens/{id}` は JWT 文字列（`token` フィールド）を返さない（§6.4 参照）
-- JWT 文字列は `POST /admin/v1/tokens` の発行時レスポンスでのみ返す（以降は再取得不可）
-- `tokens.json` に JWT 文字列は保存しない（`id` と `access` と有効期限のみ保存）
-
-### 10.6 パストラバーサル対策
-
-DB 名・ファイルパス生成時に以下を必ず適用する：
-
-1. DB 名バリデーション（§6.4 の正規表現 `^[a-zA-Z0-9_-]{1,127}$`）
-2. `databases/{name}/` パス構築時に `Path::new(data_dir).join("databases").join(name)` を使用し、`..` を含む入力をバリデーションで事前排除する
-3. 予約語（`meta`・`admin`）のブロック
-
----
-
-## 11. 配布・デプロイ
-
-- シングルバイナリ（`adlaire-db`）として配布
-- ターゲット：Linux x86_64 / aarch64
-- 静的リンク（musl）によるランタイム依存ゼロは必須条件にしない。配布物は release-check で glibc 依存、動的ライブラリ依存、対象アーキテクチャを明示し、musl 対応は専用リリース仕様が追加されるまで実装対象外とする
-- 配布チャネル：GitHub Releases
-- リリース成果物には SHA-256 チェックサムを添付する
-
----
-
-## 12. ログ仕様
-
-### 12.1 フォーマット
-
-構造化 JSON Lines（1 行 1 イベント）。
-
-```json
-{"ts":"2024-01-01T00:00:00.123Z","level":"INFO","msg":"request completed","method":"POST","path":"/v2/pipeline","status":200,"duration_ms":3,"db":null,"error":null}
-```
-
-| フィールド | 型 | 必須 | 説明 |
-|---|---|---|---|
-| `ts` | string (RFC 3339, ms 精度) | ✓ | イベント発生時刻（UTC） |
-| `level` | string | ✓ | `TRACE` / `DEBUG` / `INFO` / `WARN` / `ERROR` |
-| `msg` | string | ✓ | 人間可読メッセージ |
-| `method` | string | HTTP リクエスト時 | HTTP メソッド |
-| `path` | string | HTTP リクエスト時 | リクエストパス |
-| `status` | integer | HTTP レスポンス時 | HTTP ステータスコード |
-| `duration_ms` | integer | HTTP リクエスト時 | 処理時間（ミリ秒） |
-| `db` | string \| null | マルチ DB 時 | 対象 DB 名（Phase 6〜） |
-| `error` | string \| null | エラー時 | エラーコードまたはメッセージ |
-
-### 12.2 ログレベル
-
-| レベル | 用途 |
-|---|---|
-| `ERROR` | リクエスト処理失敗・起動失敗・ファイル I/O エラー |
-| `WARN` | 認証失敗・存在しない DB へのアクセス・設定非推奨 |
-| `INFO` | 起動・停止・HTTP リクエスト完了（デフォルト） |
-| `DEBUG` | SQL 実行詳細・WAL チェックポイント |
-| `TRACE` | hrana プロトコル詳細・バイト列ダンプ |
-
-デフォルトレベル：`INFO`。`--log-level` フラグまたは環境変数 `ADLAIRE_LOG_LEVEL` で変更可。
-
-### 12.3 出力先
-
-- デフォルト：stdout（コンテナ・systemd との親和性）
-- `--log-file <PATH>` 指定時：ファイルへ書き出し（ローテーションは外部ツール任せ）（未実装）
-- stdout とファイルの同時出力は非サポート（Phase 1 時点）
-
-### 12.4 起動・停止ログ例
-
-```
-{"ts":"...","level":"INFO","msg":"Adlaire DB starting","version":"0.1.0","data_dir":"/var/lib/adlaire","port":8080}
-{"ts":"...","level":"INFO","msg":"Adlaire DB listening","addr":"0.0.0.0:8080","admin_addr":"127.0.0.1:8081"}
-{"ts":"...","level":"INFO","msg":"shutdown signal received"}
-{"ts":"...","level":"INFO","msg":"Adlaire DB stopped"}
-```
-
----
-
-## 13. WAL 設定
-
-### 13.1 WAL モード
-
-すべての SQLite DB は起動時に WAL モードを有効化する。
-
-```sql
-PRAGMA journal_mode = WAL;
-```
-
-- WAL により複数の同時読み取りと 1 書き込みが並行可能
-- クラッシュ後の自動リカバリは SQLite が保証
-
-### 13.2 設定パラメータ
-
-| パラメータ | デフォルト | CLI フラグ | config.toml キー | 説明 |
-|---|---|---|---|---|
-| busy timeout | 5000 ms | `--busy-timeout` | `[server] busy_timeout_ms` | ロック待機タイムアウト。超過時 503 BUSY |
-| WAL checkpoint interval | 1000 pages | — | `[storage] wal_checkpoint_pages`（未実装・Phase 11） | 自動チェックポイントのページ閾値 |
-| WAL checkpoint mode | `passive` | — | `[storage] wal_mode` | `passive` / `full` / `restart` |
-| synchronous | `NORMAL` | — | `[storage] synchronous`（未実装・Phase 11） | `OFF` は非サポート（I-4 違反） |
-
-### 13.3 チェックポイント挙動
-
-- SQLite のデフォルト自動チェックポイント（1000 pages）をそのまま使用（Phase 1）
-- Phase 1 では手動チェックポイントの API は提供しない
-- Phase 11（レプリケーション）時に WAL チェックポイント制御を再設計する
-
-### 13.4 busy timeout エラー
-
-WAL ロック待機が `busy_timeout_ms` を超えた場合：
-
-```json
-{
-  "error": {
-    "message": "database is busy",
-    "code": "STORAGE_BUSY"
-  }
-}
-```
-
-HTTP ステータス：503
-
----
-
-## 付録：用語定義
-
-| 用語 | 定義 |
-|------|------|
-| Turso Cloud | libSQL のマネージドホスティングサービス。Adlaire DB の hrana プロトコル互換の参照実装 |
-| libSQL | SQLite フォーク。HTTP API・WAL レプリケーション等を追加した OSS DB ライブラリ |
-| sqld | libSQL プロジェクトのサーバーコンポーネント（参考情報）。Adlaire DB は sqld を使用せず、libsql crate（embedded モード）を使用する |
-| libsql crate | Rust の libSQL クライアントライブラリ（crates.io）。embedded SQLite モードで使用する |
-| hrana | Turso / libSQL のワイヤプロトコル名。hrana-http（HTTP版）と hrana-ws（WebSocket版）がある |
-| baton | hrana プロトコルにおけるセッション継続識別子 |
-
----
-
-## Phase 19 内製化方針
+### 11.1 Phase 19 内製化方針
 
 ### 基本方針
 - 内製化の単位はクレートとする
@@ -9832,7 +9883,11 @@ HTTP ステータス：503
 
 ---
 
-## テストカバレッジ方針
+## 12. テスト責務
+
+テストカバレッジ、CIゲート、証跡、未解決判断ゼロを固定する責務である。仕様上の Done は、対応するテストと artifact によって第三者が再現できる状態を指す。
+
+### 12.1 テストカバレッジ方針
 
 ### 原則
 
