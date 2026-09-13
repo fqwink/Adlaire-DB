@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.136
+**バージョン：** V.137
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.136` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.137` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -11299,6 +11299,7 @@ Phase 12 は、Phase 11 の primary replication API を replica が消費し、r
 | `secret_redaction_result` | response/log/artifact に replication token、JWT、SQL args、frame bytes が残らない scan |
 | `review_handoff_result` | 第三者が primary + 2 replica、primary down、restart、redirect、checksum mismatch を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 12 で replica read/catch-up/redirect が利用可能になるが archive/PITR/branch/HA は未提供である release note |
+| `precision_closure_result` | replica state、snapshot bootstrap、WAL catch-up、redirect、primary down、checksum mismatch、multi replica、Phase 1〜11 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
 
 #### 実装詳細
 
@@ -11550,6 +11551,7 @@ Phase 13 は、Phase 11〜12 で生成・消費される WAL frame を、PITR / 
 | `secret_redaction_result` | response/log/artifact に token、JWT、SQL args、frame bytes、backup body が残らない scan |
 | `review_handoff_result` | 第三者が archive write、restart check、corruption、retention cleanup、disabled mode を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 13 で WAL archive と retention が有効化されるが backup/restore/PITR/branch API は未提供である release note |
+| `precision_closure_result` | manifest schema、archive write、snapshot archive、retention cleanup、corruption detection、disabled mode、Phase 1〜12 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
 
 ---
 
@@ -11861,6 +11863,7 @@ Phase 14 は、Phase 13 の WAL archive / manifest を入力として backup、r
 | `secret_redaction_result` | response/log/artifact に token、JWT、SQL args、backup body、uploaded DB bytes が残らない scan |
 | `review_handoff_result` | 第三者が backup、restore rollback、PITR success/corrupt/range outside、startup recovery を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 14 で backup/restore/PITR が公開され、失敗時は rollback または restore-failed marker に収束する release note |
+| `precision_closure_result` | backup consistency、restore rollback、PITR replay、startup recovery、quota/block/auth precedence、Phase 1〜13 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
 
 ---
 
@@ -12114,6 +12117,7 @@ Phase 15 は、Phase 14 の backup/PITR 基盤を使い、source DB から独立
 | `secret_redaction_result` | response/log/artifact に token、JWT、SQL args、absolute path、raw branch request body が残らない scan |
 | `review_handoff_result` | 第三者が current/PITR branch、delete/recovery、restart、source delete denial、seed compatibility を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 15 で branch DB が独立 resource として利用可能になり、merge/diff/COW/extension は未提供である release note |
+| `precision_closure_result` | branch metadata、current/timestamp/frame create、delete recovery、routing isolation、seed compatibility、Phase 1〜14 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
 
 ---
 
@@ -12289,6 +12293,7 @@ Phase 16 は、事前配置済み SQLite `.so` extension を Admin API で登録
 | `secret_redaction_result` | response/log/artifact に token、JWT、SQL args、absolute path、env 展開値が残らない scan |
 | `review_handoff_result` | 第三者が register/load/delete/restart/path rejection/SQL rejection を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 16 で事前配置済み `.so` extension の登録/削除が可能になり、upload/Wasm/metrics/HA は未提供である release note |
+| `precision_closure_result` | extension manifest、allowlist、sha256、canonical path/symlink rejection、new connection load、SQL bypass rejection、Phase 1〜15 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
 
 ### Phase 17：メトリクス永続化・外部監視連携
 
@@ -12466,6 +12471,7 @@ Phase 17 は、Phase 10 の in-memory metrics を永続 counter と Prometheus t
 | `secret_redaction_result` | response/log/artifact に token、JWT、SQL args、raw path、absolute path が残らない scan |
 | `review_handoff_result` | 第三者が snapshot restore、Prometheus output、quota boundary、corrupt recovery、redaction を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 17 で永続 metrics と Prometheus text endpoint が利用可能になり、alerting/remote write/HA は未提供である release note |
+| `precision_closure_result` | metrics snapshot persistence、Prometheus format、counter/gauge restore、usage/quota boundary、label redaction、Phase 1〜16 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
 
 ### Phase 18：HA・自動フェイルオーバー
 
@@ -12629,6 +12635,7 @@ Phase 18 は、primary/replica 構成で single-leader HA を完成させる Pha
 | `secret_redaction_result` | response/log/artifact に HA token、JWT、SQL args、frame bytes が残らない scan |
 | `review_handoff_result` | 第三者が promote/demote/redirect/split-brain/restart/partition を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 18 で HA status/promote/demote と single-leader failover が利用可能になり、multi-primary/内製化は未提供である release note |
+| `precision_closure_result` | HA state、term monotonic、promote/demote、redirect/no leader、split-brain rejection、restart recovery、Phase 1〜17 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
 
 ### Phase 19：libSQL 内部コンポーネント段階的内製化
 
@@ -12764,7 +12771,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.136` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.137` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
@@ -12778,6 +12785,23 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 | `phase_boundary_result` | Phase 20 以降へ送った項目、Phase 19 で未実装の理由、production path 差分なし |
 | `review_handoff_result` | 第三者が config、shadow、active、rollback、SDK transcript を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 19 で内製 adapter 境界が利用可能になり、外部 API と既定挙動は変わらない release note |
+| `precision_closure_result` | config flags、shadow/active/rollback、adapter boundary、SDK transcript、performance/crash recovery、Phase 1〜18 regression の artifact path、reviewer 再現 command、未解決判断 0 件 |
+
+**Phase 12〜19 完全実装精度正規化契約：**
+
+Phase 12〜19 は data durability、recovery、operator action、replication/archive/restore/branch/extension/metrics/HA/internal adapter の境界を扱うため、Done 判定は artifact と再現 command を必須にする。実装者は「主要機能が動く」ことを完了根拠にしてはならない。各 Phase の Done receipt は、原子タスク、シナリオ、禁止事項、compatibility baseline、durability / recovery、rollback、secret redaction、review handoff、operator behavior delta、precision closure をすべて埋める。
+
+| 項目 | 固定仕様 | 完了不可条件 |
+|------|----------|--------------|
+| artifact path | Done receipt の pass/fail は artifact path または再現 command を必ず持つ | 口頭説明、PR description、スクリーンショットのみ |
+| regression chain | Phase 12 は Phase 1〜11、Phase 13 は Phase 1〜12、以後同様に直前 Phase までの regression をすべて通す | 直前 Phase regression skip、影響なし根拠なし |
+| compatibility baseline | Turso Cloud snapshot、libSQL SDK HTTP/WS transcript、hrana wire snapshot、Admin/Platform API snapshot のうち該当面を Done receipt に含める | curl smoke のみ、snapshot なし |
+| durability evidence | replication state、manifest、backup body、branch DB、extension manifest、metrics snapshot、HA state、adapter rollback は crash/restart/recovery artifact を持つ | restart 未検証、整合性証跡なし |
+| rollback and recovery | restore/branch/delete/promote/demote/internal active mode は失敗注入、rollback、startup recovery、operator action を固定する | 失敗時挙動未定義 |
+| secret redaction | response/stdout/stderr/log/artifact に JWT、Admin/Platform/replication/HA token、SQL args、frame bytes、backup body、absolute path secret が残らない scan を必須にする | scan なし、秘匿値混入 |
+| future boundary | Phase 12〜19 で未対象の archive/PITR/branch/extension/HA/内製化/multi-primary/SQL parser write path を完成扱いにしない | 未来 Phase の成功応答を Done に含める |
+| operator reproducibility | 第三者が clean checkout から command で primary/replica、archive、backup/PITR、branch、extension、metrics、HA、adapter rollback を再現できる handoff を必須にする | ローカル状態依存、手順欠落 |
+| bug-zero readiness | Done receipt に coverage gap、未解決判断、仕様未確定、既知 flaky が 0 件であることを明記する | 未解決判断を実装者判断へ先送り |
 
 ---
 
