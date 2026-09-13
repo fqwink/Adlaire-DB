@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.163
+**バージョン：** V.164
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.163` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.164` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -7179,6 +7179,20 @@ Phase packet、Done receipt、artifact manifest、reviewer reproduction、review
 
 `manifest_entry_id` と `reproduction_entry_id` の `{closure-field}` は `ambiguity-closure`、`failure-closure`、`review-handoff`、`na-closure`、`go-no-go`、`regression-inheritance`、`determinism`、`assertion-binding`、`negative-surface`、`evidence-integrity`、`operator-observability` のいずれかとする。別 Phase の Contract ID、別 Phase の artifact path、または `source_section` と `closure_field` の不一致を参照してはならない。
 
+**Phase receipt closure reference audit：**
+
+Phase 1〜19 の各 `precision_closure_result` は、§9.11.2 の canonical、manifest、reproduction、review algorithm、freeze、reconciliation、remediation、cross-reference ledger への準拠を同一文言で参照しなければならない。この audit は、個別 Phase の Done receipt が §9.11.2 の更新から取り残されることを防ぐための横断 gate である。
+
+| audit field | pass 条件 |
+|-------------|----------|
+| `phase_receipt_reference_count` | Phase 1〜19 の個別 Done receipt にある `precision_closure_result` のうち、§9.11.2 closure reference set を含む行が 19 件 |
+| `missing_phase_receipt_references` | §9.11.2 closure reference set を参照しない Phase 番号が 0 件 |
+| `extra_phase_receipt_references` | Phase 1〜19 個別 Done receipt 以外に、同じ closure reference set を誤って完了根拠として置いた箇所が 0 件 |
+| `mismatched_reference_text` | 19 件すべての §9.11.2 closure reference set 文言が同一である |
+| `phase_receipt_reference_audit_result` | 上記 4 field がすべて pass |
+
+§9.11.2 の canonical、manifest、reproduction、review algorithm、freeze、reconciliation、remediation、cross-reference ledger のいずれかを更新する PR は、同じ PR で Phase 1〜19 個別 Done receipt の `precision_closure_result` 行と本 audit を更新する。更新しない場合は merge 不可とする。
+
 **命名不一致時の判定：**
 
 | 状態 | 判定 |
@@ -7187,6 +7201,10 @@ Phase packet、Done receipt、artifact manifest、reviewer reproduction、review
 | artifact path に Contract ID が含まれない | Phase 未完了 |
 | `precision_closure_result` が `P{phase}-PRECISION-CLOSURE` を参照しない | Phase 未完了 |
 | `precision_closure_result` に §9.11.3〜§9.11.13 に対応する 11 個の closure field が 1 つでも欠ける | Phase 未完了 |
+| `phase_receipt_reference_count` が 19 ではない | Phase 未完了 |
+| `missing_phase_receipt_references`、`extra_phase_receipt_references`、`mismatched_reference_text` が 0 件でない | Phase 未完了 |
+| §9.11.2 の precision closure 契約を更新したのに Phase 1〜19 個別 Done receipt の `precision_closure_result` 行を同時更新しない | merge 不可 |
+| Phase ごとに §9.11.2 closure reference set の文言が揺れている | Phase 未完了 |
 | closure field 名、key 名、`source_section`、`contract_id` が標準テンプレートと一致しない | Phase 未完了 |
 | closure field の `artifact_path` が `tests/artifacts/phase-{phase}/P{phase}-PRECISION-CLOSURE/...` の標準形でない | Phase 未完了 |
 | closure field が pass でも artifact path、reviewer 再現 command、open count 0 のいずれかを示さない | merge 不可 |
@@ -13688,7 +13706,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.163` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.164` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
