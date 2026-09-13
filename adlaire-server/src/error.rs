@@ -18,6 +18,28 @@ pub enum AppError {
     TokenNotFound(String),
     #[error("database already exists: {0}")]
     DbAlreadyExists(String),
+    #[error("organization not found: {0}")]
+    OrgNotFound(String),
+    #[error("organization already exists: {0}")]
+    OrgAlreadyExists(String),
+    #[error("group not found: {0}")]
+    GroupNotFound(String),
+    #[error("group already exists: {0}")]
+    GroupAlreadyExists(String),
+    #[error("location not found: {0}")]
+    LocationNotFound(String),
+    #[error("location already exists: {0}")]
+    LocationAlreadyExists(String),
+    #[error("organization scope denied")]
+    OrgScopeDenied,
+    #[error("quota exceeded")]
+    QuotaExceeded,
+    #[error("usage unavailable")]
+    UsageUnavailable,
+    #[error("endpoint not found")]
+    EndpointNotFound,
+    #[error("method not allowed")]
+    MethodNotAllowed,
     #[error("invalid database name")]
     InvalidDbName,
     #[error("reserved database name")]
@@ -58,6 +80,17 @@ impl AppError {
             Self::DbNotFound(_)          => (StatusCode::NOT_FOUND,             "DB_NOT_FOUND"),
             Self::TokenNotFound(_)       => (StatusCode::NOT_FOUND,             "TOKEN_NOT_FOUND"),
             Self::DbAlreadyExists(_)     => (StatusCode::CONFLICT,              "DB_ALREADY_EXISTS"),
+            Self::OrgNotFound(_)         => (StatusCode::NOT_FOUND,             "ORG_NOT_FOUND"),
+            Self::OrgAlreadyExists(_)    => (StatusCode::CONFLICT,              "ORG_ALREADY_EXISTS"),
+            Self::GroupNotFound(_)       => (StatusCode::NOT_FOUND,             "GROUP_NOT_FOUND"),
+            Self::GroupAlreadyExists(_)  => (StatusCode::CONFLICT,              "GROUP_ALREADY_EXISTS"),
+            Self::LocationNotFound(_)    => (StatusCode::NOT_FOUND,             "LOCATION_NOT_FOUND"),
+            Self::LocationAlreadyExists(_) => (StatusCode::CONFLICT,            "LOCATION_ALREADY_EXISTS"),
+            Self::OrgScopeDenied         => (StatusCode::FORBIDDEN,             "ORG_SCOPE_DENIED"),
+            Self::QuotaExceeded          => (StatusCode::PAYMENT_REQUIRED,      "QUOTA_EXCEEDED"),
+            Self::UsageUnavailable       => (StatusCode::SERVICE_UNAVAILABLE,   "USAGE_UNAVAILABLE"),
+            Self::EndpointNotFound       => (StatusCode::NOT_FOUND,             "ENDPOINT_NOT_FOUND"),
+            Self::MethodNotAllowed       => (StatusCode::METHOD_NOT_ALLOWED,    "METHOD_NOT_ALLOWED"),
             Self::InvalidDbName          => (StatusCode::BAD_REQUEST,           "INVALID_DB_NAME"),
             Self::DbReservedName         => (StatusCode::BAD_REQUEST,           "DB_RESERVED_NAME"),
             Self::InvalidRequest         => (StatusCode::BAD_REQUEST,           "INVALID_REQUEST"),

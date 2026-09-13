@@ -12,6 +12,30 @@ pub struct DbInfo {
     pub name:       String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub size_bytes: u64,
+    #[serde(default = "default_scope")]
+    pub organization: String,
+    #[serde(default = "default_scope")]
+    pub group: String,
+    #[serde(default = "default_scope")]
+    pub location: String,
+    #[serde(default)]
+    pub delete_protection: bool,
+    #[serde(default)]
+    pub block_reads: bool,
+    #[serde(default)]
+    pub block_writes: bool,
+    #[serde(default = "default_allow_attach")]
+    pub allow_attach: bool,
+    #[serde(default)]
+    pub legacy_name: bool,
+}
+
+fn default_scope() -> String {
+    "default".to_string()
+}
+
+fn default_allow_attach() -> bool {
+    true
 }
 
 /// DB 名バリデーション（§6.4）
@@ -23,6 +47,22 @@ pub fn validate_db_name(name: &str) -> Result<(), AppError> {
     use regex::Regex;
     static RE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"^[a-zA-Z0-9_-]{1,127}$").unwrap()
+    });
+
+    if !RE.is_match(name) {
+        return Err(AppError::InvalidDbName);
+    }
+    if matches!(name, "meta" | "admin") || name.contains("___") {
+        return Err(AppError::DbReservedName);
+    }
+    Ok(())
+}
+
+pub fn validate_turso_db_name(name: &str) -> Result<(), AppError> {
+    use std::sync::LazyLock;
+    use regex::Regex;
+    static RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^[a-z0-9-]{1,64}$").unwrap()
     });
 
     if !RE.is_match(name) {
@@ -61,5 +101,17 @@ mod tests {
         for name in ["meta", "admin", "main___feature"] {
             assert!(matches!(validate_db_name(name), Err(AppError::DbReservedName)), "{name}");
         }
+    }
+
+    #[test]
+    fn validates_turso_db_names() {
+        for name in ["default", "tenant-1", "a123"] {
+            assert!(super::validate_turso_db_name(name).is_ok(), "{name}");
+        }
+        for name in ["Tenant", "tenant_1", ""] {
+            assert!(super::validate_turso_db_name(name).is_err(), "{name}");
+        }
+        let long_name = "a".repeat(65);
+        assert!(super::validate_turso_db_name(&long_name).is_err());
     }
 }

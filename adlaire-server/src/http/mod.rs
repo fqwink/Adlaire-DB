@@ -45,23 +45,22 @@ pub async fn admin_route(
     let started = Instant::now();
 
     if let Some(expected) = &state.config.admin_auth_token {
-        let provided = req
+        let authorization = req
             .headers()
             .get(::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "));
+            .and_then(|v| v.to_str().ok());
 
-        match provided {
-            Some(token) if token == expected.as_str() => {}
-            _ => {
-                let response = Ok(json_error(
-                    ::http::StatusCode::UNAUTHORIZED,
-                    "AUTH_REQUIRED",
-                    "unauthorized",
-                ));
-                log_request(method.as_str(), &path, started, &response);
-                return response;
-            }
+        let auth_error = match authorization {
+            Some(value) => match value.strip_prefix("Bearer ") {
+                Some(token) if token == expected.as_str() => None,
+                _ => Some(("AUTH_INVALID", "invalid or revoked token")),
+            },
+            None => Some(("AUTH_REQUIRED", "authentication required")),
+        };
+        if let Some((code, message)) = auth_error {
+            let response = Ok(json_error(::http::StatusCode::UNAUTHORIZED, code, message));
+            log_request(method.as_str(), &path, started, &response);
+            return response;
         }
     }
 
@@ -74,6 +73,41 @@ pub async fn admin_route(
         ("POST", "/admin/v1/tokens") => admin::tokens::create(req, state).await,
         ("GET", p) if is_token_path(p) => admin::tokens::get(req, state).await,
         ("DELETE", p) if is_token_path(p) => admin::tokens::revoke(req, state).await,
+        ("GET", "/admin/v1/organizations") => admin::organizations::list(req, state).await,
+        ("POST", "/admin/v1/organizations") => admin::organizations::create(req, state).await,
+        ("GET", p) if is_org_path(p) => admin::organizations::get(req, state).await,
+        ("GET", "/admin/v1/groups") => admin::groups::list(req, state).await,
+        ("POST", "/admin/v1/groups") => admin::groups::create(req, state).await,
+        ("GET", "/admin/v1/locations") => admin::locations::list(req, state).await,
+        ("POST", "/admin/v1/locations") => admin::locations::create(req, state).await,
+        ("GET", "/admin/v1/quotas") => admin::quotas::list(req, state).await,
+        ("PUT", p) if is_quota_path(p) => admin::quotas::put(req, state).await,
+        ("GET", "/admin/v1/usage") => admin::usage::list(req, state).await,
+        ("GET", "/v1/auth/validate") => admin::platform::auth_validate(req, state).await,
+        ("GET", "/v1/locations") => admin::platform::locations(req, state).await,
+        ("GET", "/v1/organizations") => admin::platform::organizations(req, state).await,
+        ("PATCH", p) if is_turso_org_path(p) => admin::platform::patch_organization(req, state).await,
+        ("GET", p) if is_turso_usage_path(p) => admin::platform::organization_usage(req, state).await,
+        ("GET", p) if is_turso_groups_path(p) => admin::platform::groups(req, state).await,
+        ("POST", p) if is_turso_groups_path(p) => admin::platform::create_group(req, state).await,
+        ("GET", p) if is_turso_group_path(p) => admin::platform::group(req, state).await,
+        ("PATCH", p) if is_turso_group_configuration_path(p) => admin::platform::patch_group_configuration(req, state).await,
+        ("POST", p) if is_turso_group_rotate_path(p) => admin::platform::rotate_ok(req, state).await,
+        ("POST", p) if is_turso_group_transfer_path(p) => admin::platform::unsupported(req, state).await,
+        ("GET" | "PATCH" | "DELETE", p) if is_turso_group_transfer_path(p) => admin::platform::unsupported_method(req, state).await,
+        ("GET", p) if is_turso_databases_path(p) => admin::platform::databases(req, state).await,
+        ("POST", p) if is_turso_databases_path(p) => admin::platform::create_database(req, state).await,
+        ("GET", p) if is_turso_database_path(p) => admin::platform::database(req, state).await,
+        ("DELETE", p) if is_turso_database_path(p) => admin::platform::delete_database(req, state).await,
+        ("PATCH", p) if is_turso_database_configuration_path(p) => admin::platform::patch_database_configuration(req, state).await,
+        ("POST", p) if is_turso_database_token_path(p) => admin::platform::create_database_token(req, state).await,
+        ("POST", p) if is_turso_database_rotate_path(p) => admin::platform::rotate_ok(req, state).await,
+        ("GET", p) if is_turso_database_stats_path(p) => admin::platform::unsupported(req, state).await,
+        ("POST" | "PATCH" | "DELETE", p) if is_turso_database_stats_path(p) => admin::platform::unsupported_method(req, state).await,
+        ("GET", p) if is_turso_unsupported_read_path(p) => admin::platform::unsupported(req, state).await,
+        ("POST" | "PATCH" | "DELETE", p) if is_turso_unsupported_write_path(p) => admin::platform::unsupported_method(req, state).await,
+        ("POST", "/v1/upload") => admin::platform::unsupported(req, state).await,
+        ("GET" | "PATCH" | "DELETE", "/v1/upload") => admin::platform::unsupported_method(req, state).await,
         ("GET", "/admin/v1/metrics") => admin::metrics::get(req, state).await,
         ("GET", p) if p.ends_with("/backup") => admin::backup::backup(req, state).await,
         ("POST", p) if p.ends_with("/restore") => admin::backup::restore(req, state).await,
@@ -81,6 +115,7 @@ pub async fn admin_route(
         ("GET", p) if p.ends_with("/branches") => admin::branches::list(req, state).await,
         ("POST", p) if p.ends_with("/branches") => admin::branches::create(req, state).await,
         ("DELETE", p) if p.contains("/branches/") => admin::branches::delete(req, state).await,
+        _ if path.starts_with("/v1/") => Ok(crate::error::AppError::EndpointNotFound.into_response()),
         _ => Ok(not_found()),
     };
 
@@ -104,6 +139,94 @@ fn is_db_path(path: &str) -> bool {
 fn is_token_path(path: &str) -> bool {
     let segs: Vec<_> = path.trim_start_matches('/').split('/').collect();
     matches!(segs.as_slice(), ["admin", "v1", "tokens", _])
+}
+
+fn is_org_path(path: &str) -> bool {
+    let segs: Vec<_> = path.trim_start_matches('/').split('/').collect();
+    matches!(segs.as_slice(), ["admin", "v1", "organizations", _])
+}
+
+fn is_quota_path(path: &str) -> bool {
+    let segs: Vec<_> = path.trim_start_matches('/').split('/').collect();
+    matches!(segs.as_slice(), ["admin", "v1", "quotas", _])
+}
+
+fn is_turso_org_path(path: &str) -> bool {
+    matches!(segments(path).as_slice(), ["v1", "organizations", _])
+}
+
+fn is_turso_usage_path(path: &str) -> bool {
+    matches!(segments(path).as_slice(), ["v1", "organizations", _, "usage"])
+}
+
+fn is_turso_groups_path(path: &str) -> bool {
+    matches!(segments(path).as_slice(), ["v1", "organizations", _, "groups"])
+}
+
+fn is_turso_group_path(path: &str) -> bool {
+    matches!(segments(path).as_slice(), ["v1", "organizations", _, "groups", _])
+}
+
+fn is_turso_group_configuration_path(path: &str) -> bool {
+    matches!(segments(path).as_slice(), ["v1", "organizations", _, "groups", _, "configuration"])
+}
+
+fn is_turso_group_rotate_path(path: &str) -> bool {
+    matches!(segments(path).as_slice(), ["v1", "organizations", _, "groups", _, "auth", "rotate"])
+}
+
+fn is_turso_group_transfer_path(path: &str) -> bool {
+    matches!(segments(path).as_slice(), ["v1", "organizations", _, "groups", _, "transfer"])
+}
+
+fn is_turso_databases_path(path: &str) -> bool {
+    matches!(segments(path).as_slice(), ["v1", "organizations", _, "databases"])
+}
+
+fn is_turso_database_path(path: &str) -> bool {
+    matches!(segments(path).as_slice(), ["v1", "organizations", _, "databases", _])
+}
+
+fn is_turso_database_configuration_path(path: &str) -> bool {
+    matches!(segments(path).as_slice(), ["v1", "organizations", _, "databases", _, "configuration"])
+}
+
+fn is_turso_database_token_path(path: &str) -> bool {
+    matches!(segments(path).as_slice(), ["v1", "organizations", _, "databases", _, "auth", "tokens"])
+}
+
+fn is_turso_database_rotate_path(path: &str) -> bool {
+    matches!(segments(path).as_slice(), ["v1", "organizations", _, "databases", _, "auth", "rotate"])
+}
+
+fn is_turso_database_stats_path(path: &str) -> bool {
+    matches!(segments(path).as_slice(), ["v1", "organizations", _, "databases", _, "stats"])
+}
+
+fn is_turso_unsupported_read_path(path: &str) -> bool {
+    let segs = segments(path);
+    matches!(
+        segs.as_slice(),
+        ["v1", "organizations", _, "members"]
+            | ["v1", "organizations", _, "invites"]
+            | ["v1", "organizations", _, "plans"]
+            | ["v1", "organizations", _, "billing"]
+            | ["v1", "organizations", _, "overages"]
+            | ["v1", "organizations", _, "audit-logs"]
+    )
+}
+
+fn is_turso_unsupported_write_path(path: &str) -> bool {
+    let segs = segments(path);
+    matches!(
+        segs.as_slice(),
+        ["v1", "organizations", _, "plans"]
+            | ["v1", "organizations", _, "audit-logs"]
+    )
+}
+
+fn segments(path: &str) -> Vec<&str> {
+    path.trim_start_matches('/').split('/').collect()
 }
 
 pub fn json_ok<T: serde::Serialize>(body: &T) -> HttpResponse {
