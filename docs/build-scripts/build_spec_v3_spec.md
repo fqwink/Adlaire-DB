@@ -11,11 +11,11 @@
 
 ## 1. 概要
 
-`build_spec_v3.py` は、Adlaire DB 仕様憲章の Markdown ソースを単一の自己完結型 HTML ドキュメントへ変換する Python スクリプトである。外部ライブラリに依存せず、標準ライブラリ（`re`、`html`、`unicodedata`、`pathlib`、`typing`）のみで動作する。
+`build_spec_v3.py` は、Adlaire DB 仕様正本の Markdown ソースを単一の自己完結型 HTML ドキュメントへ変換する Python スクリプトである。外部ライブラリに依存せず、標準ライブラリ（`re`、`html`、`unicodedata`、`pathlib`、`typing`）のみで動作する。
 
 ### 1.1 目的
 
-- 仕様憲章と Phase 分割ファイルを、快適に閲覧できる単一 HTML ドキュメントサイトへ変換する
+- 仕様正本と Phase 分割ファイルを、快適に閲覧できる単一 HTML ドキュメントサイトへ変換する
 - CSS・JS をすべてインラインに埋め込み、単一 HTML ファイルとして配布可能にする
 - Adlaire Design System（ADS）のトークンを採用し、一貫したデザイン言語を維持する
 
@@ -35,7 +35,7 @@
 |------|------|
 | Python バージョン | 3.9 以上（型ヒント `dict[str, int]`、`list[tuple]` を使用） |
 | 外部依存 | **なし** — `re`・`html`・`unicodedata`・`pathlib`・`typing` の標準ライブラリのみ使用。`pip install` 不要 |
-| 入力 | UTF-8 エンコードの Markdown ファイル。`docs/spec/project-charter.md` から `docs/spec/auth.md`、`docs/spec/api.md`、`docs/spec/testing.md`、`docs/spec/phase-*.md` を include 展開する |
+| 入力 | UTF-8 エンコードの Markdown ファイル。`docs/spec/index.md` から `docs/spec/auth.md`、`docs/spec/api.md`、`docs/spec/testing.md`、`docs/spec/phase-*.md` を include 展開する |
 | 出力 | UTF-8 エンコードの単一 HTML ファイル |
 
 ---
@@ -45,13 +45,13 @@
 スクリプト冒頭の定数で入出力パスを管理する。
 
 ```python
-SRC = "docs/spec/project-charter.md"      # 入力 Markdown 仕様憲章
+SRC = "docs/spec/index.md"      # 入力 Markdown 仕様正本
 OUT = "docs/Adlaire-db-spec.html"    # 出力 HTML
 ```
 
 別の環境で実行する場合はこの 2 変数を書き換える。
 
-仕様憲章内の `<!-- include: docs/spec/auth.md -->` や `<!-- include: docs/spec/phase-01.md -->` 形式の行は、HTML 生成前に指定 Markdown ファイルの本文へ展開する。include はリポジトリルートからの相対パスで記述する。
+仕様正本内の `<!-- include: docs/spec/auth.md -->` や `<!-- include: docs/spec/phase-01.md -->` 形式の行は、HTML 生成前に指定 Markdown ファイルの本文へ展開する。include はリポジトリルートからの相対パスで記述する。
 
 ---
 
@@ -407,9 +407,9 @@ OUT  = "path/to/output.html"
 HTML テンプレートの `PAGE` f-string 内を直接編集する。
 
 ```python
-<title>Adlaire DB 仕様憲章</title>          # ← ブラウザタブタイトル
+<title>Adlaire DB 仕様正本</title>          # ← ブラウザタブタイトル
 <span class="hdr-title">Adlaire DB</span>  # ← ヘッダー表示名
-<span class="hdr-ver">V.211</span>         # ← バージョンバッジ
+<span class="hdr-ver">V.212</span>         # ← バージョンバッジ
 ```
 
 ### 8.4 TOC の対象見出しレベル

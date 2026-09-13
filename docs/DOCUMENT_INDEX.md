@@ -2,8 +2,10 @@
 
 ## Status
 
-- `docs/spec/project-charter.md`, `docs/spec/auth.md`, `docs/spec/api.md`, `docs/spec/testing.md`, and `docs/spec/phase-*.md` are the specification source-of-truth set.
-- `docs/spec/project-charter.md` is the project charter and specification entry point.
+- `docs/spec/index.md`, `docs/spec/auth.md`, `docs/spec/api.md`, `docs/spec/testing.md`, and `docs/spec/phase-*.md` are the specification source-of-truth set.
+- `docs/spec/index.md` is the specification entry point.
+- `docs/PROJECT_CHARTER.md` is the project charter and is not a specification source of truth.
+- `docs/POLICY.md` is the policy document and is not a specification source of truth.
 - Phase 1 through Phase 19 are split under `docs/spec/`.
 - Files outside the specification source-of-truth set are supporting documents.
 - If this index conflicts with the specification source-of-truth set, the specification source-of-truth set takes precedence.
@@ -19,11 +21,13 @@ accident.
 
 | Path | Role | Authority |
 |------|------|-----------|
-| `docs/spec/project-charter.md` | Project charter and specification entry point | Source of truth |
+| `docs/spec/index.md` | Project charter and specification entry point | Source of truth |
 | `docs/spec/auth.md` | Authentication and authorization specification | Source of truth |
 | `docs/spec/api.md` | API contract specification | Source of truth |
 | `docs/spec/testing.md` | Testing specification | Source of truth |
 | `docs/spec/phase-01.md` - `docs/spec/phase-19.md` | Phase-specific implementation contracts | Source of truth |
+| `docs/PROJECT_CHARTER.md` | Project purpose, value, direction, and priorities | Supporting document |
+| `docs/POLICY.md` | Decision and operation policies before specification conversion | Supporting document |
 | `AGENTS.md` | Repository work rules for agents | Work rule |
 | `docs/DOCUMENT_INDEX.md` | Documentation index and split-management reference | Supporting document |
 
@@ -39,11 +43,11 @@ accident.
 
 | Candidate Area | Current Source | Notes |
 |----------------|----------------|-------|
-| Product and compatibility responsibilities | `docs/spec/project-charter.md` sections 0-3 | Keep project authority clear |
-| Runtime, auth, and API responsibilities | `docs/spec/project-charter.md` section 4, `docs/spec/auth.md`, and `docs/spec/api.md` | Keep runtime contracts linked |
-| Data protection and operations responsibilities | `docs/spec/project-charter.md` sections 7-8 | Preserve operational safety |
-| Implementation and phase responsibilities | `docs/spec/project-charter.md` sections 9-10 and `docs/spec/phase-*.md` | Phase detail split is active |
-| Internalization and test responsibilities | `docs/spec/project-charter.md` section 11 and `docs/spec/testing.md` | Keep future testing and evidence gates clear |
+| Product and compatibility responsibilities | `docs/spec/index.md` sections 0-3 | Keep project authority clear |
+| Runtime, auth, and API responsibilities | `docs/spec/index.md` section 4, `docs/spec/auth.md`, and `docs/spec/api.md` | Keep runtime contracts linked |
+| Data protection and operations responsibilities | `docs/spec/index.md` sections 7-8 | Preserve operational safety |
+| Implementation and phase responsibilities | `docs/spec/index.md` sections 9-10 and `docs/spec/phase-*.md` | Phase detail split is active |
+| Internalization and test responsibilities | `docs/spec/index.md` section 11 and `docs/spec/testing.md` | Keep future testing and evidence gates clear |
 
 ## Non-Goals
 
