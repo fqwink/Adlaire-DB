@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.90
+**バージョン：** V.91
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.90` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.91` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.90` の次は `V.91` とし、以後 `V.92`、`V.93` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.91` の次は `V.92` とし、以後 `V.93`、`V.94` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -3696,6 +3696,108 @@ SQL execution に関係する仕様変更は、§6.2、§6.3、§7.3、§9.1.16�
 
 cross-reference に関係する仕様変更は、変更した節だけでなく、参照元、参照先、Phase 一覧、Phase 完了ゲート、test matrix、Definition of Ready / Done、manifest、evidence artifact を同時確認する。相互参照の機械確認が未整備の場合でも、PR 内で上記 self-check を完了し、未確認項目を `N/A` にしてはならない。
 
+#### 9.1.30 Backup / restore / PITR / rollback 固定契約
+
+backup、restore、PITR、branch seed、WAL archive replay に関係する Phase は、元 DB を破壊しない commit / rollback 境界、排他 lock、temporary layout、検証順序、失敗 marker、recovery evidence を実装開始前に固定しなければならない。破壊的操作は「成功応答を返した時点で、再起動後も新状態が一貫している」または「失敗応答後に旧状態へ戻っている」のどちらかだけを許可する。
+
+**backup 契約：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| snapshot | SQLite Online Backup API 相当の一貫 snapshot を返す。copy 中の filesystem 直読みは禁止 |
+| concurrent write | backup 中の通常 write はブロックしない。backup snapshot に含まれるかどうかは snapshot 開始時点で固定する |
+| response header | `Content-Type: application/octet-stream`、`Content-Disposition: attachment; filename="{db}.db"` |
+| stream failure | client 切断時は backup を中断し、partial response を成功扱いにしない。DB 状態は変更しない |
+| block / quota | `block_reads=true` は backup download を `403 PERMISSION_DENIED`。quota 超過中でも backup は許可 |
+| redaction | backup body、SQLite page、absolute path は log / artifact に出さない。size、checksum、duration だけ許可 |
+
+**restore / PITR 状態遷移：**
+
+| 状態 | 必須条件 | 次状態 |
+|------|----------|--------|
+| `prepared` | request validation、auth、scope、quota/block 事前判定、exclusive lock 取得が完了 | `uploaded` または `replaying` |
+| `uploaded` | upload body を temp に保存し fsync 済み | `verifying` |
+| `replaying` | PITR snapshot と WAL frame を temp DB へ replay 中 | `verifying` |
+| `verifying` | `PRAGMA integrity_check`、checksum、schema 互換確認を実行 | `committing` または `rolled_back` |
+| `committing` | runtime DB close、old 退避、new rename、directory fsync、DB reopen を順に実行 | `committed` または `rolled_back` |
+| `committed` | success response 可能。`204 No Content` 以外を返さない | terminal |
+| `rolled_back` | old DB を復元し runtime DB reopen 済み | terminal |
+| `failed_unrecoverable` | old DB 復元不能。`restore-failed.json` を fsync 済み | 起動失敗 / operator 対応 |
+
+**temp layout / marker：**
+
+| Path | 内容 |
+|------|------|
+| `{data-dir}/databases/{db}/restore-{request_id}/upload.db` | restore upload body。backup body を log に出さない |
+| `{data-dir}/databases/{db}/restore-{request_id}/verified.db` | integrity_check 済み commit 候補 |
+| `{data-dir}/databases/{db}/restore-{request_id}/old/data.db` | rollback 用旧 DB |
+| `{data-dir}/databases/{db}/restore-{request_id}/restore-state.json` | state、request_id、target、started_at、phase、checksums |
+| `{data-dir}/meta/restore-failed.json` | unrecoverable failure marker。存在する場合は対象 DB を起動時に open しない |
+
+temp directory は data-dir 配下だけに作成する。request_id は §9.1.17 の秘匿規則に従い、path、token、SQL、user input body を含めない。cleanup は `committed` または `rolled_back` が fsync 済みであることを確認してから行い、cleanup 失敗は WARN として次回起動時に再試行する。
+
+**restore / PITR request validation：**
+
+| 項目 | 固定仕様 |
+|------|----------|
+| restore body | SQLite DB file binary。body size は設定値 `restore_max_bytes` が未定義の間、既存 DB size の 2 倍または 1 GiB の小さい方を上限 |
+| PITR selector | `timestamp` または `frame_no` のどちらか 1 つだけ。両方あり、両方なし、型不正は `INVALID_REQUEST` |
+| PITR disabled | `wal_retention_days = 0` または archive 未初期化は `503 PITR_NOT_ENABLED` |
+| frame lookup | timestamp は manifest の frame timestamp へ決定的に解決する。同値境界は target 以下の最大 frame |
+| checksum | snapshot と WAL frame は replay 前に checksum 検証。不一致は `RESTORE_FRAME_CORRUPT` |
+| missing frame | target までの連続 frame が欠ける場合は `FRAME_NOT_FOUND` |
+| integrity | replay 後または upload 後の DB は `PRAGMA integrity_check` が `ok` の場合だけ commit |
+
+**拒否条件 precedence：**
+
+| 順位 | 条件 | 失敗時 |
+|------|------|--------|
+| 1 | request / body / selector validation | `400 INVALID_REQUEST` または `413 PAYLOAD_TOO_LARGE` |
+| 2 | auth / admin scope | `AUTH_REQUIRED`、`AUTH_INVALID`、`PERMISSION_DENIED` |
+| 3 | DB existence / identity validation | `DB_NOT_FOUND`、`INVALID_DB_NAME` |
+| 4 | `delete_protection=true` | `403 ORG_SCOPE_DENIED` |
+| 5 | `block_reads=true` for backup | `403 PERMISSION_DENIED` |
+| 6 | `block_writes=true` for restore / PITR | `403 PERMISSION_DENIED` |
+| 7 | quota after restore/PITR candidate size calculation | `402 QUOTA_EXCEEDED` |
+| 8 | restore lock / DB busy / shutdown | `503 STORAGE_BUSY` |
+| 9 | PITR archive / checksum / integrity | `PITR_NOT_ENABLED`、`FRAME_NOT_FOUND`、`RESTORE_FRAME_CORRUPT`、`RESTORE_INTEGRITY_FAILED` |
+
+**shutdown / restart recovery：**
+
+| 状態 | 起動時挙動 |
+|------|------------|
+| temp directory exists, no committed marker | old DB がある場合は rollback して起動。old DB がなければ起動失敗 |
+| `committing` marker exists | old/new の実ファイル状態を検査し、どちらか一方へ決定的に収束させる。silent success 禁止 |
+| `committed` marker exists, cleanup 未完了 | DB を通常 open し、temp cleanup を WARN 付きで再試行 |
+| `rolled_back` marker exists, cleanup 未完了 | old DB を通常 open し、temp cleanup を WARN 付きで再試行 |
+| `restore-failed.json` exists | 対象 DB を open せず、health / admin detail で degraded を示す。operator が marker を解消するまで write 禁止 |
+
+**必須 evidence：**
+
+| Evidence | 必須内容 |
+|----------|----------|
+| backup consistency artifact | backup 中 write、snapshot integrity、response header、client disconnect |
+| restore rollback fixture | invalid upload、commit 前失敗、commit 中失敗、DB reopen 失敗、old 復元 |
+| PITR replay fixture | timestamp selector、frame_no selector、missing frame、checksum corrupt、retention disabled |
+| lock matrix | restore 中 read/write、backup 中 write、shutdown 中 restore、concurrent restore |
+| precedence matrix | auth、delete_protection、block_reads、block_writes、quota、storage busy の優先順位 |
+| recovery log | restart recovery、cleanup retry、unrecoverable marker、operator action |
+| redaction snapshot | backup body、uploaded DB、WAL frame bytes、absolute path、token が出ないこと |
+
+**禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| 元 DB を直接上書きしてから検証する | merge 不可 |
+| integrity_check 前に runtime DB として公開する | merge 不可 |
+| rollback 不能なのに 2xx success を返す | merge 不可 |
+| PITR checksum 不一致 frame を skip して続行する | merge 不可 |
+| restore 中 write を受け付ける | merge 不可 |
+| backup / upload body を log / artifact に残す | merge 不可 |
+| `restore-failed.json` を無視して起動する | merge 不可 |
+
+backup / restore / PITR に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§9.1.21、§9.1.22、§9.1.24、§9.1.29、§9.6、§9.14、Phase 13 / 14 / 15 詳細節、manifest の Endpoint / Persistence / Security / Regression map、backup consistency artifact、restore rollback fixture、PITR replay fixture、recovery log を同時更新する。正常系だけが通っても、rollback、restart recovery、checksum、lock、quota/block precedence、redaction が固定されていない場合は Phase 完了扱いにしない。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -4333,6 +4435,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Error code | §9.1.22 に従い、失敗条件ごとの `code`、status、wire surface、retry、client action、precedence が §7.3 / §9.7 に存在する | 先に error code と retry 契約を追加する |
 | 永続化 | §9.1.21 / §9.1.26 に従い、ファイル名、schema、atomic update、fsync、directory sync、rollback、破損時挙動、path normalization、recovery evidence が §9.6 に明記されている | 書き込み処理を実装しない |
 | 認証/認可 | §9.1.18 に従い、必要 token、scope、ro/rw、org/group、quota、block policy、拒否条件 precedence が明記されている | success response を返す API を公開しない |
+| Backup / restore / PITR | Phase 13〜15 の backup、restore、PITR、branch seed は §9.1.30 に従い、temp layout、lock、commit/rollback、checksum、quota/block precedence、recovery marker、redaction が固定されている | 破壊的 API を公開しない |
 | ログ/秘匿 | §9.1.17、§12、§9.14 に従い、出力 field、request id、audit 相当記録、秘匿対象、redaction evidence が明記されている | request/SQL/token をログに出す実装を入れない |
 | 並行性 / job lifecycle | §9.1.16 / §9.1.25 / §9.1.28 に従い、同時 request、resource lock、idempotency、shutdown、transaction、SQL execution、long-running operation の扱いが定義されている | 並行実行で状態を変更する処理を入れない |
 | 後方互換 / Turso 追従 | §9.1.23 に従い、既存 endpoint/schema/config への影響、Turso 差分分類、SDK 影響、migration path が明記されている | 既存契約を変更しない |
@@ -8672,6 +8775,8 @@ impl Manifest {
 - PITR API：`POST /admin/v1/databases/{name}/restore/point-in-time`
 
 **Phase 14 restore 固定契約：**
+
+Phase 14 の backup、restore、PITR、rollback、restart recovery、redaction は §9.1.30 を正とする。下表は Phase 14 固有の endpoint 入口であり、§9.1.30 と衝突する場合は同じ PR で解消してから実装する。
 
 | 項目 | 固定仕様 |
 |------|----------|
