@@ -106,6 +106,69 @@ pub fn append_token(data_dir: &Path, record: TokenRecord) -> anyhow::Result<()> 
     save_tokens(data_dir, &meta)
 }
 
+pub fn revoke_database_tokens(data_dir: &Path, database: &str) -> anyhow::Result<usize> {
+    let mut meta = load_tokens(data_dir)?;
+    let now = Utc::now();
+    let mut revoked = 0;
+    for token in &mut meta.tokens {
+        if token.platform_token || token.revoked {
+            continue;
+        }
+        let database_matches = token.database.as_deref() == Some(database)
+            || token
+                .dbs
+                .as_ref()
+                .map(|dbs| dbs.contains_key(database))
+                .unwrap_or(false);
+        if database_matches {
+            token.revoked = true;
+            token.revoked_at = Some(now);
+            revoked += 1;
+        }
+    }
+    if revoked > 0 {
+        save_tokens(data_dir, &meta)?;
+    }
+    Ok(revoked)
+}
+
+pub fn revoke_group_tokens(
+    data_dir: &Path,
+    organization: &str,
+    group: &str,
+    databases: &[String],
+) -> anyhow::Result<usize> {
+    let mut meta = load_tokens(data_dir)?;
+    let now = Utc::now();
+    let mut revoked = 0;
+    for token in &mut meta.tokens {
+        if token.platform_token || token.revoked {
+            continue;
+        }
+        let scoped_to_group = token.organization_scope.as_deref() == Some(organization)
+            && token.group_scope.as_deref() == Some(group);
+        let scoped_to_group_database = token
+            .database
+            .as_ref()
+            .map(|database| databases.iter().any(|item| item == database))
+            .unwrap_or(false)
+            || token
+                .dbs
+                .as_ref()
+                .map(|dbs| databases.iter().any(|database| dbs.contains_key(database)))
+                .unwrap_or(false);
+        if scoped_to_group || scoped_to_group_database {
+            token.revoked = true;
+            token.revoked_at = Some(now);
+            revoked += 1;
+        }
+    }
+    if revoked > 0 {
+        save_tokens(data_dir, &meta)?;
+    }
+    Ok(revoked)
+}
+
 pub fn ensure_phase8_token_metadata(data_dir: &Path) -> anyhow::Result<()> {
     let meta = load_tokens(data_dir)?;
     save_tokens(data_dir, &meta)

@@ -1,0 +1,1 @@
+{"status":200,"content_type":"application/json","body":{"group":{"delete_protection":false,"locations":["default"],"name":"app","primary":"default","uuid":"grp_<uuid>","version":"adlaire-V.205"}}}
