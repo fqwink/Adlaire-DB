@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.156
+**バージョン：** V.157
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.156` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.157` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -7059,6 +7059,25 @@ canonical object は Done receipt 本文にそのまま貼れる Markdown table 
 
 `content_hash` の対象は正規化済み artifact 本文だけとする。local absolute path、timestamp、hostname、username、非決定的 temporary path、実行順序で変わる ID は hash 対象から除外し、必要な場合は正規化 rule を artifact 内に記録する。`secret_scan_result` を pass にするには、scan command、対象 path、検出 0 件、redaction policy を manifest entry に残さなければならない。
 
+**precision closure reviewer reproduction schema：**
+
+`reviewer_reproduction` は 11 closure field と 1:1 で対応する entry を持つ。各 entry は以下の key を必ず持ち、artifact と hash の両方を同じ command または連続 command で検証できなければならない。
+
+| key | 必須値 |
+|-----|--------|
+| `field` | 11 closure field のいずれか。`artifact_manifest.field` と一致 |
+| `reviewer_command` | reviewer が artifact existence、content hash、secret scan result を再検証できる command |
+| `working_directory` | repo root 相対または `repo-root`。local absolute path は不可 |
+| `environment_profile` | `ci`、`release-check`、`local-docker` のいずれか |
+| `expected_exit_code` | `0` |
+| `expected_artifact_path` | `artifact_manifest.artifact_path` と完全一致 |
+| `expected_hash_algorithm` | `sha256` |
+| `expected_content_hash` | `artifact_manifest.content_hash` と完全一致 |
+| `timeout_seconds` | 正の整数。未指定、`0`、無制限は不可 |
+| `failure_classification` | `not_run`、`command_failed`、`artifact_missing`、`hash_mismatch`、`secret_scan_failed`、`environment_gap`、`spec_gap` のいずれか |
+
+`environment_profile` が `ci`、`release-check`、`local-docker` 以外の場合、その reproduction entry は無効とする。`failure_classification` は失敗時の分類であり、`summary_status: pass` の場合は全 entry が実行済みで、`failure_classification` に `not_run` または `environment_gap` を含んではならない。
+
 **precision_closure_result review algorithm：**
 
 レビュアーと CI は以下の順序で `precision_closure_result` を評価する。各 step は fail fast とし、失敗した step より後続の step を pass 扱いしてはならない。`summary_status` は最後の step でのみ評価し、途中 step の代替証跡にしてはならない。
@@ -7097,6 +7116,12 @@ canonical object は Done receipt 本文にそのまま貼れる Markdown table 
 | `content_hash` に local absolute path、timestamp、hostname、username、非決定的 temporary path が混入している | merge 不可 |
 | `secret_scan_result` が未実行、manual only、抽象記載、または scan command / 対象 path / redaction policy を欠く | merge 不可 |
 | `reviewer_command` が `see CI`、`manual`、`確認済み` など抽象表現だけで、再現可能な command ではない | merge 不可 |
+| `reviewer_reproduction` entry が 11 closure field と 1:1 対応しない | Phase 未完了 |
+| `reviewer_command` が artifact existence と content hash の両方を検証しない | merge 不可 |
+| `timeout_seconds` が未指定、`0`、負数、または無制限である | Phase 未完了 |
+| `environment_profile` が `ci`、`release-check`、`local-docker` 以外である | Phase 未完了 |
+| `failure_classification` が許可値以外、または `environment_gap` を pass 扱いしている | merge 不可 |
+| `not_run` が 1 件でもある状態で `summary_status: pass` とする | merge 不可 |
 | review algorithm の step を飛ばす、順序を入れ替える、fail 後に後続 step で pass 扱いする | merge 不可 |
 | `review_result` が許可値以外、または失敗 step と一致しない | Phase 未完了 |
 | `summary_status` を step 1〜7 の代替証跡として扱う | merge 不可 |
@@ -13559,7 +13584,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.156` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.157` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
