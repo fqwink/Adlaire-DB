@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.92
+**バージョン：** V.93
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,11 +8,11 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.92` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.93` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
-仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.92` の次は `V.93` とし、以後 `V.94`、`V.95` のように 1 ずつ増加させる。
+仕様書を更新する PR は、変更内容が仕様本文に影響する場合、必ず現在値より大きい次の累積番号へ進める。`V.93` の次は `V.94` とし、以後 `V.95`、`V.96` のように 1 ずつ増加させる。
 
 **禁止事項：**
 
@@ -3898,6 +3898,91 @@ DELETE は Phase 15 では冪等 `204` とする。存在しない branch への
 
 branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§9.1.21、§9.1.22、§9.1.26、§9.1.27、§9.1.29、§9.1.30、§9.5、§9.6、§9.14、Phase 8 / 14 / 15 詳細節、manifest の Endpoint / Persistence / Security / Compatibility / Regression map、branch lifecycle fixture、branch race fixture、restart recovery fixture、seed compatibility snapshot、isolation matrix を同時更新する。正常系だけが通っても、metadata/file commit 順序、restart recovery、source delete denial、token scope、quota、Turso seed 互換が固定されていない場合は Phase 完了扱いにしない。
 
+#### 9.1.32 Phase implementation packet / per-phase execution contract 固定契約
+
+各 Phase の実装 PR は、実装開始前に Phase implementation packet を 1 つ作成し、その Phase で読むべき仕様、変更してよい範囲、変更してはならない範囲、完了証跡を 1 箇所に固定しなければならない。Phase 詳細節、§9.2、§9.4、§9.8、§9.11、§9.17 を実装者が手作業で突き合わせないと判断できない状態は、実装開始不可とする。
+
+**Phase packet 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `phase` | `Phase N`、対象 version、対象 commit |
+| `scope` | 実装する機能と、同 Phase で実装しない対象外機能 |
+| `entry_sections` | 実装前に読む節番号。最低でも §9.2、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節 |
+| `target_surface` | 変更対象 module、API、CLI、config、metadata、runtime state |
+| `api_contracts` | method/path/auth/request/success/error/snapshot/SDK transcript |
+| `persistence_contracts` | file path、schema、update order、fsync、rollback、recovery |
+| `security_contracts` | auth、scope、ro/rw、quota、block policy、redaction |
+| `concurrency_contracts` | lock、idempotency、retry、shutdown、long-running operation |
+| `compatibility_contracts` | Turso / libSQL SDK / legacy metadata / previous Phase への影響 |
+| `evidence_plan` | test、snapshot、fixture、log、artifact、secret scan の保存先 |
+| `regression_set` | 当該 Phase と過去 Phase の実行必須コマンド |
+| `unsupported_behavior` | 未来 Phase、stub、501/400/404/405 の固定挙動 |
+| `completion_gate` | merge 前に満たす Done 条件と失敗時の扱い |
+
+**Phase group 粒度：**
+
+| Phase group | Packet で特に固定すること |
+|-------------|---------------------------|
+| Phase 1〜5 | CLI、data-dir、default DB、hrana-http、JWT、ログ、SDK smoke、再起動永続性 |
+| Phase 6〜8 | multi DB、admin API、Turso Platform API、metadata migration、organization/group/location/quota、legacy fallback |
+| Phase 9〜10 | WebSocket stream/transaction、ATTACH policy、metrics counter 更新点、任意 path 拒否 |
+| Phase 11〜13 | replication primary/replica、frame number、checksum、archive manifest、retention、health/redirect |
+| Phase 14〜15 | backup/restore/PITR、branch lifecycle、destructive rollback、source snapshot、restart recovery |
+| Phase 16〜18 | extension manifest/signature、metrics persistence、HA term/leader/split-brain、operator action |
+| Phase 19 | internal adapter shadow/active/rollback、performance baseline、Phase 1〜18 regression、wire/API 差分ゼロ |
+
+**実装開始禁止条件：**
+
+| 状態 | 判定 |
+|------|------|
+| Phase packet がない | 実装開始禁止 |
+| `scope` と §9.2 / §9.4 / Phase 詳細節が一致しない | 仕様修正 PR に戻す |
+| `api_contracts` に snapshot / error case がない外部 API を追加する | route 追加禁止 |
+| `persistence_contracts` に rollback / recovery がない状態変更を追加する | 書き込み処理禁止 |
+| `security_contracts` に auth/scope/redaction がない管理 API を追加する | success response 禁止 |
+| `regression_set` が固定されていない | 完了判定不可 |
+| unsupported/stub の status と body が未定義 | future route 実装禁止 |
+
+**完了扱い禁止条件：**
+
+| 状態 | 判定 |
+|------|------|
+| Phase packet と実装差分が一致しない | Phase 未完了 |
+| packet の `evidence_plan` にある artifact が生成されていない | Phase 未完了 |
+| packet 外の API / config / metadata / dependency を追加している | merge 不可 |
+| unsupported 対象が成功応答を返す | merge 不可 |
+| regression set の一部を未実行にしている | Phase 未完了 |
+| failure / flaky / TODO を後続 PR に持ち越す | Phase 未完了 |
+| packet 更新が PR description のみで仕様本文にない | 仕様として扱わない |
+
+**Phase packet と既存節の関係：**
+
+| 既存節 | Packet への反映 |
+|--------|-----------------|
+| §9.2 | `scope`、`completion_gate`、対象外 |
+| §9.4 | `target_surface`、Phase 別 API/永続化/error/test 契約 |
+| §9.5 | `api_contracts`、API 契約 ID、snapshot |
+| §9.6 | `persistence_contracts`、schema、recovery |
+| §9.7 | `error code`、retry、client action |
+| §9.8 | `regression_set`、test matrix |
+| §9.11 | Definition of Ready / Done |
+| §9.17 | 実装前チェックリスト |
+| Phase 詳細節 | endpoint 固有仕様、TC、task、対象外 |
+
+**必須 evidence：**
+
+| Evidence | 必須内容 |
+|----------|----------|
+| phase packet artifact | `docs/phase-evidence/phase-{phase}/packet.md` または PR description の同等表 |
+| contract mapping | API / Persistence / Security / Compatibility / Regression の各 map |
+| unsupported snapshot | future route / config / body field の拒否結果 |
+| regression transcript | fixed command、exit code、環境、artifact path |
+| cross-reference scan | §9.1.29 の self-check 結果 |
+| redaction scan | packet / artifact / log に secret、token、raw path、SQL args、backup body がないこと |
+
+Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.1.29、§9.2、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。Phase 単位で何を実装し、何を実装しないか、何をもって完了とするかが 1 箇所で読めない場合は、実装精度不足として Phase 未完了扱いにする。
+
 ### 9.2 Phase 別完了ゲート
 
 以下は各 Phase の最終判定条件である。ここに書かれた項目は「推奨」ではなく、Phase 完了の必須条件とする。
@@ -3950,6 +4035,8 @@ API を実装する場合は、各 endpoint について必ず次を仕様本文
 ### 9.4 Phase 別実装契約
 
 各 Phase の実装者は、この表の契約を満たすこと。既存の詳細節と矛盾がある場合は、この表を優先し、矛盾箇所を同時に修正する。
+
+各 Phase の実装 PR は、この表の該当 Phase 行を §9.1.32 の Phase implementation packet に転記し、API / 永続化 / error / test / unsupported behavior の完了条件として固定してから実装する。
 
 #### Phase 1〜5：単一 DB・HTTP・認証基盤
 
@@ -4523,6 +4610,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | 確認項目 | 必須状態 | 未定義時の扱い |
 |----------|----------|----------------|
 | Phase スコープ | 対象機能と対象外が §9.2 / §9.4 に明記され、resource identity / naming / path boundary が §9.1.26 に従って固定されている | 仕様追記まで実装しない |
+| Phase packet | §9.1.32 に従い、scope、target surface、API、永続化、security、concurrency、compatibility、evidence、regression、unsupported behavior、completion gate が 1 セットで固定されている | 実装開始禁止 |
 | Phase 受入 manifest | §9.1.10 の必須 fields が実装開始前に固定されている | 実装 PR として扱わない |
 | Evidence artifact | §9.1.11 の保存先、命名、正規化、secret scan が固定されている | 証跡生成まで完了扱いにしない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
