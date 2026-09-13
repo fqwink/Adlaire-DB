@@ -2,8 +2,8 @@
 
 ## Status
 
-- `docs/PROJECT_CHARTER.md`, `docs/spec/core.md`, `docs/spec/auth.md`, `docs/spec/api.md`, `docs/spec/internalization.md`, `docs/spec/testing.md`, and `docs/spec/phase-*.md` are the specification source-of-truth set.
-- `docs/PROJECT_CHARTER.md` is the project charter and also serves as the specification entry point.
+- `docs/PROJECT_CHARTER.md` is the project charter source of truth and also serves as the specification entry point.
+- `docs/spec/core.md`, `docs/spec/auth.md`, `docs/spec/api.md`, `docs/spec/internalization.md`, `docs/spec/testing.md`, and `docs/spec/phase-*.md` are the specification source-of-truth set.
 - `docs/POLICY.md` is the policy document and is not a specification source of truth.
 - Phase 1 through Phase 19 are split under `docs/spec/`.
 - Files outside the specification source-of-truth set are supporting documents.
@@ -20,7 +20,7 @@ accident.
 
 | Path | Role | Authority |
 |------|------|-----------|
-| `docs/PROJECT_CHARTER.md` | Project charter and specification entry point | Source of truth |
+| `docs/PROJECT_CHARTER.md` | Project charter and specification entry point | Project charter source of truth |
 | `docs/spec/core.md` | Core compatibility, boundary, runtime, persistence, operations, and implementation-control specification | Source of truth |
 | `docs/spec/auth.md` | Authentication and authorization specification | Source of truth |
 | `docs/spec/api.md` | API contract specification | Source of truth |

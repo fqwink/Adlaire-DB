@@ -667,7 +667,7 @@ a:focus-visible {
 <p class="mp">方針を実装する場合は、対象 API、adapter 境界、config、metadata、永続化、error、rollback、test、artifact、Done 判定を仕様として固定してから実装する。</p>
 <h4 id="0-2-3-ポリシーとして記載する内容" class="mh h4">0.2.3 ポリシーとして記載する内容</h4>
 <p class="mp">ポリシーには、判断ルール、運用ルール、禁止事項、許可条件、レビュー判定基準を記載する。ポリシーは仕様ではない。たとえば「secret をログに出さない」はポリシーであり、そのままでは実装対象ではない。</p>
-<p class="mp">ポリシーを実装する場合は、先に仕様へ変換しなければならない。例えば「secret をログに出さない」というポリシーは、そのままでは実装対象ではない。仕様にするには、secret field、対象ログ、redaction 形式、error、artifact、検証 command、test を本仕様正本へ固定する。</p>
+<p class="mp">ポリシーを実装する場合は、先に仕様へ変換しなければならない。例えば「secret をログに出さない」というポリシーは、そのままでは実装対象ではない。仕様にするには、secret field、対象ログ、redaction 形式、error、artifact、検証 command、test を <code class="ic">docs/spec/</code> 配下の仕様正本へ固定する。</p>
 <h4 id="0-2-4-仕様として記載する内容" class="mh h4">0.2.4 仕様として記載する内容</h4>
 <p class="mp">仕様には、実装者がそのまま実装、テスト、レビュー、完了判定できる確定契約を記載する。実装根拠にできるのは、<code class="ic">docs/spec/</code> 配下で仕様正本として固定された契約だけである。</p>
 <p class="mp">仕様として扱うには、少なくとも対象、入力、出力、状態遷移、永続化、error、認証認可、互換差分、rollback、検証 command、artifact、Done 判定のうち該当項目が明示されていなければならない。</p>

@@ -45,13 +45,13 @@
 スクリプト冒頭の定数で入出力パスを管理する。
 
 ```python
-SRC = "docs/PROJECT_CHARTER.md"      # 入力 Markdown 仕様正本
+SRC = "docs/PROJECT_CHARTER.md"      # 入力 Markdown 入口
 OUT = "docs/Adlaire-db-spec.html"    # 出力 HTML
 ```
 
 別の環境で実行する場合はこの 2 変数を書き換える。
 
-仕様正本内の `<!-- include: docs/spec/auth.md -->` や `<!-- include: docs/spec/phase-01.md -->` 形式の行は、HTML 生成前に指定 Markdown ファイルの本文へ展開する。include はリポジトリルートからの相対パスで記述する。
+Markdown 入口内の `<!-- include: docs/spec/auth.md -->` や `<!-- include: docs/spec/phase-01.md -->` 形式の行は、HTML 生成前に指定 Markdown ファイルの本文へ展開する。include はリポジトリルートからの相対パスで記述する。
 
 ---
 
