@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.104
+**バージョン：** V.105
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.104` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.105` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -3998,6 +3998,7 @@ branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§
 | `invariant_ledger` | §9.1.39 の invariant ID、scope、before/after 条件、violation signal、regression guard |
 | `scenario_matrix` | §9.1.40 の normal/error/auth/persistence/rollback/concurrency/compatibility/unsupported/redaction/operational scenario |
 | `resource_lifecycle_matrix` | §9.1.41 の resource type、state、allowed/forbidden transition、commit order、recovery behavior |
+| `schema_registry` | §9.1.42 の field-level schema、required/null/default/migration/compatibility/redaction 契約 |
 | `completion_gate` | merge 前に満たす Done 条件と失敗時の扱い |
 
 **Phase group 粒度：**
@@ -4061,7 +4062,7 @@ branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§
 | cross-reference scan | §9.1.29 の self-check 結果 |
 | redaction scan | packet / artifact / log に secret、token、raw path、SQL args、backup body がないこと |
 
-Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.1.29、§9.1.39、§9.1.40、§9.1.41、§9.2、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。Phase 単位で何を実装し、何を実装しないか、何をもって完了とするかが 1 箇所で読めない場合は、実装精度不足として Phase 未完了扱いにする。
+Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.1.29、§9.1.39、§9.1.40、§9.1.41、§9.1.42、§9.2、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。Phase 単位で何を実装し、何を実装しないか、何をもって完了とするかが 1 箇所で読めない場合は、実装精度不足として Phase 未完了扱いにする。
 
 #### 9.1.33 Phase completion gate / Done evidence / bug-zero acceptance 固定契約
 
@@ -4090,6 +4091,7 @@ Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§
 | `invariant_result` | §9.1.39 の invariant ID ごとの pass/fail、violation 0 件、regression guard、evidence path |
 | `scenario_matrix_result` | §9.1.40 の scenario ID ごとの pass/fail、not_applicable reason、evidence path、manual only 0 件 |
 | `resource_lifecycle_result` | §9.1.41 の state / transition ごとの pass/fail、forbidden transition 0 件、recovery evidence path |
+| `schema_registry_result` | §9.1.42 の schema ID ごとの field coverage、unknown/null/default/migration/redaction evidence |
 | `reviewer_decision` | `Done`、`Not Done`、`Spec correction required` のいずれか |
 
 **Phase group Done minimum：**
@@ -4705,6 +4707,66 @@ Phase scenario matrix に関係する仕様変更は、§9.1.7、§9.1.10、§9.
 | `resource_state_closure` | metadata、file、runtime map、health、operator marker が同じ state 判定に収束していること |
 
 Phase resource lifecycle に関係する仕様変更は、§9.1.16、§9.1.21、§9.1.25、§9.1.30、§9.1.31、§9.1.32、§9.1.33、§9.1.37、§9.1.39、§9.1.40、§9.2、§9.4、§9.5、§9.6、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。resource lifecycle matrix がない Phase 実装 PR は、状態不整合による後続バグ修正を防げないため、実装開始不可とする。
+
+#### 9.1.42 Phase schema registry / field-level contract 固定契約
+
+各 Phase の実装 PR は、追加・変更する request、response、metadata、config、JWT claim、WebSocket message、artifact、fixture、log、metric の field-level schema を schema registry として固定しなければならない。field の必須/任意、null 可否、省略可否、default、validation、serialization、migration、compatibility、redaction が未定義のまま実装してはならない。
+
+**Schema registry 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `schema_id` | `SCHEMA-P{phase}-{surface}-{name}` 形式の一意 ID |
+| `owner_phase` | field を導入または変更する Phase |
+| `surface` | request_body / response_body / metadata_json / config / jwt_claim / websocket_message / artifact_fixture / log_metric |
+| `field_name` | 外部 field 名。内部名と異なる場合は mapping を明記 |
+| `type` | string / integer / number / boolean / object / array / enum / null / bytes / timestamp / opaque string |
+| `required` | 必須なら `true`。省略可能なら `false` と理由 |
+| `nullable` | `null` 可否。`nullable:true` の場合は null の意味 |
+| `omittable` | 省略可否。省略と null を同一扱いにする場合は明示 |
+| `default` | 省略時、migration 時、旧 metadata 読み込み時の default |
+| `validation` | length、regex、range、enum、unknown field、duplicate query、empty string/array の扱い |
+| `serialization` | casing、timestamp 精度、sort order、redaction、response wrapper |
+| `migration` | old field、new field、rename/delete、backfill、rollback、破損時挙動 |
+| `compatibility` | Turso Cloud、libSQL SDK、legacy metadata、previous Phase との差分 |
+| `redaction` | secret / token / raw path / SQL args / backup body / private metadata の扱い |
+| `evidence` | request fixture、response snapshot、metadata fixture、migration fixture、secret scan、compat diff |
+
+**Schema surface 固定表：**
+
+| Surface | 必ず固定する field |
+|---------|--------------------|
+| request_body | required、nullable、unknown field、empty string/array、duplicate key、content type |
+| response_body | wrapper、field casing、nullable、omittable、timestamp、error body、secret 非露出 |
+| metadata_json | schema version、required/default、migration、rollback、破損時挙動、unknown field |
+| config | CLI/env/TOML/default、対象 Phase 前挙動、secret file、invalid value |
+| jwt_claim | claim 名、scope、expiry、ro/rw、DB/org/group binding、legacy claim |
+| websocket_message | message type、request_id、stream_id、unknown field、response_ok/error |
+| artifact_fixture | 正規化 field、redaction、Contract ID、再生成 command |
+| log_metric | field 名、label、cardinality、secret 非露出、request id / trace id |
+
+**Field-level 禁止事項：**
+
+| 状態 | 判定 |
+|------|------|
+| `required` / `nullable` / `omittable` が未定義の field を実装する | 実装開始禁止 |
+| metadata field の rename / delete / required 化に migration と rollback がない | merge 不可 |
+| response field casing、wrapper、null/省略を仕様化なしに変更する | merge 不可 |
+| DTO と metadata で同名 field の意味が異なるのに mapping がない | Phase 未完了 |
+| secret / token / raw path / SQL args / backup body field の redaction が未定義 | merge 不可 |
+| unknown field を黙って無視する。ただし hrana wire 互換など該当節で明記された場合を除く | merge 不可 |
+| `null` を省略扱いにする根拠がない | Phase 未完了 |
+| schema registry と fixture / snapshot / migration test が一致しない | Phase 未完了 |
+
+**Done receipt への反映：**
+
+| Done receipt field | 必須内容 |
+|--------------------|----------|
+| `schema_registry_result` | schema ID ごとの field coverage、unknown/null/default/migration/redaction evidence |
+| `field_compatibility_result` | Turso Cloud、libSQL SDK、legacy metadata、previous Phase との差分分類 |
+| `schema_migration_closure` | old/new/corrupt fixture、rollback、default backfill、破損時挙動が検証済みであること |
+
+Phase schema registry に関係する仕様変更は、§9.1.10、§9.1.11、§9.1.12、§9.1.15、§9.1.19、§9.1.20、§9.1.23、§9.1.24、§9.1.27、§9.1.28、§9.1.29、§9.1.32、§9.1.33、§9.1.35、§9.1.40、§9.2、§9.4、§9.5、§9.6、§9.7、§9.8、§9.13、§9.17、該当 Phase 詳細節を同時更新する。schema registry がない field 変更は、DTO / metadata / fixture の意味ズレによる後続バグ修正を防げないため、実装開始不可とする。
 
 ### 9.2 Phase 別完了ゲート
 
@@ -5361,6 +5423,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Invariant ledger | §9.1.39 に従い、durability、metadata/file consistency、auth/scope/quota、compatibility、error surface、operational state、redaction、dependency/prerequisite の invariant と regression guard が固定され、violation が 0 件になっている | 実装開始禁止。違反がある場合は Phase 完了扱いにしない |
 | Scenario matrix | §9.1.40 に従い、normal、invalid request、auth/scope/quota、persistence/restart、rollback/recovery、concurrency/idempotency、compatibility、unsupported、redaction、operational の scenario と evidence が固定され、manual only / not run / 根拠なし N/A が 0 件になっている | 実装開始禁止。ケース漏れがある場合は Phase 完了扱いにしない |
 | Resource lifecycle | §9.1.41 に従い、resource type、state、allowed/forbidden transition、entry/exit condition、API behavior、write policy、commit order、recovery behavior、state evidence が固定されている | 実装開始禁止。状態遷移未定義または forbidden transition 未検証の場合は Phase 完了扱いにしない |
+| Schema registry | §9.1.42 に従い、request、response、metadata、config、JWT claim、WebSocket message、artifact、log/metric の field-level schema、required/null/default/migration/compatibility/redaction が固定されている | 実装開始禁止。field 意味ズレ、根拠なし null/省略、migration 未定義の場合は Phase 完了扱いにしない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | 仕様内相互参照 | §9.1.29 に従い、Phase 番号、TC ID、Task ID、API 契約 ID、error code、persistence key、evidence 名、manifest 参照が一致している | 仕様修正 PR に戻す |
 | Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
