@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.149
+**バージョン：** V.150
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.149` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.150` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -7155,7 +7155,7 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 |-------|----------|
 | `handoff_id` | `HANDOFF-P{phase}-{number}` 形式の一意 ID |
 | `spec_version` | 対象仕様書 version。Phase Done 時点の `V.{累積番号}` と一致させる |
-| `reading_order` | レビュアーが読む順番。最低でも §0、§1.4、§9.1.51、§9.11.1〜§9.11.12、対象 Phase 詳細節、Phase packet、Done receipt |
+| `reading_order` | レビュアーが読む順番。最低でも §0、§1.4、§9.1.51、§9.11.1〜§9.11.13、対象 Phase 詳細節、Phase packet、Done receipt |
 | `reproduction_commands` | clean checkout から実行できる command。各 command は working directory、env、fixture、expected exit code を持つ |
 | `expected_artifacts` | command ごとの生成 artifact path、Contract ID、Scenario ID、snapshot / transcript / log の対応 |
 | `decision_criteria` | Done / Not Done / Spec correction required の判定条件。失敗時に参照する仕様節を含める |
@@ -7554,6 +7554,59 @@ Done 判定は §9.1.33 の Done receipt を正とし、下表の Done は Phase
 | secret scan が artifact 全体ではなく一部 file だけを対象にしている | merge 不可 |
 | raw artifact を repository に保存する、または normalization 前後の対応がない | merge 不可 |
 | `P{phase}-PRECISION-CLOSURE` に `stale_artifact_count = 0`、`missing_evidence_integrity_count = 0`、`artifact_manifest_result = pass` がない | Phase 未完了 |
+
+### 9.11.13 Phase 1〜19 operator action / observability closure 最低表
+
+本節は Phase 実装 PR で障害、劣化、復旧、rollback、operator_required が発生した時に、運用者が health、log、metric、artifact、runbook から状態と必要操作を判断できることを証明する最低条件を定義する。実装者は API が動くことだけで Phase 完了扱いにしてはならない。障害が silent に隠れる、health が `ok` のまま、log / metric / operator action が未定義、または secret を含む運用証跡は Phase 完了不可である。
+
+| Phase | operator action / observability 最低対象 |
+|-------|------------------------------------------|
+| 1 | CLI 起動失敗、config parse failure、bind failure、no persistence confirmation、stderr redaction |
+| 2 | data-dir init failure、process lock conflict、metadata corruption、integrity_check failure、restart recovery |
+| 3 | HTTP bind failure、malformed request、SQL error、shutdown timeout、health response |
+| 4 | auth disabled warning、bad/expired/revoked token、permission denial、token persistence failure、secret redaction |
+| 5 | JSONL log contract、SDK regression failure、restart data loss、unsupported future surface hit、secret scan failure |
+| 6 | DB not found、DB name invalid、metadata/directory mismatch、DB isolation violation、restart restore failure |
+| 7 | Admin auth failure、token revoke failure、concurrent DB update conflict、scope denial、metadata lost update |
+| 8 | migration failure、quota exceeded、usage unavailable、Turso unsupported endpoint、legacy fallback failure |
+| 9 | WebSocket upgrade failure、transaction rollback failure、disconnect recovery、store_sql failure、SDK WS drift |
+| 10 | ATTACH denial、arbitrary path attempt、metrics counter drift、scope/quota denial、WebSocket gauge leak |
+| 11 | replication token denial、frame checksum mismatch、snapshot failure、heartbeat stale、primary role misconfig |
+| 12 | replica lag、primary down、redirect unavailable、checksum mismatch、replica state corruption |
+| 13 | archive manifest mismatch、missing/corrupt frame、retention cleanup failure、disabled mode write attempt |
+| 14 | backup failure、restore rollback、PITR range/corruption、restore-failed marker、startup recovery |
+| 15 | branch create/delete failure、source delete denial、branch route recovery、seed compatibility failure |
+| 16 | extension load_failed、sha256 mismatch、missing binary、path/symlink denial、SQL bypass attempt |
+| 17 | metrics snapshot corruption、flush failure、Prometheus render failure、invalid sample、quota/usage mismatch |
+| 18 | leader unknown、candidate state、promotion failure、demotion failure、split-brain、network partition |
+| 19 | shadow diff、active mode failure、rollback failure、performance threshold miss、adapter crash recovery |
+
+**operator_action_record 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `operator_id` | `OP-P{phase}-{surface}-{number}` 形式の一意 ID |
+| `phase` | 対象 Phase 番号 |
+| `trigger_condition` | operator action または observability が必要になる条件 |
+| `observable_signal` | API response、health、log、metric、artifact、startup failure のどれで検出できるか |
+| `health_state` | `ok`、`degraded`、`unavailable`、`recovering`、`rollback_required`、`operator_required`、`blocked` のいずれか |
+| `log_event` | log level、event name、必須 field、禁止 field、redaction rule |
+| `metric_or_counter` | metric / counter / gauge / Prometheus sample。未提供の場合は仕様本文の不要理由 |
+| `operator_action` | retry、restart、rollback、manual cleanup、config change、token rotate、restore、promote/demote、none のいずれか |
+| `recovery_boundary` | 自動復旧してよい範囲、operator 承認が必要な境界、success response 禁止条件 |
+| `evidence_path` | health snapshot、log artifact、metric snapshot、runbook、review handoff artifact の path |
+
+**Operator / observability 判定規則：**
+
+| 状態 | 判定 |
+|------|------|
+| `operator_required`、`rollback_required`、`degraded`、`unavailable` が health / log / metric / artifact のいずれにも出ない | Phase 未完了 |
+| 自動復旧してよい条件と禁止条件が仕様本文にない | 実装開始禁止 |
+| rollback、restart、manual cleanup、promote/demote、token rotate の手順がない破壊的操作を公開する | merge 不可 |
+| operator log、release note、runbook、artifact に token、JWT、SQL args、backup body、absolute path secret が残る | merge 不可 |
+| ERROR / WARN log があるが operator action、client action、retry 可否が不明 | Phase 未完了 |
+| Phase Done だが release note / behavior delta / operator runbook が未完了 | `phase_done_only`。運用投入不可 |
+| `P{phase}-PRECISION-CLOSURE` に `operator_action_gap_count = 0`、`observability_result = pass`、`operator_secret_leak_count = 0` がない | Phase 未完了 |
 
 ### 9.12 PR レビュー観点
 
@@ -13410,7 +13463,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.149` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.150` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
