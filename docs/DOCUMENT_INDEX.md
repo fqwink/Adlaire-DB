@@ -2,7 +2,7 @@
 
 ## Status
 
-- `docs/spec/adlaire-db-spec.md` and `docs/spec/phase-*.md` are the specification source-of-truth set.
+- `docs/spec/spec.md` and `docs/spec/phase-*.md` are the specification source-of-truth set.
 - Phase 1 through Phase 19 are split under `docs/spec/`.
 - Files outside the specification source-of-truth set are supporting documents.
 - If this index conflicts with the specification source-of-truth set, the specification source-of-truth set takes precedence.
@@ -18,7 +18,7 @@ accident.
 
 | Path | Role | Authority |
 |------|------|-----------|
-| `docs/spec/adlaire-db-spec.md` | Parent specification and implementation contract | Source of truth |
+| `docs/spec/spec.md` | Specification charter and implementation contract | Source of truth |
 | `docs/spec/phase-01.md` - `docs/spec/phase-19.md` | Phase-specific implementation contracts | Source of truth |
 | `AGENTS.md` | Repository work rules for agents | Work rule |
 | `docs/DOCUMENT_INDEX.md` | Documentation index and split-management reference | Supporting document |
@@ -35,12 +35,11 @@ accident.
 
 | Candidate Area | Current Source | Notes |
 |----------------|----------------|-------|
-| Overview and scope | `docs/spec/adlaire-db-spec.md` sections 0-2 | Keep project authority clear |
-| Architecture and configuration | `docs/spec/adlaire-db-spec.md` sections 3-5 | Keep runtime contracts linked |
-| API and error contracts | `docs/spec/adlaire-db-spec.md` sections 6-7 | Preserve request/response exactness |
-| Lifecycle and phase contracts | `docs/spec/adlaire-db-spec.md` section 8 and `docs/spec/phase-*.md` | Phase detail split is active |
-| Security, deployment, logs, WAL | `docs/spec/adlaire-db-spec.md` sections 10-13 | Operational reference candidate |
-| Glossary and future policy | Appendices and Phase 19 policy | Supporting reference candidate |
+| Product and compatibility responsibilities | `docs/spec/spec.md` sections 0-3 | Keep project authority clear |
+| Runtime, auth, and API responsibilities | `docs/spec/spec.md` sections 4-6 | Keep runtime contracts linked |
+| Data protection and operations responsibilities | `docs/spec/spec.md` sections 7-8 | Preserve operational safety |
+| Implementation and phase responsibilities | `docs/spec/spec.md` sections 9-10 and `docs/spec/phase-*.md` | Phase detail split is active |
+| Internalization and test responsibilities | `docs/spec/spec.md` sections 11-12 | Keep future policy and evidence gates clear |
 
 ## Non-Goals
 
