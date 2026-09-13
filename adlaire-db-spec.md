@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.99
+**バージョン：** V.100
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.99` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.100` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -3919,6 +3919,7 @@ branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§
 | `regression_set` | 当該 Phase と過去 Phase の実行必須コマンド |
 | `unsupported_behavior` | 未来 Phase、stub、501/400/404/405 の固定挙動 |
 | `dependency_graph` | API、persistence、security、compatibility、oracle、evidence、operational state の prerequisite |
+| `invariant_ledger` | §9.1.39 の invariant ID、scope、before/after 条件、violation signal、regression guard |
 | `completion_gate` | merge 前に満たす Done 条件と失敗時の扱い |
 
 **Phase group 粒度：**
@@ -3982,7 +3983,7 @@ branch に関係する仕様変更は、§6.4、§7.3、§9.1.16、§9.1.18、§
 | cross-reference scan | §9.1.29 の self-check 結果 |
 | redaction scan | packet / artifact / log に secret、token、raw path、SQL args、backup body がないこと |
 
-Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.1.29、§9.2、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。Phase 単位で何を実装し、何を実装しないか、何をもって完了とするかが 1 箇所で読めない場合は、実装精度不足として Phase 未完了扱いにする。
+Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.1.29、§9.1.39、§9.2、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。Phase 単位で何を実装し、何を実装しないか、何をもって完了とするかが 1 箇所で読めない場合は、実装精度不足として Phase 未完了扱いにする。
 
 #### 9.1.33 Phase completion gate / Done evidence / bug-zero acceptance 固定契約
 
@@ -4008,6 +4009,7 @@ Phase packet に関係する仕様変更は、§9.1.9、§9.1.10、§9.1.11、§
 | `defect_classification_result` | §9.1.36 の defect 件数、分類別件数、`open:0`、evidence path |
 | `operational_state_result` | §9.1.37 の state matrix、health snapshot、API behavior、recovery runbook |
 | `dependency_graph_result` | §9.1.38 の prerequisite がすべて satisfied である証跡 |
+| `invariant_result` | §9.1.39 の invariant ID ごとの pass/fail、violation 0 件、regression guard、evidence path |
 | `reviewer_decision` | `Done`、`Not Done`、`Spec correction required` のいずれか |
 
 **Phase group Done minimum：**
@@ -4420,6 +4422,71 @@ Phase operational state に関係する仕様変更は、§6.4、§7.3、§9.1.1
 | `prerequisite_closure` | dependency graph 上の全 dependent contract が prerequisite satisfied 後に検証済みであること |
 
 Phase dependency graph に関係する仕様変更は、§9.1.7、§9.1.8、§9.1.10、§9.1.11、§9.1.32、§9.1.33、§9.1.34、§9.1.35、§9.1.36、§9.1.37、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。dependency graph がない Phase 実装 PR は、実装順序と完了判定が未確定として扱い、実装開始不可とする。
+
+#### 9.1.39 Phase invariant ledger / non-regression invariant 固定契約
+
+各 Phase の実装 PR は、実装開始前に Phase invariant ledger を固定しなければならない。invariant ledger は「その Phase と過去 Phase で、実装後も絶対に壊れてはならない条件」の正本である。単体の API、永続化、security、oracle、dependency graph が満たされていても、invariant が 1 件でも破れている場合、その Phase は完了扱いにしない。
+
+**Invariant ledger 必須 fields：**
+
+| Field | 必須内容 |
+|-------|----------|
+| `invariant_id` | `INV-P{phase}-{domain}-{number}` 形式の一意 ID |
+| `scope` | API、persistence、security、compatibility、operation、redaction、dependency の対象範囲 |
+| `phase` | invariant を導入する Phase と、継続して守る Phase 範囲 |
+| `must_hold_before` | 実装前、migration 前、state transition 前に成立している必要条件 |
+| `must_hold_after` | success response、commit、restart、rollback、operator action 後に成立している結果条件 |
+| `violation_signal` | 破れた場合に返す HTTP status、error code、health state、log event、defect classification |
+| `evidence` | invariant を証明する test、snapshot、fixture、log、manifest、artifact path |
+| `regression_guard` | 過去 Phase で再実行する TC / command / oracle |
+| `owner_contract` | invariant を所有する API / persistence / security / operational Contract ID |
+
+**Invariant category 固定表：**
+
+| Category | 必ず守る条件 | 違反時の扱い |
+|----------|--------------|--------------|
+| Durability invariant | success response は metadata / DB file / archive / branch state の fsync または明示された durable boundary 後にのみ返す | merge 不可。success-before-fsync は critical defect |
+| Metadata/file consistency invariant | metadata と実ファイル、manifest、archive、branch source、replication frame の参照が相互に存在し、片側だけの commit を残さない | recovery / rollback 必須。未解消なら Phase 未完了 |
+| Auth/scope/quota invariant | auth、scope、read-only/write、quota、block policy、organization/group/location boundary を bypass できない | 2xx success 禁止。security gap として open:0 まで完了不可 |
+| Compatibility invariant | Turso Cloud API、libSQL SDK、legacy metadata、previous Phase の既存 response/error/snapshot を理由なしに変えない | compatibility diff の仕様化と oracle 更新まで merge 不可 |
+| Error surface invariant | 同じ原因は同じ HTTP status、error code、body shape、client action、retry policy で返す | `INTERNAL_ERROR` への逃避禁止。error contract 修正まで未完了 |
+| Operational state invariant | healthy、degraded、unavailable、recovering、rollback_required、operator_required、blocked の write policy と health response が矛盾しない | operator action または recovery runbook なしの実装禁止 |
+| Redaction invariant | token、secret、raw filesystem path、SQL args、backup body、private metadata を log、artifact、PR description、error body に出さない | secret 混入は merge 不可。artifact 再生成必須 |
+| Dependency/prerequisite invariant | prerequisite が satisfied になる前に dependent API、write、snapshot 更新、Done receipt を公開しない | dependent contract は未実装扱い |
+
+**Phase group invariant minimum：**
+
+| Phase group | 最低 invariant |
+|-------------|----------------|
+| Phase 1〜5 | CLI/config precedence、data-dir boundary、default DB identity、hrana-http error surface、JWT scope、log redaction、restart persistence |
+| Phase 6〜8 | DB identity、admin API auth、Turso metadata shape、organization/group/location/quota boundary、legacy metadata migration、fallback 禁止条件 |
+| Phase 9〜10 | WebSocket transaction atomicity、stream close semantics、managed ATTACH path isolation、metrics counter consistency、arbitrary path denial |
+| Phase 11〜13 | replication frame monotonicity、checksum consistency、snapshot/archive manifest consistency、retention cleanup safety、primary/replica health transition |
+| Phase 14〜15 | restore/PITR rollback safety、branch source selector、branch isolation、destructive operation lock、restart recovery marker、quota precedence |
+| Phase 16〜18 | extension allowlist/signature boundary、metrics persistence、HA term monotonicity、leader election safety、split-brain prevention、operator-required transition |
+| Phase 19 | internal adapter wire/API parity、shadow/active/rollback boundary、full regression non-regression、performance baseline、Turso Cloud compatibility gap closure |
+
+**Invariant violation handling：**
+
+| 状態 | 判定 |
+|------|------|
+| invariant violation が 1 件でも残る | Phase 未完了 |
+| invariant violation 中に 2xx success を返す | merge 不可 |
+| violation を `INTERNAL_ERROR`、generic 500、またはログのみで隠す | Phase 未完了。ただし未知の内部 bug は defect record と oracle gap を残した上で open:0 まで修正する |
+| invariant の `evidence` がない | Done receipt 作成禁止 |
+| `regression_guard` が未実行 | Phase 完了扱いにしない |
+| 過去 Phase invariant を破る互換差分が仕様化されていない | merge 不可 |
+| invariant ledger を PR description だけに置き、仕様本文または artifact と対応しない | Phase 未完了 |
+
+**Done receipt への反映：**
+
+| Done receipt field | 必須内容 |
+|--------------------|----------|
+| `invariant_result` | invariant ID ごとの pass/fail、violation 0 件、evidence path、regression guard command、owner Contract ID |
+| `violated_invariants` | 完了時は `none`。1 件でもある場合は Phase 未完了 |
+| `non_regression_closure` | 過去 Phase invariant が再実行され、互換差分が 0 件または仕様化済みであること |
+
+Phase invariant ledger に関係する仕様変更は、§9.1.7、§9.1.10、§9.1.11、§9.1.14、§9.1.15、§9.1.23、§9.1.24、§9.1.32、§9.1.33、§9.1.35、§9.1.36、§9.1.37、§9.1.38、§9.2、§9.4、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。invariant ledger がない Phase 実装 PR は、バグ修正ゼロ判定に必要な非退行条件が未確定として扱い、実装開始不可とする。
 
 ### 9.2 Phase 別完了ゲート
 
@@ -5059,6 +5126,7 @@ PR レビューでは以下を必ず確認する。該当しない項目は PR d
 | Defect classification | §9.1.36 に従い、spec gap、implementation bug、regression bug、compatibility diff、oracle gap、environment gap、security gap、persistence gap が分類され、`open:0` になっている | Phase 完了扱いにしない |
 | Operational state / recovery runbook | §9.1.37 に従い、healthy、degraded、unavailable、recovering、rollback_required、operator_required、blocked の API / write / health / log / operator action が固定されている | failure path を実装しない |
 | Dependency graph | §9.1.38 に従い、各 Contract ID の prerequisite、blocks、status、evidence、not_applicable reason が固定され、未完了 prerequisite が 0 件になっている | dependent contract を実装・公開・完了扱いにしない |
+| Invariant ledger | §9.1.39 に従い、durability、metadata/file consistency、auth/scope/quota、compatibility、error surface、operational state、redaction、dependency/prerequisite の invariant と regression guard が固定され、violation が 0 件になっている | 実装開始禁止。違反がある場合は Phase 完了扱いにしない |
 | 仕様矛盾 | §9.1.12 の優先順位に従い、矛盾箇所が同じ PR で解消されている | 実装 PR として扱わない |
 | 仕様内相互参照 | §9.1.29 に従い、Phase 番号、TC ID、Task ID、API 契約 ID、error code、persistence key、evidence 名、manifest 参照が一致している | 仕様修正 PR に戻す |
 | Verification command | §9.1.13 / §9.1.24 の command 分類、順序、exit code、artifact、toolchain、Docker/CI/local 差分が固定されている | 検証完了扱いにしない |
