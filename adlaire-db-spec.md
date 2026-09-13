@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.175
+**バージョン：** V.176
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.175` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.176` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -4113,7 +4113,7 @@ Phase implementation packet は、実装開始前に以下の canonical key を�
 | `task_ids` | 対象 Phase の atomic task ID 一覧。各 task は入力契約、禁止変更、完了条件、verification command に接続する |
 | `scenario_ids` | 対象 Phase の scenario ID 一覧。各 scenario は expected result、artifact path、oracle に接続する |
 | `artifact_paths` | test、snapshot、fixture、log、manifest、review handoff、secret scan の保存先一覧 |
-| `audit_results` | §9.17 の `phase_packet_result`、`acceptance_manifest_result`、`oracle_result`、`scenario_matrix_result`、`schema_registry_result`、`decision_precedence_result`、`coverage_closure_result`、`artifact_paths_result`、`failure_remediation_result`、`transition_ready_result`、`review_handoff_result`、`operator_delta_result`、`precision_closure_index_result`、`change_impact_closure_result`、`rollout_readiness_closure_result`、`compatibility_baseline_closure_result`、`security_abuse_closure_result`、`configuration_environment_closure_result`、`phase_done_final_result`、`readiness_audit_result` を全て含む |
+| `audit_results` | §9.17 の `phase_packet_result`、`acceptance_manifest_result`、`oracle_result`、`scenario_matrix_result`、`schema_registry_result`、`decision_precedence_result`、`coverage_closure_result`、`artifact_paths_result`、`failure_remediation_result`、`transition_ready_result`、`review_handoff_result`、`operator_delta_result`、`precision_closure_index_result`、`change_impact_closure_result`、`rollout_readiness_closure_result`、`compatibility_baseline_closure_result`、`security_abuse_closure_result`、`configuration_environment_closure_result`、`ambiguity_atomic_task_closure_result`、`phase_done_final_result`、`readiness_audit_result` を全て含む |
 | `blocking_items` | 実装開始前に残っている blocker 一覧。実装開始可能な packet では空配列または `none` |
 | `ready_to_implement` | 実装開始を許可する最終 boolean。`true` 以外は実装開始禁止 |
 
@@ -5481,6 +5481,26 @@ Phase ambiguity closure に関係する仕様変更は、§0、§7.3、§9.1.10�
 | `atomic_task_result` | task ID ごとの input contracts、change targets、completion condition、verification command、evidence |
 | `open_task_count` | `0` 固定。0 以外は Phase 未完了 |
 | `task_dependency_result` | dependency 順序、並列実行可否、blocked task 0 件、rollback condition の証跡 |
+
+**canonical ambiguity / atomic task closure audit：**
+
+ambiguity closure と atomic task ledger は、Phase 実装者が迷わず、かつ巨大な一括実装に逃げずに進めるための入口 gate である。対象 Phase の readiness packet と Done receipt は、以下の closure audit field を持ち、`ambiguity_atomic_task_closure_result = pass` でなければ実装開始または Phase 完了に進めない。
+
+| Audit field | pass 条件 | fail 時の扱い |
+|-------------|----------|---------------|
+| `implementation_question_result` | 実装者が迷う可能性のある question が `AMB-P{phase}-{surface}-{number}` として列挙され、対象外 question は根拠付きである | 実装開始禁止 |
+| `selected_decision_result` | 各 ambiguity ID に採用する status、error code、schema、commit order、log、client action、redaction が一意に固定されている | 実装開始禁止 |
+| `rejected_options_result` | 却下案と却下理由があり、Turso Cloud 互換、自己ホスト安全性、後方互換、運用性への影響が記録されている | review failure |
+| `decision_basis_result` | 参照仕様節、Turso Cloud / libSQL SDK baseline、invariant、security / persistence 根拠が affected contracts と接続されている | merge 不可 |
+| `edge_case_result` | null、missing、duplicate、race、restart、legacy、unsupported、malformed、large input、permission denied が scenario / oracle / regression に接続されている | Phase 未完了 |
+| `reopen_trigger_result` | upstream change、仕様変更、regression、security finding、migration failure の再検討条件と再評価手順が固定されている | Phase 未完了 |
+| `task_id_result` | Phase scope が `TASK-P{phase}-{number}` に分解され、open task 0 件、task ID なし差分 0 件である | 実装開始禁止 |
+| `task_boundary_result` | input contracts、change targets、forbidden changes、future Phase 境界、互換契約、schema、error、auth、secret、dependency が task ごとに固定されている | 実装開始禁止 |
+| `task_verification_result` | 各 task が completion condition、verification command、expected exit code、environment、artifact path、manual exception ID のいずれかに接続されている | Phase 未完了 |
+| `task_dependency_rollback_result` | task dependency、並列可否、blocked task 0 件、rollback condition、rollback 不要理由が固定されている | Phase 未完了 |
+| `ambiguity_atomic_task_closure_result` | 上記 field がすべて `pass`。open ambiguity、根拠なし N/A、実装者判断、task ID なし差分、巨大 task、task 外変更、verification 欠落、rollback 未定義がすべて 0 件 | `pass` 以外は実装開始禁止 |
+
+`ambiguity_atomic_task_closure_result` は readiness packet の `audit_results` と Done receipt に必ず含める。ambiguity がない Phase でも `ambiguity_atomic_task_closure_result = pass` とし、`ambiguity_id:none`、`open_ambiguity_count:0`、`open_task_count:0`、`task_id_result:pass`、および非対象理由を `closure_evidence` に記録する。これにより「迷う判断なし」の主張も、後続 Phase と reviewer が再現できる状態にする。
 
 Phase atomic task ledger に関係する仕様変更は、§9.1.7、§9.1.8、§9.1.10、§9.1.11、§9.1.13、§9.1.14、§9.1.16、§9.1.21、§9.1.24、§9.1.29、§9.1.32、§9.1.33、§9.1.34、§9.1.35、§9.1.38、§9.1.39、§9.1.40、§9.1.41、§9.1.42、§9.1.43、§9.1.44、§9.1.45、§9.1.46、§9.1.47、§9.1.48、§9.1.49、§9.2、§9.4、§9.5、§9.6、§9.7、§9.8、§9.11、§9.17、該当 Phase 詳細節を同時更新する。atomic task ledger がない Phase 実装 PR は、実装粒度、変更境界、検証単位、rollback 単位、完了判定が未確定であるため、実装開始不可とする。
 
@@ -8282,8 +8302,9 @@ Phase 1〜19 の実装開始前に、実装者は対象 Phase の readiness pack
 | `compatibility_baseline_closure_result` | §9.1.47 に従い、Turso Cloud / libSQL SDK / hrana / legacy metadata / previous Phase baseline、snapshot version、SDK transcript、refresh trigger、diff reason、mode boundary がすべて閉じている | 実装開始禁止 |
 | `security_abuse_closure_result` | §9.1.48 に従い、attack surface、untrusted input、required control、bypass attempt、expected denial、redaction、audit/log、quota/rate、persistence no-op、security regression がすべて閉じている | 実装開始禁止 |
 | `configuration_environment_closure_result` | §9.1.19 / §9.1.24 に従い、config key、precedence、invalid config、secret/path validation、target Phase 前挙動、redaction、toolchain、Docker/CI/local、release-check、environment artifact がすべて閉じている | 実装開始禁止 |
+| `ambiguity_atomic_task_closure_result` | §9.1.49 / §9.1.50 に従い、implementation question、selected decision、rejected options、decision basis、edge cases、reopen trigger、task ID、task boundary、verification、dependency / rollback がすべて閉じている | 実装開始禁止 |
 | `phase_done_final_result` | §9.1.33 に従い、Done receipt final audit の readiness、manifest、artifact、failure、regression、handoff、operator、precision closure、zero-bug がすべて pass である | Phase 完了扱い禁止 |
-| `readiness_audit_result` | 上記 19 field がすべて `pass`。ただし `phase_done_final_result` は実装完了時に評価する。`missing`、`partial`、`manual_only`、`not_run`、`N/A` 根拠なし、または値不一致が 0 件 | `pass` 以外は実装開始禁止 |
+| `readiness_audit_result` | 上記 20 field がすべて `pass`。ただし `phase_done_final_result` は実装完了時に評価する。`missing`、`partial`、`manual_only`、`not_run`、`N/A` 根拠なし、または値不一致が 0 件 | `pass` 以外は実装開始禁止 |
 
 `readiness_audit_result` は Phase 実装開始の入口 gate であり、実装後の Done receipt で初めて埋めてはならない。実装中に scope、API、schema、error、persistence、auth、compatibility、artifact path、review command、operator behavior のいずれかが変わる場合は、同じ PR で readiness packet、受入 manifest、oracle、scenario matrix、schema registry、precision closure を更新し、再度 `readiness_audit_result = pass` にする。更新しないまま code、test、snapshot、artifact だけを変更した場合は merge 不可とする。
 
@@ -8303,6 +8324,7 @@ Phase 1〜19 の実装開始前に、実装者は対象 Phase の readiness pack
 | compatibility baseline の upstream source、observed behavior、Adlaire behavior、compatibility class、snapshot version、SDK transcript、refresh trigger、diff reason、mode boundary のいずれかが未確定または artifact 未接続である | 実装開始禁止 |
 | security abuse の attack surface、untrusted input、required control、bypass attempt、expected denial、redaction、audit/log、quota/rate、persistence no-op、security regression のいずれかが未確定または artifact 未接続である | 実装開始禁止 |
 | configuration / environment の config key、precedence、invalid config、secret/path validation、target Phase 前挙動、redaction、toolchain、Docker/CI/local、release-check、environment artifact のいずれかが未確定または artifact 未接続である | 実装開始禁止 |
+| ambiguity / atomic task の implementation question、selected decision、rejected options、decision basis、edge cases、reopen trigger、task ID、task boundary、verification、dependency / rollback のいずれかが未確定または artifact 未接続である | 実装開始禁止 |
 | artifact path、hash、secret scan、reviewer command が readiness packet、受入 manifest、Done receipt、artifact manifest、review handoff の間で一致しない | Phase 未完了 |
 | failure が未分類、root cause 未記載、再検証 command 未記載、artifact / regression / secret scan 再実行漏れのまま残る | Phase 未完了 |
 | source Phase の Done receipt、regression、artifact hash、compatibility baseline、operator delta、known blocker が target Phase readiness packet に継承されていない | 実装開始禁止 |
@@ -13992,7 +14014,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.175` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.176` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
