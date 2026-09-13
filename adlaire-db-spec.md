@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.186
+**バージョン：** V.187
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.186` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.187` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -4113,7 +4113,7 @@ Phase implementation packet は、実装開始前に以下の canonical key を�
 | `task_ids` | 対象 Phase の atomic task ID 一覧。各 task は入力契約、禁止変更、完了条件、verification command に接続する |
 | `scenario_ids` | 対象 Phase の scenario ID 一覧。各 scenario は expected result、artifact path、oracle に接続する |
 | `artifact_paths` | test、snapshot、fixture、log、manifest、review handoff、secret scan の保存先一覧 |
-| `audit_results` | §9.17 の `phase_packet_result`、`acceptance_manifest_result`、`oracle_result`、`scenario_matrix_result`、`schema_registry_result`、`decision_precedence_result`、`coverage_closure_result`、`artifact_paths_result`、`failure_remediation_result`、`transition_ready_result`、`review_handoff_result`、`operator_delta_result`、`precision_closure_index_result`、`change_impact_closure_result`、`rollout_readiness_closure_result`、`compatibility_baseline_closure_result`、`security_abuse_closure_result`、`configuration_environment_closure_result`、`ambiguity_atomic_task_closure_result`、`review_operator_closure_result`、`merge_readiness_closure_result`、`dependency_provenance_closure_result`、`upgrade_data_compatibility_closure_result`、`performance_capacity_closure_result`、`incident_recovery_closure_result`、`contract_versioning_closure_result`、`machine_contract_artifact_closure_result`、`phase_execution_sequence_closure_result`、`verdict_normalization_closure_result`、`phase_done_final_result`、`readiness_audit_result` を全て含む |
+| `audit_results` | §9.17 の `phase_packet_result`、`acceptance_manifest_result`、`oracle_result`、`scenario_matrix_result`、`schema_registry_result`、`decision_precedence_result`、`coverage_closure_result`、`artifact_paths_result`、`failure_remediation_result`、`transition_ready_result`、`review_handoff_result`、`operator_delta_result`、`precision_closure_index_result`、`change_impact_closure_result`、`rollout_readiness_closure_result`、`compatibility_baseline_closure_result`、`security_abuse_closure_result`、`configuration_environment_closure_result`、`ambiguity_atomic_task_closure_result`、`review_operator_closure_result`、`merge_readiness_closure_result`、`dependency_provenance_closure_result`、`upgrade_data_compatibility_closure_result`、`performance_capacity_closure_result`、`incident_recovery_closure_result`、`contract_versioning_closure_result`、`machine_contract_artifact_closure_result`、`phase_execution_sequence_closure_result`、`verdict_normalization_closure_result`、`release_handoff_closure_result`、`phase_done_final_result`、`readiness_audit_result` を全て含む |
 | `blocking_items` | 実装開始前に残っている blocker 一覧。実装開始可能な packet では空配列または `none` |
 | `ready_to_implement` | 実装開始を許可する最終 boolean。`true` 以外は実装開始禁止 |
 
@@ -5802,6 +5802,25 @@ verdict vocabulary / pass-fail normalization / reviewer decision は、Phase の
 | `verdict_normalization_closure_result` | 上記 field がすべて `pass`。曖昧 verdict、根拠なし N/A、manual 判断の放置、partial 完了、reviewer 判断根拠欠落、Done/Not Done 写像漏れがすべて 0 件 | `pass` 以外は実装開始禁止 |
 
 `verdict_normalization_closure_result` は readiness packet の `audit_results` と Done receipt に必ず含める。判定語彙に影響しない Phase でも `verdict_normalization_closure_result = pass` とし、`verdict_vocabulary:unchanged`、`pass_condition:unchanged`、`fail_condition:unchanged`、`not_applicable:none_without_reason`、`partial_result:none`、および非対象理由を `closure_evidence` に記録する。これにより「ほぼ完了」「手元では pass」「あとで確認」「対象外のはず」といった曖昧な完了判定を禁止する。
+
+**canonical release handoff / rollout decision / rollback evidence closure audit：**
+
+release handoff / rollout decision / rollback evidence は、Phase 完了後に何を release candidate とし、どの条件で rollout し、どの証跡で rollback できるかを固定する closure gate である。対象 Phase の readiness packet と Done receipt は、以下の closure audit field を持ち、`release_handoff_closure_result = pass` でなければ Phase 完了、rollout ready、または merge に進めない。
+
+| Audit field | pass 条件 | fail 時の扱い |
+|-------------|----------|---------------|
+| `release_candidate_inventory_result` | release 対象の binary、config、schema、artifact、snapshot、migration、operator document、対象外 artifact が列挙され、commit SHA と一致している | rollout ready 不可 |
+| `rollout_decision_result` | rollout 可否、段階的 rollout 条件、停止条件、承認者、対象環境、rollout しない Phase の理由が固定されている | merge 不可 |
+| `rollback_evidence_result` | rollback command、rollback artifact、復旧確認 command、data safety、config revert、feature flag revert、失敗時 escalation が固定されている | Phase 完了扱い禁止 |
+| `operator_release_note_result` | operator 向け release note に user-visible change、compatibility delta、config/migration、monitoring、rollback、known blocker 0 件が記録されている | rollout ready 不可 |
+| `compatibility_release_delta_result` | Turso Cloud 互換、SDK transcript、wire snapshot、legacy metadata、error/status、default mode の release 差分が 0 件または理由付きで固定されている | merge 不可 |
+| `data_safety_release_result` | 永続化、migration、backup、restore、PITR、replication、HA、internal adapter の data safety 判定と必要 artifact が固定されている | Phase 完了扱い禁止 |
+| `post_release_monitoring_result` | release 後に見る health、log、metric、error rate、replication lag、quota/storage、operator alert、rollback trigger が固定されている | rollout ready 不可 |
+| `release_blocker_result` | 未解決 failure、flaky、manual review、security issue、compatibility drift、artifact stale、approval missing、PR conflict が 0 件である | merge 不可 |
+| `release_handoff_trace_result` | Done receipt、artifact manifest、review handoff、operator note、release note、rollback guide の相互参照と hash が一致している | Phase 未完了 |
+| `release_handoff_closure_result` | 上記 field がすべて `pass`。release candidate 不明、rollout 判断未定義、rollback 証跡欠落、operator note 欠落、post-release monitoring 未定義、release blocker 残存がすべて 0 件 | `pass` 以外は Phase 完了禁止 |
+
+`release_handoff_closure_result` は readiness packet の `audit_results` と Done receipt に必ず含める。release / rollout 対象外の Phase でも `release_handoff_closure_result = pass` とし、`release_candidate:none`、`rollout_decision:not_applicable_with_reason`、`rollback_evidence:unchanged`、`operator_release_note:no_user_visible_change`、`release_blocker:0`、および非対象理由を `closure_evidence` に記録する。これにより「merge はできたが運用投入・rollback 判断ができない」状態を Phase 未完了として扱える。
 
 Phase operator behavior delta に関係する仕様変更は、§1.4、§1.5、§3.5.3、§7.3、§9.1.10、§9.1.11、§9.1.13、§9.1.15、§9.1.17、§9.1.19、§9.1.20、§9.1.22、§9.1.23、§9.1.24、§9.1.29、§9.1.32、§9.1.33、§9.1.37、§9.1.44、§9.1.45、§9.1.46、§9.1.47、§9.1.49、§9.1.50、§9.1.51、§9.2、§9.4、§9.5、§9.6、§9.7、§9.8、§9.11、§9.14、§9.17、該当 Phase 詳細節を同時更新する。operator behavior delta がない Phase 実装 PR は、利用者・運用者から見える変更、互換差分、運用手順、release note、rollback が未確定であるため、Phase 完了扱いにしない。
 
@@ -8503,8 +8522,9 @@ Phase 1〜19 の実装開始前に、実装者は対象 Phase の readiness pack
 | `machine_contract_artifact_closure_result` | §9.1.52 の machine-readable contract / snapshot / artifact template closure に従い、OpenAPI contract、JSON Schema、wire snapshot、Turso observed snapshot、SDK transcript、artifact template、CI machine verification、contract drift detection、reviewer replay contract がすべて閉じている | 実装開始禁止 |
 | `phase_execution_sequence_closure_result` | §9.1.52 の phase execution sequence / stop condition / evidence handoff closure に従い、phase entry sequence、pre-implementation freeze、task order、stop condition、mid-phase change control、evidence handoff sequence、phase exit sequence、blocked state、resume state がすべて閉じている | 実装開始禁止 |
 | `verdict_normalization_closure_result` | §9.1.52 の verdict vocabulary / pass-fail normalization / reviewer decision closure に従い、verdict vocabulary、pass condition、fail condition、blocked condition、not applicable condition、manual review condition、partial result prohibition、reviewer decision trace、done/not_done mapping がすべて閉じている | 実装開始禁止 |
+| `release_handoff_closure_result` | §9.1.52 の release handoff / rollout decision / rollback evidence closure に従い、release candidate inventory、rollout decision、rollback evidence、operator release note、compatibility release delta、data safety release、post-release monitoring、release blocker、release handoff trace がすべて閉じている | Phase 完了扱い禁止 |
 | `phase_done_final_result` | §9.1.33 に従い、Done receipt final audit の readiness、manifest、artifact、failure、regression、handoff、operator、precision closure、zero-bug がすべて pass である | Phase 完了扱い禁止 |
-| `readiness_audit_result` | 上記 30 field がすべて `pass`。ただし `phase_done_final_result` は実装完了時に評価する。`missing`、`partial`、`manual_only`、`not_run`、`N/A` 根拠なし、または値不一致が 0 件 | `pass` 以外は実装開始禁止 |
+| `readiness_audit_result` | 上記 31 field がすべて `pass`。ただし `phase_done_final_result` は実装完了時に評価する。`missing`、`partial`、`manual_only`、`not_run`、`N/A` 根拠なし、または値不一致が 0 件 | `pass` 以外は実装開始禁止 |
 
 `readiness_audit_result` は Phase 実装開始の入口 gate であり、実装後の Done receipt で初めて埋めてはならない。実装中に scope、API、schema、error、persistence、auth、compatibility、artifact path、review command、operator behavior のいずれかが変わる場合は、同じ PR で readiness packet、受入 manifest、oracle、scenario matrix、schema registry、precision closure を更新し、再度 `readiness_audit_result = pass` にする。更新しないまま code、test、snapshot、artifact だけを変更した場合は merge 不可とする。
 
@@ -8535,6 +8555,7 @@ Phase 1〜19 の実装開始前に、実装者は対象 Phase の readiness pack
 | machine-readable contract / snapshot / artifact template の OpenAPI contract、JSON Schema、wire snapshot、Turso observed snapshot、SDK transcript、artifact template、CI machine verification、contract drift detection、reviewer replay contract のいずれかが未確定または artifact 未接続である | 実装開始禁止 |
 | phase execution sequence / stop condition / evidence handoff の phase entry sequence、pre-implementation freeze、task order、stop condition、mid-phase change control、evidence handoff sequence、phase exit sequence、blocked state、resume state のいずれかが未確定または artifact 未接続である | 実装開始禁止 |
 | verdict vocabulary / pass-fail normalization / reviewer decision の verdict vocabulary、pass condition、fail condition、blocked condition、not applicable condition、manual review condition、partial result prohibition、reviewer decision trace、done/not_done mapping のいずれかが未確定または artifact 未接続である | 実装開始禁止 |
+| release handoff / rollout decision / rollback evidence の release candidate inventory、rollout decision、rollback evidence、operator release note、compatibility release delta、data safety release、post-release monitoring、release blocker、release handoff trace のいずれかが未確定または artifact 未接続である | Phase 未完了 |
 | artifact path、hash、secret scan、reviewer command が readiness packet、受入 manifest、Done receipt、artifact manifest、review handoff の間で一致しない | Phase 未完了 |
 | failure が未分類、root cause 未記載、再検証 command 未記載、artifact / regression / secret scan 再実行漏れのまま残る | Phase 未完了 |
 | source Phase の Done receipt、regression、artifact hash、compatibility baseline、operator delta、known blocker が target Phase readiness packet に継承されていない | 実装開始禁止 |
@@ -14224,7 +14245,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.186` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.187` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
