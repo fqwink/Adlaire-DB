@@ -1,6 +1,6 @@
 # Adlaire DB 仕様書
 
-**バージョン：** V.162
+**バージョン：** V.163
 **ステータス：** 設計中  
 **最終更新：** 2026-09-13
 
@@ -8,7 +8,7 @@
 
 ## 0. 仕様書バージョン管理固定契約
 
-本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.162` である。
+本仕様書のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書バージョンは `V.163` である。
 
 仕様書バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、仕様書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -5515,7 +5515,7 @@ Phase 1 は「実行可能な CLI skeleton と config 解決の土台」を完�
 | `coverage_closure_result` | help、invalid flag、config precedence、no persistence の coverage gap 0 件 |
 | `review_handoff_result` | 第三者が build/help/config/no persistence を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 1 は CLI skeleton 追加のみ。DB/HTTP/JWT は利用不可である release note |
-| `precision_closure_result` | help/config/no persistence/stub token の artifact path、reviewer 再現 command、`P1-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
+| `precision_closure_result` | help/config/no persistence/stub token の artifact path、reviewer 再現 command、`P1-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、§9.11.2 canonical / manifest / reproduction / review algorithm / freeze / reconciliation / remediation / cross-reference ledger 準拠、未解決判断 0 件 |
 
 **Phase 2 完全実装精度固定契約：**
 
@@ -5587,7 +5587,7 @@ Phase 2 は data-dir、単一 default DB、metadata 初期値、process lock、l
 | `coverage_closure_result` | tree、metadata、lock、DB open、PRAGMA、integrity、restart、no HTTP exposure の coverage gap 0 件 |
 | `review_handoff_result` | 第三者が init/lock/open/restart/no HTTP を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 2 で data-dir と default DB が作成されるが外部 HTTP API はまだ使えない release note |
-| `precision_closure_result` | data-dir/lock/metadata/default DB/WAL/integrity/restart/no HTTP の artifact path、reviewer 再現 command、`P2-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
+| `precision_closure_result` | data-dir/lock/metadata/default DB/WAL/integrity/restart/no HTTP の artifact path、reviewer 再現 command、`P2-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、§9.11.2 canonical / manifest / reproduction / review algorithm / freeze / reconciliation / remediation / cross-reference ledger 準拠、未解決判断 0 件 |
 
 **Phase 3 完全実装精度固定契約：**
 
@@ -5668,7 +5668,7 @@ Phase 3 は libSQL client SDK が HTTP 経由で最小 SQL 実行できる hrana
 | `coverage_closure_result` | health、pipeline success/error、malformed JSON、SQL error、close、restart、SDK smoke の gap 0 件 |
 | `review_handoff_result` | 第三者が health/pipeline/error/restart/SDK smoke を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 3 で HTTP API `/v2/health` と `/v2/pipeline` が初公開され、auth はまだ無効である release note |
-| `precision_closure_result` | hrana-http v2 schema、wire snapshot、SDK transcript、restart persistence、unsupported surface の artifact path、reviewer 再現 command、`P3-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
+| `precision_closure_result` | hrana-http v2 schema、wire snapshot、SDK transcript、restart persistence、unsupported surface の artifact path、reviewer 再現 command、`P3-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、§9.11.2 canonical / manifest / reproduction / review algorithm / freeze / reconciliation / remediation / cross-reference ledger 準拠、未解決判断 0 件 |
 
 **Phase 4 完全実装精度固定契約：**
 
@@ -5761,7 +5761,7 @@ Phase 4 は Phase 3 の hrana-http v2 surface に JWT HS256 認証と `token cre
 | `coverage_closure_result` | startup、auth、permission、token CLI、revoke、redaction、Phase 1〜3 regression の gap 0 件 |
 | `review_handoff_result` | 第三者が auth matrix、permission matrix、token create、restart、secret scan を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 4 で JWT secret 設定時に `/v2/pipeline` が認証必須になり、未設定時は開発用 auth disabled として動く release note |
-| `precision_closure_result` | auth matrix、permission matrix、token persistence、secret redaction、SDK auth transcript、Phase 1〜3 regression の artifact path、reviewer 再現 command、`P4-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
+| `precision_closure_result` | auth matrix、permission matrix、token persistence、secret redaction、SDK auth transcript、Phase 1〜3 regression の artifact path、reviewer 再現 command、`P4-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、§9.11.2 canonical / manifest / reproduction / review algorithm / freeze / reconciliation / remediation / cross-reference ledger 準拠、未解決判断 0 件 |
 
 **Phase 5 完全実装精度固定契約：**
 
@@ -5849,7 +5849,7 @@ Phase 5 は Phase 1〜4 の実装を、構造化ログ、統合テスト、SDK �
 | `coverage_closure_result` | log、SDK、restart、secret、unsupported、Phase 1〜4 regression の gap 0 件 |
 | `review_handoff_result` | 第三者が log parse、SDK CRUD、restart、secret scan、regression を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 5 では API 機能追加はなく、運用ログと互換 regression が完了条件になる release note |
-| `precision_closure_result` | JSONL parser、request log、SDK CRUD、restart persistence、secret scan、unsupported surface、Phase 1〜4 regression の artifact path、reviewer 再現 command、`P5-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
+| `precision_closure_result` | JSONL parser、request log、SDK CRUD、restart persistence、secret scan、unsupported surface、Phase 1〜4 regression の artifact path、reviewer 再現 command、`P5-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、§9.11.2 canonical / manifest / reproduction / review algorithm / freeze / reconciliation / remediation / cross-reference ledger 準拠、未解決判断 0 件 |
 
 **Phase 1〜5 完全実装精度正規化契約：**
 
@@ -5979,7 +5979,7 @@ Phase 6 は Phase 1〜5 の単一 DB HTTP/JWT/SDK 互換を維持したまま、
 | `coverage_closure_result` | route、validation、auth、metadata、isolation、restart、unsupported、regression の gap 0 件 |
 | `review_handoff_result` | 第三者が route、validation、metadata、isolation、restart、unsupported を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 6 で `/{db-name}/v2/pipeline` が追加されるが、DB 作成管理 API はまだ成功応答しない release note |
-| `precision_closure_result` | DB name validation、path routing、default route 後方互換、DB isolation、metadata atomic update、restart restore、Phase 1〜5 regression の artifact path、reviewer 再現 command、`P6-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
+| `precision_closure_result` | DB name validation、path routing、default route 後方互換、DB isolation、metadata atomic update、restart restore、Phase 1〜5 regression の artifact path、reviewer 再現 command、`P6-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、§9.11.2 canonical / manifest / reproduction / review algorithm / freeze / reconciliation / remediation / cross-reference ledger 準拠、未解決判断 0 件 |
 
 **Phase 7 完全実装精度固定契約：**
 
@@ -6077,7 +6077,7 @@ Phase 7 は Phase 6 の multi DB routing に、Adlaire 管理 API、token CRUD�
 | `coverage_closure_result` | admin auth、DB CRUD、token CRUD、scope、revoke、atomicity、concurrency、unsupported、regression の gap 0 件 |
 | `review_handoff_result` | 第三者が admin API、token API、scope、revoke、restart、concurrency を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 7 で `/admin/v1/databases` と `/admin/v1/tokens` が成功応答になり、DB scope JWT が有効になる release note |
-| `precision_closure_result` | Admin auth、DB CRUD、token CRUD、DB scope JWT、revoke immediate effect、metadata/delete consistency、Phase 1〜6 regression の artifact path、reviewer 再現 command、`P7-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
+| `precision_closure_result` | Admin auth、DB CRUD、token CRUD、DB scope JWT、revoke immediate effect、metadata/delete consistency、Phase 1〜6 regression の artifact path、reviewer 再現 command、`P7-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、§9.11.2 canonical / manifest / reproduction / review algorithm / freeze / reconciliation / remediation / cross-reference ledger 準拠、未解決判断 0 件 |
 
 **Phase 8 完全実装精度固定契約：**
 
@@ -6180,7 +6180,7 @@ Phase 8 は Turso Cloud 互換の管理モデルを自己ホスト環境へ導�
 | `coverage_closure_result` | migration、metadata、admin API、Platform API、auth/scope、quota、legacy、unsupported、regression の gap 0 件 |
 | `review_handoff_result` | 第三者が migration、Admin API、Turso API、scope、quota、snapshot、secret scan を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 8 で Turso Cloud 互換の organization/group/location/quota/usage と `/v1/*` が公開される release note |
-| `precision_closure_result` | organization/group/location/quota/usage、`/v1/*` wrapper、legacy metadata migration、scope auth、quota enforcement、Turso snapshot、Phase 1〜7 regression の artifact path、reviewer 再現 command、`P8-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
+| `precision_closure_result` | organization/group/location/quota/usage、`/v1/*` wrapper、legacy metadata migration、scope auth、quota enforcement、Turso snapshot、Phase 1〜7 regression の artifact path、reviewer 再現 command、`P8-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、§9.11.2 canonical / manifest / reproduction / review algorithm / freeze / reconciliation / remediation / cross-reference ledger 準拠、未解決判断 0 件 |
 
 **Phase 9 完全実装精度固定契約：**
 
@@ -6283,7 +6283,7 @@ Phase 9 は hrana-ws v3 WebSocket surface と interactive transaction を完成�
 | `coverage_closure_result` | upgrade、hello、stream、SQL、transaction、store_sql、permission、unsupported、regression の gap 0 件 |
 | `review_handoff_result` | 第三者が WebSocket upgrade、SDK transaction、rollback、store_sql、secret scan を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 9 で hrana-ws v3 `/v3/baton` と `/{db-name}/v3/baton` が公開され、interactive transaction が利用可能になる release note |
-| `precision_closure_result` | WebSocket upgrade、hello/auth、stream/cursor lifecycle、interactive transaction commit/rollback、close cleanup、SDK WS transcript、Phase 1〜8 regression の artifact path、reviewer 再現 command、`P9-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
+| `precision_closure_result` | WebSocket upgrade、hello/auth、stream/cursor lifecycle、interactive transaction commit/rollback、close cleanup、SDK WS transcript、Phase 1〜8 regression の artifact path、reviewer 再現 command、`P9-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、§9.11.2 canonical / manifest / reproduction / review algorithm / freeze / reconciliation / remediation / cross-reference ledger 準拠、未解決判断 0 件 |
 
 **Phase 10 完全実装精度固定契約：**
 
@@ -6379,7 +6379,7 @@ Phase 10 は管理下 DB 間の ATTACH と、Phase 1〜10 の HTTP/WebSocket/DB 
 | `coverage_closure_result` | ATTACH parser、path、policy、protocol、metrics、auth、secret、regression の gap 0 件 |
 | `review_handoff_result` | 第三者が ATTACH allow/deny、任意 path 拒否、metrics counter、secret scan を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 10 で管理下 DB の ATTACH と `GET /admin/v1/metrics` が公開されるが、metrics は再起動で reset される release note |
-| `precision_closure_result` | managed ATTACH allow/deny、arbitrary path reject、metrics counter/gauge、admin auth、secret redaction、Phase 1〜9 regression の artifact path、reviewer 再現 command、`P10-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
+| `precision_closure_result` | managed ATTACH allow/deny、arbitrary path reject、metrics counter/gauge、admin auth、secret redaction、Phase 1〜9 regression の artifact path、reviewer 再現 command、`P10-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、§9.11.2 canonical / manifest / reproduction / review algorithm / freeze / reconciliation / remediation / cross-reference ledger 準拠、未解決判断 0 件 |
 
 **Phase 8〜10 の境界決定：**
 
@@ -6491,7 +6491,7 @@ Phase 11 は primary role の replication 送信側 API を完成させる Phase
 | `coverage_closure_result` | config、auth、SSE、snapshot、heartbeat、status、cleanup、unsupported、regression の gap 0 件 |
 | `review_handoff_result` | 第三者が primary 起動、SSE、snapshot、heartbeat、status、secret scan を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 11 で primary replication API が公開されるが replica apply / redirect はまだ利用不可である release note |
-| `precision_closure_result` | replica registration、WAL stream auth/range/checksum、snapshot consistency、retention、lag metadata、SDK/API compatibility、Phase 1〜10 regression の artifact path、reviewer 再現 command、`P11-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
+| `precision_closure_result` | replica registration、WAL stream auth/range/checksum、snapshot consistency、retention、lag metadata、SDK/API compatibility、Phase 1〜10 regression の artifact path、reviewer 再現 command、`P11-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、§9.11.2 canonical / manifest / reproduction / review algorithm / freeze / reconciliation / remediation / cross-reference ledger 準拠、未解決判断 0 件 |
 
 **Phase 6〜11 完全実装精度正規化契約：**
 
@@ -12216,7 +12216,7 @@ Phase 12 は、Phase 11 の primary replication API を replica が消費し、r
 | `secret_redaction_result` | response/log/artifact に replication token、JWT、SQL args、frame bytes が残らない scan |
 | `review_handoff_result` | 第三者が primary + 2 replica、primary down、restart、redirect、checksum mismatch を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 12 で replica read/catch-up/redirect が利用可能になるが archive/PITR/branch/HA は未提供である release note |
-| `precision_closure_result` | replica state、snapshot bootstrap、WAL catch-up、redirect、primary down、checksum mismatch、multi replica、Phase 1〜11 regression の artifact path、reviewer 再現 command、`P12-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
+| `precision_closure_result` | replica state、snapshot bootstrap、WAL catch-up、redirect、primary down、checksum mismatch、multi replica、Phase 1〜11 regression の artifact path、reviewer 再現 command、`P12-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、§9.11.2 canonical / manifest / reproduction / review algorithm / freeze / reconciliation / remediation / cross-reference ledger 準拠、未解決判断 0 件 |
 
 #### 実装詳細
 
@@ -12468,7 +12468,7 @@ Phase 13 は、Phase 11〜12 で生成・消費される WAL frame を、PITR / 
 | `secret_redaction_result` | response/log/artifact に token、JWT、SQL args、frame bytes、backup body が残らない scan |
 | `review_handoff_result` | 第三者が archive write、restart check、corruption、retention cleanup、disabled mode を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 13 で WAL archive と retention が有効化されるが backup/restore/PITR/branch API は未提供である release note |
-| `precision_closure_result` | manifest schema、archive write、snapshot archive、retention cleanup、corruption detection、disabled mode、Phase 1〜12 regression の artifact path、reviewer 再現 command、`P13-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
+| `precision_closure_result` | manifest schema、archive write、snapshot archive、retention cleanup、corruption detection、disabled mode、Phase 1〜12 regression の artifact path、reviewer 再現 command、`P13-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、§9.11.2 canonical / manifest / reproduction / review algorithm / freeze / reconciliation / remediation / cross-reference ledger 準拠、未解決判断 0 件 |
 
 ---
 
@@ -12780,7 +12780,7 @@ Phase 14 は、Phase 13 の WAL archive / manifest を入力として backup、r
 | `secret_redaction_result` | response/log/artifact に token、JWT、SQL args、backup body、uploaded DB bytes が残らない scan |
 | `review_handoff_result` | 第三者が backup、restore rollback、PITR success/corrupt/range outside、startup recovery を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 14 で backup/restore/PITR が公開され、失敗時は rollback または restore-failed marker に収束する release note |
-| `precision_closure_result` | backup consistency、restore rollback、PITR replay、startup recovery、quota/block/auth precedence、Phase 1〜13 regression の artifact path、reviewer 再現 command、`P14-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
+| `precision_closure_result` | backup consistency、restore rollback、PITR replay、startup recovery、quota/block/auth precedence、Phase 1〜13 regression の artifact path、reviewer 再現 command、`P14-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、§9.11.2 canonical / manifest / reproduction / review algorithm / freeze / reconciliation / remediation / cross-reference ledger 準拠、未解決判断 0 件 |
 
 ---
 
@@ -13034,7 +13034,7 @@ Phase 15 は、Phase 14 の backup/PITR 基盤を使い、source DB から独立
 | `secret_redaction_result` | response/log/artifact に token、JWT、SQL args、absolute path、raw branch request body が残らない scan |
 | `review_handoff_result` | 第三者が current/PITR branch、delete/recovery、restart、source delete denial、seed compatibility を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 15 で branch DB が独立 resource として利用可能になり、merge/diff/COW/extension は未提供である release note |
-| `precision_closure_result` | branch metadata、current/timestamp/frame create、delete recovery、routing isolation、seed compatibility、Phase 1〜14 regression の artifact path、reviewer 再現 command、`P15-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
+| `precision_closure_result` | branch metadata、current/timestamp/frame create、delete recovery、routing isolation、seed compatibility、Phase 1〜14 regression の artifact path、reviewer 再現 command、`P15-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、§9.11.2 canonical / manifest / reproduction / review algorithm / freeze / reconciliation / remediation / cross-reference ledger 準拠、未解決判断 0 件 |
 
 ---
 
@@ -13210,7 +13210,7 @@ Phase 16 は、事前配置済み SQLite `.so` extension を Admin API で登録
 | `secret_redaction_result` | response/log/artifact に token、JWT、SQL args、absolute path、env 展開値が残らない scan |
 | `review_handoff_result` | 第三者が register/load/delete/restart/path rejection/SQL rejection を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 16 で事前配置済み `.so` extension の登録/削除が可能になり、upload/Wasm/metrics/HA は未提供である release note |
-| `precision_closure_result` | extension manifest、allowlist、sha256、canonical path/symlink rejection、new connection load、SQL bypass rejection、Phase 1〜15 regression の artifact path、reviewer 再現 command、`P16-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
+| `precision_closure_result` | extension manifest、allowlist、sha256、canonical path/symlink rejection、new connection load、SQL bypass rejection、Phase 1〜15 regression の artifact path、reviewer 再現 command、`P16-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、§9.11.2 canonical / manifest / reproduction / review algorithm / freeze / reconciliation / remediation / cross-reference ledger 準拠、未解決判断 0 件 |
 
 ### Phase 17：メトリクス永続化・外部監視連携
 
@@ -13388,7 +13388,7 @@ Phase 17 は、Phase 10 の in-memory metrics を永続 counter と Prometheus t
 | `secret_redaction_result` | response/log/artifact に token、JWT、SQL args、raw path、absolute path が残らない scan |
 | `review_handoff_result` | 第三者が snapshot restore、Prometheus output、quota boundary、corrupt recovery、redaction を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 17 で永続 metrics と Prometheus text endpoint が利用可能になり、alerting/remote write/HA は未提供である release note |
-| `precision_closure_result` | metrics snapshot persistence、Prometheus format、counter/gauge restore、usage/quota boundary、label redaction、Phase 1〜16 regression の artifact path、reviewer 再現 command、`P17-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
+| `precision_closure_result` | metrics snapshot persistence、Prometheus format、counter/gauge restore、usage/quota boundary、label redaction、Phase 1〜16 regression の artifact path、reviewer 再現 command、`P17-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、§9.11.2 canonical / manifest / reproduction / review algorithm / freeze / reconciliation / remediation / cross-reference ledger 準拠、未解決判断 0 件 |
 
 ### Phase 18：HA・自動フェイルオーバー
 
@@ -13552,7 +13552,7 @@ Phase 18 は、primary/replica 構成で single-leader HA を完成させる Pha
 | `secret_redaction_result` | response/log/artifact に HA token、JWT、SQL args、frame bytes が残らない scan |
 | `review_handoff_result` | 第三者が promote/demote/redirect/split-brain/restart/partition を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 18 で HA status/promote/demote と single-leader failover が利用可能になり、multi-primary/内製化は未提供である release note |
-| `precision_closure_result` | HA state、term monotonic、promote/demote、redirect/no leader、split-brain rejection、restart recovery、Phase 1〜17 regression の artifact path、reviewer 再現 command、`P18-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
+| `precision_closure_result` | HA state、term monotonic、promote/demote、redirect/no leader、split-brain rejection、restart recovery、Phase 1〜17 regression の artifact path、reviewer 再現 command、`P18-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、§9.11.2 canonical / manifest / reproduction / review algorithm / freeze / reconciliation / remediation / cross-reference ledger 準拠、未解決判断 0 件 |
 
 ### Phase 19：libSQL 内部コンポーネント段階的内製化
 
@@ -13688,7 +13688,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 
 | 項目 | 内容 |
 |------|------|
-| `version_result` | 仕様書 `V.162` 準拠、Phase 19 contract ID、commit SHA |
+| `version_result` | 仕様書 `V.163` 準拠、Phase 19 contract ID、commit SHA |
 | `config_result` | `TASK-P19-1`、`SCN-P19-1`〜`SCN-P19-5` の pass/fail と artifact path |
 | `adapter_result` | WAL、storage readonly、executor の selected mode、shadow/active 状態、artifact path |
 | `shadow_diff_result` | 差分ゼロまたは差分理由、ERROR log、test failure の証跡 |
@@ -13702,7 +13702,7 @@ Phase 19 は「内部差し替えを始める Phase」であり、「外部契�
 | `phase_boundary_result` | Phase 20 以降へ送った項目、Phase 19 で未実装の理由、production path 差分なし |
 | `review_handoff_result` | 第三者が config、shadow、active、rollback、SDK transcript を再現できる command と artifact |
 | `operator_behavior_delta_result` | Phase 19 で内製 adapter 境界が利用可能になり、外部 API と既定挙動は変わらない release note |
-| `precision_closure_result` | config flags、shadow/active/rollback、adapter boundary、SDK transcript、performance/crash recovery、Phase 1〜18 regression の artifact path、reviewer 再現 command、`P19-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、未解決判断 0 件 |
+| `precision_closure_result` | config flags、shadow/active/rollback、adapter boundary、SDK transcript、performance/crash recovery、Phase 1〜18 regression の artifact path、reviewer 再現 command、`P19-PRECISION-CLOSURE`、closure fields（ambiguity / failure / review_handoff / na / go_no_go / regression_inheritance / determinism / assertion_binding / negative_surface / evidence_integrity / operator_observability）すべて pass、§9.11.2 canonical / manifest / reproduction / review algorithm / freeze / reconciliation / remediation / cross-reference ledger 準拠、未解決判断 0 件 |
 
 **Phase 12〜19 完全実装精度正規化契約：**
 
