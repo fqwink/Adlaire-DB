@@ -3,7 +3,7 @@
 ## Status
 
 - `docs/PROJECT_CHARTER.md` is the project charter source of truth and records the overview, direction, policies, specification entry point, and specification-driven development direction.
-- `docs/spec/core.md`, `docs/spec/runtime.md`, `docs/spec/auth.md`, `docs/spec/api.md`, `docs/spec/operations.md`, `docs/spec/implementation-control.md`, `docs/spec/phase-contracts.md`, `docs/spec/implementation-details.md`, `docs/spec/internalization.md`, `docs/spec/testing.md`, and `docs/spec/phase-*.md` are the specification source-of-truth set.
+- `docs/spec/compatibility-scope.md`, `docs/spec/runtime.md`, `docs/spec/auth.md`, `docs/spec/api.md`, `docs/spec/operations.md`, `docs/spec/implementation-control.md`, `docs/spec/phase-contracts.md`, `docs/spec/implementation-details.md`, `docs/spec/internalization.md`, `docs/spec/testing.md`, and `docs/spec/phase-*.md` are the specification source-of-truth set.
 - Policies are recorded in `docs/PROJECT_CHARTER.md` and are not specification source of truth.
 - Phase 1 through Phase 19 are split under `docs/spec/`.
 - Files outside the specification source-of-truth set are supporting documents.
@@ -21,7 +21,7 @@ accident.
 | Path | Role | Authority |
 |------|------|-----------|
 | `docs/PROJECT_CHARTER.md` | Project charter, overview, direction, policies, and specification entry point | Project charter source of truth |
-| `docs/spec/core.md` | Core compatibility, boundary, and feature-scope specification | Source of truth |
+| `docs/spec/compatibility-scope.md` | Compatibility, boundary, and feature-scope specification | Source of truth |
 | `docs/spec/runtime.md` | Runtime architecture, data layout, CLI, config, startup, shutdown, and recovery specification | Source of truth |
 | `docs/spec/auth.md` | Authentication and authorization specification | Source of truth |
 | `docs/spec/api.md` | API contract specification | Source of truth |
@@ -48,7 +48,7 @@ accident.
 | Area | Current Source | Notes |
 |----------------|----------------|-------|
 | Product direction responsibilities | `docs/PROJECT_CHARTER.md` sections 0-1 and 11 | Keep project authority clear |
-| Core compatibility and scope responsibilities | `docs/spec/core.md` | Keep boundary decisions small and easy to inspect |
+| Compatibility and scope responsibilities | `docs/spec/compatibility-scope.md` | Keep boundary decisions small and easy to inspect |
 | Runtime responsibilities | `docs/spec/runtime.md`, `docs/spec/auth.md`, and `docs/spec/api.md` | Keep runtime contracts linked |
 | Data protection and operations responsibilities | `docs/spec/operations.md` | Preserve operational safety |
 | Implementation control responsibilities | `docs/spec/implementation-control.md` | Keep common gates and review rules separate from runtime details |

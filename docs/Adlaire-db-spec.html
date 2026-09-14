@@ -486,7 +486,7 @@ a:focus-visible {
 <li class="ti"><a href="#4-2-仕様不足時の扱い" class="tl lv3" data-slug="4-2-仕様不足時の扱い">4.2 仕様不足時の扱い</a></li>
 </ul></li>
 </ul></li>
-<li class="tg"><div class="tg-row"><a href="#中核仕様" class="tl lv1" data-slug="中核仕様">中核仕様</a><button class="tg-btn" aria-expanded="false" data-target="tg-中核仕様" aria-label="展開"><svg viewBox="0 0 10 10" width="10" height="10"><polyline points="2,3 5,7 8,3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg></button></div><ul id="tg-中核仕様" class="tc" hidden>
+<li class="tg"><div class="tg-row"><a href="#互換性スコープ仕様" class="tl lv1" data-slug="互換性スコープ仕様">互換性・スコープ仕様</a><button class="tg-btn" aria-expanded="false" data-target="tg-互換性スコープ仕様" aria-label="展開"><svg viewBox="0 0 10 10" width="10" height="10"><polyline points="2,3 5,7 8,3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg></button></div><ul id="tg-互換性スコープ仕様" class="tc" hidden>
 <li class="ti"><a href="#2-互換性責務" class="tl lv2" data-slug="2-互換性責務">2. 互換性責務</a></li>
 <li class="tg"><div class="tg-row"><a href="#3-境界責務" class="tl lv2" data-slug="3-境界責務">3. 境界責務</a><button class="tg-btn" aria-expanded="false" data-target="tg-3-境界責務" aria-label="展開"><svg viewBox="0 0 10 10" width="10" height="10"><polyline points="2,3 5,7 8,3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg></button></div><ul id="tg-3-境界責務" class="tc" hidden>
 <li class="ti"><a href="#3-1-機能スコープ責務" class="tl lv3" data-slug="3-1-機能スコープ責務">3.1 機能スコープ責務</a></li>
@@ -760,7 +760,7 @@ a:focus-visible {
 <h3 id="4-1-仕様正本群" class="mh h3">4.1 仕様正本群</h3>
 <div class="tw"><table class="mt">
 <tr><th>正本</th><th>役割</th></tr>
-<tr><td><code class="ic">docs/spec/core.md</code></td><td>互換性、境界、機能スコープ</td></tr>
+<tr><td><code class="ic">docs/spec/compatibility-scope.md</code></td><td>互換性、境界、機能スコープ</td></tr>
 <tr><td><code class="ic">docs/spec/runtime.md</code></td><td>実行基盤、アーキテクチャ、CLI、config、起動停止、リカバリ</td></tr>
 <tr><td><code class="ic">docs/spec/auth.md</code></td><td>認証・認可仕様</td></tr>
 <tr><td><code class="ic">docs/spec/api.md</code></td><td>API 契約仕様</td></tr>
@@ -775,8 +775,8 @@ a:focus-visible {
 <h3 id="4-2-仕様不足時の扱い" class="mh h3">4.2 仕様不足時の扱い</h3>
 <p class="mp">仕様正本群に不足、矛盾、未定義の挙動がある場合は、実装で補完してはならない。先に仕様変更 PR を作成し、API 契約、状態遷移、永続化契約、エラー契約、テスト条件、完了条件を追加してから実装する。</p>
 <hr class="mr">
-<h1 id="中核仕様" class="mh h1">中核仕様</h1>
-<p class="mp">本ファイルは、Adlaire DB の互換性、境界、機能スコープを固定する中核仕様である。実行基盤、運用、実装統制、Phase 契約、実装詳細は分割後の各仕様正本を参照する。</p>
+<h1 id="互換性スコープ仕様" class="mh h1">互換性・スコープ仕様</h1>
+<p class="mp">本ファイルは、Adlaire DB の互換性、境界、機能スコープを固定する仕様である。実行基盤、運用、実装統制、Phase 契約、実装詳細は分割後の各仕様正本を参照する。</p>
 <p class="mp">プロジェクト目的、価値、優先順位、将来方針は <code class="ic">docs/PROJECT_CHARTER.md</code> を正とする。内製化の実装契約は <code class="ic">docs/spec/internalization.md</code> を正とする。</p>
 <h2 id="2-互換性責務" class="mh h2">2. 互換性責務</h2>
 <p class="mp">Adlaire DB は Turso Cloud / libSQL SDK / hrana 互換を最優先の外部契約として扱う。互換性に影響する変更は、実装前に差分、理由、SDK 影響、後方互換性、代替仕様を仕様へ固定する。自己ホスト都合の差分は、security または durability 上必要な場合に限り、仕様上の差分として明示する。</p>

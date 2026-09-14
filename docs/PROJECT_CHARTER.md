@@ -172,7 +172,7 @@ artifact、backup、snapshot、WAL archive の保持ルールを扱う場合は�
 
 | 正本 | 役割 |
 |------|------|
-| `docs/spec/core.md` | 互換性、境界、機能スコープ |
+| `docs/spec/compatibility-scope.md` | 互換性、境界、機能スコープ |
 | `docs/spec/runtime.md` | 実行基盤、アーキテクチャ、CLI、config、起動停止、リカバリ |
 | `docs/spec/auth.md` | 認証・認可仕様 |
 | `docs/spec/api.md` | API 契約仕様 |
@@ -190,7 +190,7 @@ artifact、backup、snapshot、WAL archive の保持ルールを扱う場合は�
 
 ---
 
-<!-- include: docs/spec/core.md -->
+<!-- include: docs/spec/compatibility-scope.md -->
 <!-- include: docs/spec/runtime.md -->
 <!-- include: docs/spec/auth.md -->
 <!-- include: docs/spec/api.md -->
