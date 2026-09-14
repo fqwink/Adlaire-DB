@@ -1,6 +1,6 @@
 # Adlaire DB プロジェクト憲章 / 仕様正本入口
 
-**バージョン：** V.218
+**バージョン：** V.219
 **ステータス：** 設計中
 **最終更新：** 2026-09-13
 
@@ -14,7 +14,7 @@
 
 ### 0.1 版管理
 
-本仕様書群のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書群バージョンは `V.218` である。
+本仕様書群のバージョンは `V.{累積番号}` 形式で表記する。現在の仕様書群バージョンは `V.219` である。
 
 仕様書群バージョンは累積単調増加とし、リセットしてはならない。大規模改訂、Phase 再編、リポジトリ移行、文書構成変更、実装方針変更、Turso Cloud 互換方針の更新があっても、`V.1`、`0.x`、日付ベース、Phase 番号ベースへ戻してはならない。
 
@@ -172,9 +172,14 @@ artifact、backup、snapshot、WAL archive の保持ルールを扱う場合は�
 
 | 正本 | 役割 |
 |------|------|
-| `docs/spec/core.md` | 互換性、境界、実行基盤、データ保全、運用、実装統制、Phase 仕様入口 |
+| `docs/spec/compatibility-scope.md` | 互換性、境界、機能スコープ |
+| `docs/spec/runtime.md` | 実行基盤、アーキテクチャ、CLI、config、起動停止、リカバリ |
 | `docs/spec/auth.md` | 認証・認可仕様 |
 | `docs/spec/api.md` | API 契約仕様 |
+| `docs/spec/operations.md` | データ保全、WAL、セキュリティ、ログ、運用 |
+| `docs/spec/implementation-control.md` | 全 Phase 共通の実装統制、Done 条件、証跡、レビュー統制 |
+| `docs/spec/phase-contracts.md` | Phase 別完了ゲート、API/永続化/error/test/security 契約、Phase 詳細仕様入口 |
+| `docs/spec/implementation-details.md` | モジュール構成、主要型定義、共通実装詳細 |
 | `docs/spec/internalization.md` | 内製化の実装契約 |
 | `docs/spec/testing.md` | テスト仕様 |
 | `docs/spec/phase-*.md` | Phase 単位の詳細仕様 |
@@ -185,6 +190,13 @@ artifact、backup、snapshot、WAL archive の保持ルールを扱う場合は�
 
 ---
 
-<!-- include: docs/spec/core.md -->
+<!-- include: docs/spec/compatibility-scope.md -->
+<!-- include: docs/spec/runtime.md -->
+<!-- include: docs/spec/auth.md -->
+<!-- include: docs/spec/api.md -->
+<!-- include: docs/spec/operations.md -->
+<!-- include: docs/spec/implementation-control.md -->
+<!-- include: docs/spec/phase-contracts.md -->
+<!-- include: docs/spec/implementation-details.md -->
 <!-- include: docs/spec/internalization.md -->
 <!-- include: docs/spec/testing.md -->
